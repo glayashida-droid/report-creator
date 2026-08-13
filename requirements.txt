@@ -1,0 +1,6 @@
+PySide6
+python-docx
+pdfplumber
+openpyxl
+pandas
+pydantic
