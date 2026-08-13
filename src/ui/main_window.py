@@ -20,12 +20,15 @@ from application_parser import parse_application, prepare_excel_bytes
 from src.parsers.pdf_parser import QuotationParser
 from src.ui.leg_graph import LegGraphArea
 
+APP_VERSION = "1.0"
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Report Creator")
-        self.resize(1100, 750)
+        self.setWindowTitle(f"Report Creator---Ver{APP_VERSION}  Design by IKARUGA")
+        self.resize(1100, 620)
+        self.setMinimumSize(880, 480)
         self.state = ProjectState()
         self._project_path = None  # type: Optional[Path]
 
@@ -82,12 +85,15 @@ class MainWindow(QMainWindow):
 
         # 2.1 Project overview — all homepage fields
         info_group = QGroupBox("项目概况")
+        info_group.setObjectName("overviewGroup")
         info_layout = QVBoxLayout(info_group)
+        info_layout.setContentsMargins(10, 18, 10, 10)
+        info_layout.setSpacing(8)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setMinimumHeight(220)
+        scroll.setMinimumHeight(180)
         scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         form_host = QWidget()
@@ -100,87 +106,94 @@ class MainWindow(QMainWindow):
         self._info_placeholder.setObjectName("dimLabel")
         self.info_form.addRow(self._info_placeholder)
         scroll.setWidget(form_host)
-        info_layout.addWidget(scroll)
+        info_layout.addWidget(scroll, stretch=1)
 
-        date_layout = QVBoxLayout()
+        date_bar = QWidget()
+        date_bar.setObjectName("overviewDates")
+        date_bar.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        date_layout = QHBoxLayout(date_bar)
+        date_layout.setContentsMargins(0, 4, 0, 0)
+        date_layout.setSpacing(8)
 
-        def make_date_row(label_text):
-            row_l = QHBoxLayout()
+        def make_date_column(label_text):
+            col = QVBoxLayout()
+            col.setSpacing(2)
+            col.setContentsMargins(0, 0, 0, 0)
             lbl = QLabel(label_text)
+            lbl.setObjectName("dimLabel")
             date_edit = QDateEdit()
             date_edit.setCalendarPopup(True)
             date_edit.setDisplayFormat("yyyy-MM-dd")
             date_edit.setDate(QDate.currentDate())
             date_edit.lineEdit().setReadOnly(True)
-            row_l.addWidget(lbl)
-            row_l.addWidget(date_edit)
-            return row_l, date_edit
+            col.addWidget(lbl)
+            col.addWidget(date_edit)
+            return col, date_edit
 
-        row1, self.date_receive = make_date_row("接收日期:")
-        row2, self.date_start = make_date_row("检测开始:")
-        row3, self.date_end = make_date_row("检测结束:")
-        date_layout.addLayout(row1)
-        date_layout.addLayout(row2)
-        date_layout.addLayout(row3)
-        info_layout.addLayout(date_layout)
+        col1, self.date_receive = make_date_column("接收日期")
+        col2, self.date_start = make_date_column("检测开始")
+        col3, self.date_end = make_date_column("检测结束")
+        date_layout.addLayout(col1, stretch=1)
+        date_layout.addLayout(col2, stretch=1)
+        date_layout.addLayout(col3, stretch=1)
+        info_layout.addWidget(date_bar)
 
-        self.date_receive.dateChanged.connect(
-            lambda d: setattr(self.state, "sample_receive_date", d.toString("yyyy-MM-dd"))
-        )
-        self.date_start.dateChanged.connect(
-            lambda d: setattr(self.state, "test_start_date", d.toString("yyyy-MM-dd"))
-        )
-        self.date_end.dateChanged.connect(
-            lambda d: setattr(self.state, "test_end_date", d.toString("yyyy-MM-dd"))
-        )
-        self._sync_dates_to_state()
+        self._updating_dates = False
+        self.date_receive.dateChanged.connect(self._on_dates_changed)
+        self.date_start.dateChanged.connect(self._on_dates_changed)
+        self.date_end.dateChanged.connect(self._on_dates_changed)
+        self._on_dates_changed()
 
-        left_layout.addWidget(info_group, stretch=3)
+        left_layout.addWidget(info_group, stretch=2)
 
         # 2.2 Candidate pool — multi-column wrapping
         pool_group = QGroupBox("项目候选池 (从报价单提取)")
+        pool_group.setObjectName("candidatePool")
         pool_layout = QVBoxLayout(pool_group)
+        pool_layout.setContentsMargins(4, 6, 4, 4)
+        pool_layout.setSpacing(0)
         self.list_candidates = QListWidget()
         self.list_candidates.setFlow(QListView.LeftToRight)
         self.list_candidates.setWrapping(True)
         self.list_candidates.setResizeMode(QListView.Adjust)
         self.list_candidates.setMovement(QListView.Static)
-        self.list_candidates.setSpacing(4)
+        self.list_candidates.setSpacing(1)
         self.list_candidates.setWordWrap(True)
-        self.list_candidates.setGridSize(QSize(150, 28))
+        self.list_candidates.setGridSize(QSize(80, 24))
         # Force multi-column wrapping layout
         self.list_candidates.setViewMode(QListView.IconMode)
         self.list_candidates.setUniformItemSizes(True)
+        self.list_candidates.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         pool_layout.addWidget(self.list_candidates)
-        left_layout.addWidget(pool_group, stretch=2)
+        left_layout.addWidget(pool_group, stretch=1)
 
-        # 2.3 Export — target visible before generate
+        # 2.3 Export — compact 2-row: mode+target | generate
         export_panel = QGroupBox("导出报告")
+        export_panel.setObjectName("exportPanel")
+        export_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         export_layout = QVBoxLayout(export_panel)
+        export_layout.setContentsMargins(8, 6, 8, 6)
         export_layout.setSpacing(6)
 
-        mode_row = QHBoxLayout()
+        mode_target_row = QHBoxLayout()
+        mode_target_row.setSpacing(6)
         self.combo_export_mode = QComboBox()
         self.combo_export_mode.addItems(["导出全部 Leg", "导出单条 Leg", "导出单项试验"])
         self.combo_export_mode.currentIndexChanged.connect(self._on_export_mode_changed)
-        mode_row.addWidget(QLabel("导出模式:"))
-        mode_row.addWidget(self.combo_export_mode, stretch=1)
-        export_layout.addLayout(mode_row)
+        self.combo_export_mode.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.combo_export_mode.setMinimumWidth(72)
+        mode_target_row.addWidget(QLabel("导出模式:"))
+        mode_target_row.addWidget(self.combo_export_mode, stretch=1)
 
-        target_row = QHBoxLayout()
         self.lbl_export_target = QLabel("导出目标:")
         self.combo_export_target = QComboBox()
         self.combo_export_target.setEnabled(False)
         self.combo_export_target.setPlaceholderText("全部 Leg")
-        target_row.addWidget(self.lbl_export_target)
-        target_row.addWidget(self.combo_export_target, stretch=1)
-        export_layout.addLayout(target_row)
-
-        self.lbl_export_hint = QLabel("当前将导出: 全部 Leg")
-        self.lbl_export_hint.setWordWrap(True)
-        self.lbl_export_hint.setObjectName("hintLabel")
-        export_layout.addWidget(self.lbl_export_hint)
-        self.combo_export_target.currentTextChanged.connect(self._refresh_export_hint)
+        self.combo_export_target.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.combo_export_target.setMinimumWidth(72)
+        mode_target_row.addWidget(self.lbl_export_target)
+        mode_target_row.addWidget(self.combo_export_target, stretch=1)
+        export_layout.addLayout(mode_target_row)
 
         self.btn_export = QPushButton("一键生成报告")
         self.btn_export.setObjectName("primaryButton")
@@ -199,10 +212,36 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.leg_graph)
         splitter.addWidget(self.right_panel)
 
-        splitter.setSizes([320, 780])
+        # Left:right = 1:φ (golden ratio), locked on window resize
+        self._main_splitter = splitter
+        splitter.setChildrenCollapsible(False)
+        splitter.setStretchFactor(0, 1000)
+        splitter.setStretchFactor(1, 1618)
+        handle = splitter.handle(1)
+        if handle is not None:
+            handle.setEnabled(False)
+        self._apply_golden_split()
         main_layout.addWidget(splitter, stretch=1)
 
         self._on_export_mode_changed()
+
+    def _apply_golden_split(self):
+        splitter = getattr(self, "_main_splitter", None)
+        if splitter is None:
+            return
+        total = splitter.size().width()
+        if total <= 0:
+            total = max(self.width(), 1)
+        left = int(round(total / (1 + (1 + 5 ** 0.5) / 2)))
+        splitter.setSizes([max(left, 1), max(total - left, 1)])
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._apply_golden_split()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_golden_split()
 
     # ---------- path helpers ----------
 
@@ -264,41 +303,41 @@ class MainWindow(QMainWindow):
             return
         key_lbl = QLabel(f"{label}:")
         key_lbl.setObjectName("dimLabel")
+        key_lbl.setAlignment(Qt.AlignRight | Qt.AlignTop)
+
+        row_w = QWidget()
+        row_l = QHBoxLayout(row_w)
+        row_l.setContentsMargins(0, 0, 0, 0)
+        row_l.setSpacing(4)
         value_lbl = QLabel(val)
         value_lbl.setWordWrap(True)
         value_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.info_form.addRow(key_lbl, value_lbl)
+        btn = QPushButton("✕")
+        btn.setObjectName("fieldRemoveButton")
+        btn.setFixedSize(20, 20)
+        btn.setToolTip("移除此字段，生成报告时不再写入")
+        btn.clicked.connect(lambda _checked=False, k=label: self._exclude_overview_field(k))
+        row_l.addWidget(value_lbl, stretch=1)
+        row_l.addWidget(btn, 0, Qt.AlignTop)
+        self.info_form.addRow(key_lbl, row_w)
+
+    def _exclude_overview_field(self, key: str):
+        excluded = list(self.state.excluded_overview_keys or [])
+        if key not in excluded:
+            excluded.append(key)
+            self.state.excluded_overview_keys = excluded
+        self.refresh_overview_ui()
 
     def refresh_overview_ui(self):
         self._clear_info_form()
-        fields = dict(self.state.application_fields or {})
-
-        # Prefer structured applicant / title fields at top if present
-        ordered_head = []
-        for key, attr in (
-            ("申请公司", "applicant_name"),
-            ("申请公司地址", "applicant_address"),
-            ("报告抬头公司", "report_title_name"),
-            ("报告抬头地址", "report_title_address"),
-        ):
-            val = getattr(self.state, attr, "") or fields.pop(key, "")
-            if val:
-                ordered_head.append((key, val))
-
-        # sample_name convenience
-        if self.state.sample_name and "样品名称" not in fields:
-            fields = {"样品名称": self.state.sample_name, **fields}
-
-        if not ordered_head and not fields:
-            self.info_form.addRow(QLabel("未加载"))
-            return
-
-        for k, v in ordered_head:
-            self._add_info_row(k, v)
-        for k, v in fields.items():
-            if k in {"申请公司", "申请公司地址", "报告抬头公司", "报告抬头地址"}:
-                continue
-            self._add_info_row(k, v)
+        rows = list(self.state.iter_overview_fields())
+        if not rows:
+            hint = QLabel("未加载" if not self.state.application_fields else "暂无字段（已全部移除）")
+            hint.setObjectName("dimLabel")
+            self.info_form.addRow(hint)
+        else:
+            for k, v in rows:
+                self._add_info_row(k, v)
 
         self.lbl_project_id.setText(
             f"项目号: {self.state.project_id or '—'}  ·  {self.state.project_path or ''}"
@@ -313,8 +352,8 @@ class MainWindow(QMainWindow):
         # Widen grid cells a bit for longer names
         if items:
             longest = max(len(i) for i in items)
-            w = max(120, min(200, longest * 8))
-            self.list_candidates.setGridSize(QSize(w, 36))
+            w = max(72, min(148, longest * 13 + 18))
+            self.list_candidates.setGridSize(QSize(w, 24))
 
     # ---------- load ----------
 
@@ -335,10 +374,7 @@ class MainWindow(QMainWindow):
             self.state.project_path = str(project_path)
             self.state.project_id = project_id or self.state.project_id
 
-            self._apply_date_string(self.date_receive, self.state.sample_receive_date)
-            self._apply_date_string(self.date_start, self.state.test_start_date)
-            self._apply_date_string(self.date_end, self.state.test_end_date)
-            self._sync_dates_to_state()
+            self._apply_loaded_dates()
 
             # 旧存档可能没有 application_fields，补解析申请单首页字段
             if not self.state.application_fields:
@@ -456,6 +492,72 @@ class MainWindow(QMainWindow):
         parsed = QDate.fromString(date_str or "", "yyyy-MM-dd")
         date_edit.setDate(parsed if parsed.isValid() else QDate.currentDate())
 
+    def _apply_loaded_dates(self):
+        self._updating_dates = True
+        try:
+            self._apply_date_string(self.date_receive, self.state.sample_receive_date)
+            self._apply_date_string(self.date_start, self.state.test_start_date)
+            self._apply_date_string(self.date_end, self.state.test_end_date)
+        finally:
+            self._updating_dates = False
+        self._on_dates_changed()
+
+    def _on_dates_changed(self, *_args):
+        """receive ≤ start ≤ end."""
+        if getattr(self, "_updating_dates", False):
+            return
+        self._updating_dates = True
+        try:
+            recv = self.date_receive.date()
+            start = self.date_start.date()
+            end = self.date_end.date()
+            source = self.sender()
+
+            unbounded_lo = QDate(1000, 1, 1)
+            unbounded_hi = QDate(9999, 12, 31)
+            for widget in (self.date_receive, self.date_start, self.date_end):
+                widget.setMinimumDate(unbounded_lo)
+                widget.setMaximumDate(unbounded_hi)
+
+            if source is self.date_receive:
+                if recv > start:
+                    start = recv
+                    self.date_start.setDate(start)
+                if start > end:
+                    end = start
+                    self.date_end.setDate(end)
+            elif source is self.date_start:
+                if start < recv:
+                    start = recv
+                    self.date_start.setDate(start)
+                if start > end:
+                    end = start
+                    self.date_end.setDate(end)
+            elif source is self.date_end:
+                if end < recv:
+                    end = recv
+                    self.date_end.setDate(end)
+                if end < start:
+                    start = end
+                    if start < recv:
+                        start = recv
+                        end = recv
+                        self.date_end.setDate(end)
+                    self.date_start.setDate(start)
+            else:
+                if start < recv:
+                    start = recv
+                    self.date_start.setDate(start)
+                if end < start:
+                    end = start
+                    self.date_end.setDate(end)
+
+            self.date_start.setMinimumDate(recv)
+            self.date_end.setMinimumDate(start)
+            self._sync_dates_to_state()
+        finally:
+            self._updating_dates = False
+
     # ---------- export target UI ----------
 
     def _on_export_mode_changed(self):
@@ -496,17 +598,6 @@ class MainWindow(QMainWindow):
                 self.combo_export_target.setEnabled(False)
 
         self.combo_export_target.blockSignals(False)
-        self._refresh_export_hint()
-
-    def _refresh_export_hint(self):
-        mode = self.combo_export_mode.currentText()
-        target = self.combo_export_target.currentText()
-        if mode == "导出全部 Leg":
-            self.lbl_export_hint.setText("当前将导出: 全部 Leg")
-        elif mode == "导出单条 Leg":
-            self.lbl_export_hint.setText(f"当前将导出 Leg: {target}")
-        else:
-            self.lbl_export_hint.setText(f"当前将导出试验: {target}")
 
     # ---------- save / export ----------
 

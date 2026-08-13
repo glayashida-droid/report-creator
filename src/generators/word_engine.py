@@ -1,7 +1,7 @@
 import re
 from pathlib import Path
 from docx import Document
-from src.models.project_state import ProjectState, TestNode, TestLeg
+from src.models.project_state import ProjectState, TestNode, TestLeg, TestResult
 
 class WordGenerator:
     def __init__(self, template_path: str):
@@ -15,15 +15,7 @@ class WordGenerator:
         doc = Document(self.template_path)
         
         # 1. Replace Placeholders in paragraphs
-        placeholders = {
-            "{{委托方名称}}": state.applicant_name,
-            "{{委托方地址}}": state.applicant_address,
-            "{{样品名称}}": state.sample_name,
-            "{{样品接收日期}}": state.sample_receive_date,
-            "{{检测开始日期}}": state.test_start_date,
-            "{{检测结束日期}}": state.test_end_date,
-            # we can add more if needed
-        }
+        placeholders = self._build_placeholders(state)
         
         for p in doc.paragraphs:
             self._replace_text_in_paragraph(p, placeholders)
@@ -33,6 +25,8 @@ class WordGenerator:
                 for cell in row.cells:
                     for p in cell.paragraphs:
                         self._replace_text_in_paragraph(p, placeholders)
+
+        self._append_overview_table(doc, state)
                         
         # 2. Extract nodes to generate
         nodes_to_generate = []
@@ -62,6 +56,49 @@ class WordGenerator:
                 self._append_test_node(doc, node, idx, project_path)
                 
         doc.save(output_path)
+
+    def _build_placeholders(self, state: ProjectState):
+        visible = dict(state.iter_overview_fields())
+        placeholders = {
+            "{{委托方名称}}": visible.get("申请公司", ""),
+            "{{委托方地址}}": visible.get("申请公司地址", ""),
+            "{{样品名称}}": visible.get("样品名称", ""),
+            "{{样品接收日期}}": state.sample_receive_date or "",
+            "{{检测开始日期}}": state.test_start_date or "",
+            "{{检测结束日期}}": state.test_end_date or "",
+            "{{申请单号}}": visible.get("申请单号", ""),
+            "{{报告抬头公司}}": visible.get("报告抬头公司", ""),
+            "{{报告抬头地址}}": visible.get("报告抬头地址", ""),
+        }
+        for key, val in visible.items():
+            placeholders["{{%s}}" % key] = val
+        for key in state.excluded_overview_keys or []:
+            placeholders.setdefault("{{%s}}" % key, "")
+            if key == "申请公司":
+                placeholders["{{委托方名称}}"] = ""
+            elif key == "申请公司地址":
+                placeholders["{{委托方地址}}"] = ""
+            elif key == "样品名称":
+                placeholders["{{样品名称}}"] = ""
+        return placeholders
+
+    def _append_overview_table(self, doc, state: ProjectState):
+        rows = list(state.iter_overview_fields())
+        if not rows:
+            return
+        self._safe_add_heading(doc, "项目信息", level=1)
+        table = doc.add_table(rows=1, cols=2)
+        try:
+            table.style = "Table Grid"
+        except KeyError:
+            pass
+        hdr = table.rows[0].cells
+        hdr[0].text = "字段"
+        hdr[1].text = "内容"
+        for key, val in rows:
+            cells = table.add_row().cells
+            cells[0].text = key
+            cells[1].text = val
         
     def _replace_text_in_paragraph(self, paragraph, placeholders):
         """Simple text replacement in paragraph, taking runs into account is complex, 
@@ -93,10 +130,15 @@ class WordGenerator:
         doc.add_paragraph("环境温度: (23±2) ℃\n相对湿度: (50±5) %RH")
         
         self._safe_add_heading(doc, "2. 检测设备", level=3)
-        doc.add_paragraph(f"设备名称: {node.equipment_name or '/'}")
+        doc.add_paragraph(self._format_equipments(node))
         
         self._safe_add_heading(doc, "3. 检测方法", level=3)
-        doc.add_paragraph(f"标准号: {node.standard_id or '/'}")
+        std_lines = [f"标准号: {node.standard_id or '/'}"]
+        if getattr(node, "standard_chapter", None):
+            std_lines.append(f"章节号: {node.standard_chapter}")
+        if getattr(node, "standard_test_name", None):
+            std_lines.append(f"试验名称: {node.standard_test_name}")
+        doc.add_paragraph("\n".join(std_lines))
         
         self._safe_add_heading(doc, "4. 样品描述", level=3)
         # Assuming we just list the IDs
@@ -116,7 +158,7 @@ class WordGenerator:
         
         # Build results table
         if node.samples:
-            table = doc.add_table(rows=1, cols=2)
+            table = doc.add_table(rows=1, cols=3)
             # Default style that is almost always available
             try:
                 table.style = 'Table Grid'
@@ -125,14 +167,17 @@ class WordGenerator:
                 
             hdr_cells = table.rows[0].cells
             hdr_cells[0].text = '样品编号'
-            hdr_cells[1].text = '结果'
+            hdr_cells[1].text = '结果描述'
+            hdr_cells[2].text = '结果'
             
             all_pass = True
+            node_desc = getattr(node, "result_desc", None) or ""
             for sample in node.samples:
                 row_cells = table.add_row().cells
                 row_cells[0].text = sample.sample_id
-                row_cells[1].text = sample.result.value
-                if sample.result.value != "Pass":
+                row_cells[1].text = getattr(sample, "result_desc", None) or node_desc or "/"
+                row_cells[2].text = sample.result.value
+                if sample.result != TestResult.PASS:
                     all_pass = False
                     
             conclusion = "合格" if all_pass else "不合格"
@@ -145,6 +190,18 @@ class WordGenerator:
             from src.generators.photo_scraper import PhotoScraper
             scraper = PhotoScraper(project_path)
             scraper.add_photos_to_document(doc, node.test_name)
+
+    def _format_equipments(self, node: TestNode) -> str:
+        items = getattr(node, "equipments", None) or []
+        if items:
+            lines = []
+            for eq in items:
+                parts = [p for p in (eq.code, eq.name) if p]
+                if eq.model:
+                    parts.append(f"({eq.model})")
+                lines.append(" ".join(parts) if parts else "/")
+            return "\n".join(lines)
+        return f"设备名称: {node.equipment_name or '/'}"
             
     def _safe_add_heading(self, doc, text: str, level: int):
         try:

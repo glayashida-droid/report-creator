@@ -1,6 +1,6 @@
 import sys
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
-                               QLabel, QScrollArea, QComboBox, QFrame)
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton,
+                               QLabel, QScrollArea, QComboBox, QFrame, QSizePolicy)
 from PySide6.QtCore import Qt, Signal
 
 from src.models.project_state import TestLeg, TestNode
@@ -21,55 +21,81 @@ class TestNodeWidget(QFrame):
         self.setObjectName("testNodeCard")
         self.setFrameShape(QFrame.StyledPanel)
         self.setFrameShadow(QFrame.Plain)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         
         self.init_ui()
         
     def init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
-        
-        # Combo box to select test from pool
+        layout.setSpacing(6)
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(4)
+        grid.setVerticalSpacing(6)
+        grid.setColumnStretch(0, 1)
+
         self.combo = QComboBox()
+        self.combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.combo.addItem("请选择试验...")
         self.combo.addItems(self.candidate_pool)
-        
-        # Set current value if exists
         if self.node_data.test_name and self.node_data.test_name in self.candidate_pool:
             self.combo.setCurrentText(self.node_data.test_name)
-            
         self.combo.currentTextChanged.connect(self.on_test_changed)
-        layout.addWidget(self.combo)
-        
-        # Detail button (For TKT-6)
+        grid.addWidget(self.combo, 0, 0)
+
+        self.lbl_complete = QLabel("✓")
+        self.lbl_complete.setObjectName("nodeCompleteMark")
+        self.lbl_complete.setToolTip("标准、设备、结果均已填写")
+        self.lbl_complete.setAlignment(Qt.AlignCenter)
+        self.lbl_complete.setFixedWidth(16)
+        grid.addWidget(self.lbl_complete, 0, 1, Qt.AlignCenter)
+
         btn_layout = QHBoxLayout()
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(6)
+
         self.btn_detail = QPushButton("编辑明细")
+        self.btn_detail.setObjectName("nodeDetailButton")
+        self.btn_detail.setFixedHeight(28)
+        self.btn_detail.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_detail.clicked.connect(self.show_detail)
-        self.btn_delete = QPushButton("X")
-        self.btn_delete.setObjectName("accentButton")
-        self.btn_delete.setMaximumWidth(30)
+        self.btn_delete = QPushButton("✕")
+        self.btn_delete.setObjectName("nodeDeleteButton")
+        self.btn_delete.setFixedSize(28, 28)
+        self.btn_delete.setToolTip("删除该试验")
         self.btn_delete.clicked.connect(lambda: self.node_deleted.emit(self))
-        
-        btn_layout.addWidget(self.btn_detail)
+
+        btn_layout.addWidget(self.btn_detail, stretch=1)
         btn_layout.addWidget(self.btn_delete)
-        layout.addLayout(btn_layout)
-        
+        grid.addLayout(btn_layout, 1, 0)
+        layout.addLayout(grid)
+        self._refresh_complete_mark()
+
+    def _refresh_complete_mark(self):
+        self.lbl_complete.setVisible(self.node_data.is_detail_complete())
+
     def show_detail(self):
         if not self.db_loader:
             return
-            
+
         dialog = TestDetailDialog(
-            self.node_data, 
-            self.db_loader.load_standards(), 
-            self.db_loader.load_equipments(), 
+            self.node_data,
+            self.db_loader.load_standards(),
+            self.db_loader.load_equipments(),
             self
         )
         if dialog.exec():
+            self._refresh_complete_mark()
             self.node_updated.emit()
+
     def on_test_changed(self, text):
         if text != "请选择试验...":
             self.node_data.test_name = text
         else:
             self.node_data.test_name = ""
+        self._refresh_complete_mark()
         self.node_updated.emit()
 
 class LegWidget(QFrame):
@@ -86,33 +112,38 @@ class LegWidget(QFrame):
         self.setObjectName("legCard")
         self.setFrameShape(QFrame.StyledPanel)
         self.setFrameShadow(QFrame.Plain)
-        self.setMinimumWidth(200)
-        
+        self.setMinimumWidth(220)
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
+
         self.init_ui()
-        
+
     def init_ui(self):
         self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(10, 10, 10, 10)
+        self.layout.setSpacing(8)
         self.layout.setAlignment(Qt.AlignTop)
-        
-        # Header
+
         header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
         lbl_title = QLabel(f"<b>{self.leg_data.leg_name}</b>")
         btn_del = QPushButton("删除")
         btn_del.setObjectName("accentButton")
+        btn_del.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         btn_del.clicked.connect(lambda: self.leg_deleted.emit(self))
         header_layout.addWidget(lbl_title)
+        header_layout.addStretch()
         header_layout.addWidget(btn_del)
         self.layout.addLayout(header_layout)
-        
-        # Nodes area
+
         self.nodes_layout = QVBoxLayout()
+        self.nodes_layout.setContentsMargins(0, 0, 0, 0)
+        self.nodes_layout.setSpacing(6)
+        self.nodes_layout.setAlignment(Qt.AlignTop)
         self.layout.addLayout(self.nodes_layout)
-        
-        # Load existing nodes
+
         for node_data in self.leg_data.nodes:
             self.add_node_widget(node_data)
-            
-        # Add Node button
+
         self.btn_add_node = QPushButton("+ 添加试验")
         self.btn_add_node.clicked.connect(self.on_add_node)
         self.layout.addWidget(self.btn_add_node)
@@ -188,9 +219,13 @@ class LegGraphArea(QWidget):
         self.scroll_area.setWidgetResizable(True)
         
         self.scroll_content = QWidget()
+        self.scroll_content.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
         self.legs_layout = QHBoxLayout(self.scroll_content)
-        self.legs_layout.setAlignment(Qt.AlignLeft)
-        
+        self.legs_layout.setContentsMargins(8, 8, 8, 8)
+        self.legs_layout.setSpacing(12)
+        self.legs_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.legs_layout.addStretch(1)
+
         self.scroll_area.setWidget(self.scroll_content)
         main_layout.addWidget(self.scroll_area)
         
@@ -218,7 +253,8 @@ class LegGraphArea(QWidget):
         lw.leg_deleted.connect(self.on_leg_deleted)
         lw.leg_updated.connect(self.structure_changed.emit)
         self.leg_widgets.append(lw)
-        self.legs_layout.addWidget(lw)
+        insert_at = max(self.legs_layout.count() - 1, 0)
+        self.legs_layout.insertWidget(insert_at, lw, 0, Qt.AlignTop)
         
     def on_leg_deleted(self, lw: LegWidget):
         self.leg_widgets.remove(lw)

@@ -52,6 +52,63 @@ QGroupBox::title {{
     background-color: {BG_PANEL};
 }}
 
+QGroupBox#candidatePool {{
+    padding: 4px 4px 4px 4px;
+    margin-top: 12px;
+}}
+
+QGroupBox#candidatePool QListWidget {{
+    padding: 2px;
+}}
+
+QGroupBox#candidatePool QListWidget::item {{
+    padding: 1px 6px;
+    margin: 0px;
+    border-radius: 4px;
+}}
+
+QGroupBox#exportPanel {{
+    padding: 4px 6px 6px 6px;
+    margin-top: 12px;
+}}
+
+QGroupBox#detailGroup {{
+    padding: 0px;
+    margin-top: 14px;
+}}
+
+QGroupBox#overviewGroup {{
+    padding: 0px;
+    margin-top: 14px;
+}}
+
+QFrame#drawerSection {{
+    background-color: {BG_PANEL};
+    border: 1px solid {CYAN_DIM};
+    border-radius: 10px;
+}}
+
+QFrame#drawerHeader {{
+    background-color: transparent;
+    border: none;
+    border-radius: 10px;
+}}
+
+QFrame#drawerHeader:hover {{
+    background-color: {BG_HOVER};
+}}
+
+QLabel#drawerTitle, QLabel#drawerArrow {{
+    color: {CYAN};
+    font-weight: 600;
+    background: transparent;
+}}
+
+QWidget#drawerBody {{
+    background: transparent;
+    border: none;
+}}
+
 QFormLayout {{
     background: transparent;
 }}
@@ -93,6 +150,20 @@ QLineEdit:focus, QDateEdit:focus, QAbstractSpinBox:focus {{
 QLineEdit:disabled, QDateEdit:disabled {{
     color: {TEXT_DIM};
     border-color: {BORDER};
+}}
+
+QTextEdit {{
+    background-color: {BG_INPUT};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: 6px 8px;
+    selection-background-color: {MAGENTA};
+    selection-color: {BG};
+}}
+
+QTextEdit:focus {{
+    border: 1px solid {CYAN};
 }}
 
 QDateEdit::drop-down, QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {{
@@ -241,6 +312,57 @@ QPushButton#accentButton:hover {{
     border: 1px solid {MAGENTA};
 }}
 
+QPushButton#nodeDetailButton {{
+    padding: 0px 10px;
+    min-height: 22px;
+    max-height: 28px;
+    border-radius: 6px;
+    font-size: 12px;
+}}
+
+QPushButton#nodeDeleteButton {{
+    color: {CYAN};
+    background-color: {BG_INPUT};
+    border: 1px solid {MAGENTA};
+    border-radius: 6px;
+    padding: 0px;
+    font-size: 15px;
+    font-weight: 700;
+    min-height: 22px;
+    max-height: 28px;
+}}
+
+QLabel#nodeCompleteMark {{
+    background: transparent;
+    color: {CYAN};
+    font-size: 16px;
+    font-weight: 700;
+    padding: 0px;
+}}
+
+QPushButton#nodeDeleteButton:hover {{
+    color: {BG};
+    background-color: {MAGENTA};
+    border: 1px solid {CYAN};
+}}
+
+QPushButton#fieldRemoveButton {{
+    color: {CYAN};
+    background-color: {BG_INPUT};
+    border: 1px solid {MAGENTA};
+    border-radius: 4px;
+    padding: 0px;
+    font-size: 11px;
+    font-weight: 700;
+    min-height: 16px;
+}}
+
+QPushButton#fieldRemoveButton:hover {{
+    color: {BG};
+    background-color: {MAGENTA};
+    border: 1px solid {CYAN};
+}}
+
 /* ---- Lists / scroll areas ---- */
 QListWidget, QTableWidget, QTreeWidget {{
     background-color: {BG_INPUT};
@@ -365,11 +487,22 @@ QHeaderView::section {{
     background-color: {BG_PANEL};
     color: {CYAN};
     border: 1px solid {BORDER};
-    padding: 6px;
+    padding: 6px 8px;
+}}
+
+QComboBox#bulkResultCombo {{
+    background-color: {BG_INPUT};
+    color: {TEXT};
+    border: 1px solid {CYAN_DIM};
+    border-radius: 6px;
+    padding: 0px 6px;
+    min-height: 18px;
+    font-size: 12px;
 }}
 
 QTableWidget {{
     gridline-color: {BORDER};
+    alternate-background-color: {BG_PANEL};
 }}
 
 QTableWidget::item:selected {{
