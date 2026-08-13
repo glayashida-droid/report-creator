@@ -18,7 +18,9 @@ class TestNodeWidget(QFrame):
         self.candidate_pool = candidate_pool
         # Need reference to standards/equipments. We will get them from LegGraphArea -> LegWidget
         self.db_loader = None 
-        self.setFrameStyle(QFrame.StyledPanel | QFrame.Raised)
+        self.setObjectName("testNodeCard")
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setFrameShadow(QFrame.Plain)
         
         self.init_ui()
         
@@ -43,6 +45,7 @@ class TestNodeWidget(QFrame):
         self.btn_detail = QPushButton("编辑明细")
         self.btn_detail.clicked.connect(self.show_detail)
         self.btn_delete = QPushButton("X")
+        self.btn_delete.setObjectName("accentButton")
         self.btn_delete.setMaximumWidth(30)
         self.btn_delete.clicked.connect(lambda: self.node_deleted.emit(self))
         
@@ -80,7 +83,9 @@ class LegWidget(QFrame):
         self.candidate_pool = candidate_pool
         self.node_widgets = []
         
-        self.setFrameStyle(QFrame.Panel | QFrame.Sunken)
+        self.setObjectName("legCard")
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setFrameShadow(QFrame.Plain)
         self.setMinimumWidth(200)
         
         self.init_ui()
@@ -93,6 +98,7 @@ class LegWidget(QFrame):
         header_layout = QHBoxLayout()
         lbl_title = QLabel(f"<b>{self.leg_data.leg_name}</b>")
         btn_del = QPushButton("删除")
+        btn_del.setObjectName("accentButton")
         btn_del.clicked.connect(lambda: self.leg_deleted.emit(self))
         header_layout.addWidget(lbl_title)
         header_layout.addWidget(btn_del)
@@ -154,6 +160,8 @@ from src.parsers.db_loader import BaseDataLoader
 
 class LegGraphArea(QWidget):
     """The main scrollable area containing all Legs"""
+    structure_changed = Signal()
+
     def __init__(self, state_ref, parent=None):
         super().__init__(parent)
         self.state = state_ref
@@ -169,6 +177,7 @@ class LegGraphArea(QWidget):
         self.btn_add_leg = QPushButton("+ 添加 Leg")
         self.btn_add_leg.clicked.connect(self.add_leg)
         self.btn_save = QPushButton("保存状态")
+        self.btn_save.setObjectName("accentButton")
         toolbar.addWidget(self.btn_add_leg)
         toolbar.addStretch()
         toolbar.addWidget(self.btn_save)
@@ -195,16 +204,19 @@ class LegGraphArea(QWidget):
         # Load from state
         for leg_data in self.state.legs:
             self._add_leg_widget(leg_data)
+        self.structure_changed.emit()
             
     def add_leg(self):
         idx = len(self.state.legs) + 1
         leg_data = TestLeg(leg_id=f"L{idx}", leg_name=f"Leg {idx}")
         self.state.legs.append(leg_data)
         self._add_leg_widget(leg_data)
+        self.structure_changed.emit()
         
     def _add_leg_widget(self, leg_data):
         lw = LegWidget(leg_data, self.state.candidate_pool)
         lw.leg_deleted.connect(self.on_leg_deleted)
+        lw.leg_updated.connect(self.structure_changed.emit)
         self.leg_widgets.append(lw)
         self.legs_layout.addWidget(lw)
         
@@ -213,6 +225,7 @@ class LegGraphArea(QWidget):
         self.state.legs.remove(lw.leg_data)
         lw.setParent(None)
         lw.deleteLater()
+        self.structure_changed.emit()
         
     def notify_pool_changed(self):
         for lw in self.leg_widgets:

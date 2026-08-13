@@ -39,6 +39,14 @@ class WordGenerator:
         if not leg_filter or leg_filter == "ALL":
             for leg in state.legs:
                 nodes_to_generate.extend(leg.nodes)
+        elif leg_filter.startswith("TEST:"):
+            # Handle single test item filter
+            test_target = leg_filter.replace("TEST:", "")
+            for leg in state.legs:
+                for node in leg.nodes:
+                    if f"{leg.leg_name} - {node.test_name}" == test_target:
+                        nodes_to_generate.append(node)
+                        break
         else:
             for leg in state.legs:
                 if leg.leg_id == leg_filter:

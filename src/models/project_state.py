@@ -1,7 +1,7 @@
 import json
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 
 class TestResult(str, Enum):
@@ -31,12 +31,17 @@ class TestLeg(BaseModel):
 
 class ProjectState(BaseModel):
     project_id: str = ""
+    project_path: str = ""
     applicant_name: str = ""
     applicant_address: str = ""
+    report_title_name: str = ""
+    report_title_address: str = ""
     sample_name: str = ""
     sample_receive_date: str = ""
     test_start_date: str = ""
     test_end_date: str = ""
+    # 申请单首页全部字段（含主机厂、生产商等）
+    application_fields: Dict[str, str] = Field(default_factory=dict)
     
     candidate_pool: List[str] = Field(default_factory=list)
     legs: List[TestLeg] = Field(default_factory=list)

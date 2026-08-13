@@ -11,11 +11,35 @@ class TestDetailDialog(QDialog):
         self.standards = standards # List of dicts
         self.equipments = equipments # List of dicts
         
+        # Get project bounds if available
+        self.proj_start_date = None
+        self.proj_end_date = None
+        
+        p = self.parent()
+        while p and not hasattr(p, 'state'):
+            p = p.parent()
+        if p and hasattr(p, 'state'):
+            try:
+                if p.state.test_start_date:
+                    self.proj_start_date = QDate.fromString(p.state.test_start_date, "yyyy-MM-dd")
+                if p.state.test_end_date:
+                    self.proj_end_date = QDate.fromString(p.state.test_end_date, "yyyy-MM-dd")
+            except:
+                pass
+        
         self.setWindowTitle(f"编辑明细 - {node_data.test_name}")
         self.resize(600, 500)
         
         self.init_ui()
         self.load_data()
+
+    def _make_calendar_date_edit(self):
+        date_edit = QDateEdit()
+        date_edit.setCalendarPopup(True)
+        date_edit.setDisplayFormat("yyyy-MM-dd")
+        date_edit.setDate(QDate.currentDate())
+        date_edit.lineEdit().setReadOnly(True)
+        return date_edit
         
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -23,10 +47,8 @@ class TestDetailDialog(QDialog):
         # 1. Dates
         date_group = QGroupBox("日期设置")
         date_layout = QHBoxLayout(date_group)
-        self.date_start = QDateEdit()
-        self.date_start.setCalendarPopup(True)
-        self.date_end = QDateEdit()
-        self.date_end.setCalendarPopup(True)
+        self.date_start = self._make_calendar_date_edit()
+        self.date_end = self._make_calendar_date_edit()
         date_layout.addWidget(QLabel("开始日期:"))
         date_layout.addWidget(self.date_start)
         date_layout.addWidget(QLabel("结束日期:"))
@@ -132,6 +154,22 @@ class TestDetailDialog(QDialog):
             self.date_end.setDate(QDate.fromString(self.node_data.end_date, "yyyy-MM-dd"))
         else:
             self.date_end.setDate(QDate.currentDate())
+            
+        # Apply bounds if we have them
+        if self.proj_start_date and self.proj_start_date.isValid():
+            self.date_start.setMinimumDate(self.proj_start_date)
+            self.date_end.setMinimumDate(self.proj_start_date)
+        if self.proj_end_date and self.proj_end_date.isValid():
+            self.date_start.setMaximumDate(self.proj_end_date)
+            self.date_end.setMaximumDate(self.proj_end_date)
+            
+        # Apply bounds if we have them
+        if self.proj_start_date and self.proj_start_date.isValid():
+            self.date_start.setMinimumDate(self.proj_start_date)
+            self.date_end.setMinimumDate(self.proj_start_date)
+        if self.proj_end_date and self.proj_end_date.isValid():
+            self.date_start.setMaximumDate(self.proj_end_date)
+            self.date_end.setMaximumDate(self.proj_end_date)
             
         # Standards
         if self.node_data.standard_id:
