@@ -126,6 +126,10 @@ QLabel#hintLabel {{
     color: {CYAN};
 }}
 
+QLabel#errorLabel {{
+    color: {MAGENTA};
+}}
+
 /* ---- Line edits / date edits ---- */
 QLineEdit, QDateEdit, QAbstractSpinBox {{
     background-color: {BG_INPUT};
@@ -245,6 +249,13 @@ QComboBox::down-arrow {{
     margin-right: 8px;
 }}
 
+QComboBox QLineEdit {{
+    background-color: transparent;
+    border: none;
+    padding: 0px;
+    min-height: 18px;
+}}
+
 QComboBox QAbstractItemView {{
     background-color: {BG_PANEL};
     color: {TEXT};
@@ -361,6 +372,19 @@ QPushButton#fieldRemoveButton:hover {{
     color: {BG};
     background-color: {MAGENTA};
     border: 1px solid {CYAN};
+}}
+
+QPushButton#poolToggle {{
+    padding: 4px 8px;
+    min-height: 20px;
+    border-radius: 6px;
+    font-size: 12px;
+}}
+
+QPushButton#poolToggle:checked {{
+    background-color: rgba(0, 255, 255, 0.16);
+    border: 1px solid {CYAN};
+    color: {CYAN};
 }}
 
 /* ---- Lists / scroll areas ---- */

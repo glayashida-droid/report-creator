@@ -7,6 +7,27 @@ from src.models.project_state import TestLeg, TestNode
 
 from src.ui.test_detail_dialog import TestDetailDialog
 
+PLACEHOLDER_TEST = "请选择试验..."
+
+
+def fill_test_combo(combo: QComboBox, pool: list, current_test: str = ""):
+    combo.blockSignals(True)
+    combo.clear()
+    combo.addItem(PLACEHOLDER_TEST)
+    items = list(pool or [])
+    current = (current_test or "").strip()
+    if current and current not in items and current != PLACEHOLDER_TEST:
+        items.append(current)
+    combo.addItems(items)
+    if current:
+        combo.setCurrentText(current)
+        combo.setEditText(current)
+    else:
+        combo.setCurrentIndex(0)
+        combo.setEditText("")
+    combo.blockSignals(False)
+
+
 class TestNodeWidget(QFrame):
     """A single test node card inside a Leg"""
     node_updated = Signal()
@@ -38,11 +59,12 @@ class TestNodeWidget(QFrame):
 
         self.combo = QComboBox()
         self.combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.combo.addItem("请选择试验...")
-        self.combo.addItems(self.candidate_pool)
-        if self.node_data.test_name and self.node_data.test_name in self.candidate_pool:
-            self.combo.setCurrentText(self.node_data.test_name)
+        self.combo.setEditable(True)
+        self.combo.setInsertPolicy(QComboBox.NoInsert)
+        self.combo.lineEdit().setPlaceholderText(PLACEHOLDER_TEST)
+        fill_test_combo(self.combo, self.candidate_pool, self.node_data.test_name)
         self.combo.currentTextChanged.connect(self.on_test_changed)
+        self.combo.lineEdit().editingFinished.connect(self.on_test_edit_finished)
         grid.addWidget(self.combo, 0, 0)
 
         self.lbl_complete = QLabel("✓")
@@ -90,13 +112,25 @@ class TestNodeWidget(QFrame):
             self._refresh_complete_mark()
             self.node_updated.emit()
 
+    def _normalized_test_name(self, text: str) -> str:
+        name = (text or "").strip()
+        if name == PLACEHOLDER_TEST:
+            return ""
+        return name
+
     def on_test_changed(self, text):
-        if text != "请选择试验...":
-            self.node_data.test_name = text
-        else:
-            self.node_data.test_name = ""
+        name = self._normalized_test_name(text)
+        if self.node_data.test_name == name:
+            return
+        self.node_data.test_name = name
         self._refresh_complete_mark()
         self.node_updated.emit()
+
+    def on_test_edit_finished(self):
+        name = self._normalized_test_name(self.combo.currentText())
+        if self.combo.currentText() != name:
+            self.combo.setEditText(name)
+        self.on_test_changed(name)
 
 class LegWidget(QFrame):
     """A single Leg column containing multiple Test Nodes"""
@@ -178,14 +212,8 @@ class LegWidget(QFrame):
     def update_pool(self, new_pool: list):
         self.candidate_pool = new_pool
         for nw in self.node_widgets:
-            current_test = nw.node_data.test_name
-            nw.combo.blockSignals(True)
-            nw.combo.clear()
-            nw.combo.addItem("请选择试验...")
-            nw.combo.addItems(self.candidate_pool)
-            if current_test in self.candidate_pool:
-                nw.combo.setCurrentText(current_test)
-            nw.combo.blockSignals(False)
+            nw.candidate_pool = new_pool
+            fill_test_combo(nw.combo, new_pool, nw.node_data.test_name)
 
 from src.parsers.db_loader import BaseDataLoader
 
@@ -209,9 +237,15 @@ class LegGraphArea(QWidget):
         self.btn_add_leg.clicked.connect(self.add_leg)
         self.btn_save = QPushButton("保存状态")
         self.btn_save.setObjectName("accentButton")
+        self.btn_load_state = QPushButton("加载状态")
+        self.btn_save_template = QPushButton("保存为模板")
+        self.btn_import_template = QPushButton("导入模板")
         toolbar.addWidget(self.btn_add_leg)
         toolbar.addStretch()
         toolbar.addWidget(self.btn_save)
+        toolbar.addWidget(self.btn_load_state)
+        toolbar.addWidget(self.btn_save_template)
+        toolbar.addWidget(self.btn_import_template)
         main_layout.addLayout(toolbar)
         
         # Scroll Area for Legs
@@ -248,8 +282,13 @@ class LegGraphArea(QWidget):
         self._add_leg_widget(leg_data)
         self.structure_changed.emit()
         
+    def _picker_pool(self):
+        if hasattr(self.state, "combo_pool"):
+            return self.state.combo_pool()
+        return list(self.state.candidate_pool or [])
+
     def _add_leg_widget(self, leg_data):
-        lw = LegWidget(leg_data, self.state.candidate_pool)
+        lw = LegWidget(leg_data, self._picker_pool())
         lw.leg_deleted.connect(self.on_leg_deleted)
         lw.leg_updated.connect(self.structure_changed.emit)
         self.leg_widgets.append(lw)
@@ -264,5 +303,6 @@ class LegGraphArea(QWidget):
         self.structure_changed.emit()
         
     def notify_pool_changed(self):
+        pool = self._picker_pool()
         for lw in self.leg_widgets:
-            lw.update_pool(self.state.candidate_pool)
+            lw.update_pool(pool)

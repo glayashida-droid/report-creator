@@ -73,6 +73,7 @@ class TestLeg(BaseModel):
 
 class ProjectState(BaseModel):
     project_id: str = ""
+    source_path: str = ""
     project_path: str = ""
     applicant_name: str = ""
     applicant_address: str = ""
@@ -88,7 +89,24 @@ class ProjectState(BaseModel):
     excluded_overview_keys: List[str] = Field(default_factory=list)
     
     candidate_pool: List[str] = Field(default_factory=list)
+    template_pool: List[str] = Field(default_factory=list)
+    last_leg_template_name: str = ""
     legs: List[TestLeg] = Field(default_factory=list)
+
+    def combo_pool(self, extra: str = "") -> List[str]:
+        """Dropdown items: quotation pool then template pool, exact-string unique."""
+        seen = set()
+        out: List[str] = []
+        for name in list(self.candidate_pool or []) + list(self.template_pool or []):
+            text = (name or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            out.append(text)
+        extra_text = (extra or "").strip()
+        if extra_text and extra_text not in seen:
+            out.append(extra_text)
+        return out
     
     @classmethod
     def load_from_file(cls, filepath: str) -> "ProjectState":
