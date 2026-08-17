@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from src.io.project_mirror import default_data_root
-from src.models.project_state import ProjectState, TestLeg, TestNode
+from src.models.project_state import ProjectState, TestLeg, TestNode, TestStandard
 
 _INVALID_CHARS = re.compile(r'[<>:"/\\|?*]')
 
@@ -47,6 +47,7 @@ def unique_test_names(legs: List[TestLeg]) -> List[str]:
 
 
 def node_for_template(node: TestNode) -> TestNode:
+    standards = [TestStandard(**item.model_dump()) for item in (node.standards or [])]
     return TestNode(
         test_name=node.test_name or "",
         standard_id=node.standard_id,
@@ -55,6 +56,7 @@ def node_for_template(node: TestNode) -> TestNode:
         standard_desc=node.standard_desc,
         result_desc=node.result_desc,
         evaluation_req=node.evaluation_req,
+        standards=standards,
     )
 
 

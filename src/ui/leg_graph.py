@@ -1,6 +1,6 @@
 import sys
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton,
-                               QLabel, QScrollArea, QComboBox, QFrame, QSizePolicy)
+                               QLabel, QScrollArea, QComboBox, QFrame, QSizePolicy, QMessageBox)
 from PySide6.QtCore import Qt, Signal
 
 from src.models.project_state import TestLeg, TestNode
@@ -33,12 +33,11 @@ class TestNodeWidget(QFrame):
     node_updated = Signal()
     node_deleted = Signal(object) # passes self
     
-    def __init__(self, node_data: TestNode, candidate_pool: list, parent=None):
+    def __init__(self, node_data: TestNode, candidate_pool: list, parent=None, db_loader=None):
         super().__init__(parent)
         self.node_data = node_data
         self.candidate_pool = candidate_pool
-        # Need reference to standards/equipments. We will get them from LegGraphArea -> LegWidget
-        self.db_loader = None 
+        self.db_loader = db_loader
         self.setObjectName("testNodeCard")
         self.setFrameShape(QFrame.StyledPanel)
         self.setFrameShadow(QFrame.Plain)
@@ -100,6 +99,7 @@ class TestNodeWidget(QFrame):
 
     def show_detail(self):
         if not self.db_loader:
+            QMessageBox.warning(self, "提示", "标准库尚未就绪，无法编辑明细")
             return
 
         dialog = TestDetailDialog(
@@ -137,10 +137,11 @@ class LegWidget(QFrame):
     leg_updated = Signal()
     leg_deleted = Signal(object)
     
-    def __init__(self, leg_data: TestLeg, candidate_pool: list, parent=None):
+    def __init__(self, leg_data: TestLeg, candidate_pool: list, parent=None, db_loader=None):
         super().__init__(parent)
         self.leg_data = leg_data
         self.candidate_pool = candidate_pool
+        self.db_loader = db_loader
         self.node_widgets = []
         
         self.setObjectName("legCard")
@@ -183,14 +184,7 @@ class LegWidget(QFrame):
         self.layout.addWidget(self.btn_add_node)
         
     def add_node_widget(self, node_data: TestNode):
-        nw = TestNodeWidget(node_data, self.candidate_pool)
-        # Pass db_loader down from parent
-        p = self.parent()
-        while p and not hasattr(p, 'db_loader'):
-            p = p.parent()
-        if p and hasattr(p, 'db_loader'):
-            nw.db_loader = p.db_loader
-            
+        nw = TestNodeWidget(node_data, self.candidate_pool, db_loader=self.db_loader)
         nw.node_updated.connect(self.leg_updated)
         nw.node_deleted.connect(self.on_node_deleted)
         self.node_widgets.append(nw)
@@ -235,9 +229,9 @@ class LegGraphArea(QWidget):
         toolbar = QHBoxLayout()
         self.btn_add_leg = QPushButton("+ 添加 Leg")
         self.btn_add_leg.clicked.connect(self.add_leg)
-        self.btn_save = QPushButton("保存状态")
+        self.btn_save = QPushButton("保存项目")
         self.btn_save.setObjectName("accentButton")
-        self.btn_load_state = QPushButton("加载状态")
+        self.btn_load_state = QPushButton("加载项目")
         self.btn_save_template = QPushButton("保存为模板")
         self.btn_import_template = QPushButton("导入模板")
         toolbar.addWidget(self.btn_add_leg)
@@ -288,7 +282,7 @@ class LegGraphArea(QWidget):
         return list(self.state.candidate_pool or [])
 
     def _add_leg_widget(self, leg_data):
-        lw = LegWidget(leg_data, self._picker_pool())
+        lw = LegWidget(leg_data, self._picker_pool(), db_loader=self.db_loader)
         lw.leg_deleted.connect(self.on_leg_deleted)
         lw.leg_updated.connect(self.structure_changed.emit)
         self.leg_widgets.append(lw)

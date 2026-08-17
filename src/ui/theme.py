@@ -57,14 +57,24 @@ QGroupBox#candidatePool {{
     margin-top: 12px;
 }}
 
-QGroupBox#candidatePool QListWidget {{
+QGroupBox#candidatePool QScrollArea#candidatePoolList {{
+    background-color: {BG_INPUT};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
     padding: 2px;
 }}
 
-QGroupBox#candidatePool QListWidget::item {{
-    padding: 1px 6px;
-    margin: 0px;
-    border-radius: 4px;
+QGroupBox#candidatePool QScrollArea#candidatePoolList > QWidget,
+QGroupBox#candidatePool QWidget#candidatePoolHost {{
+    background-color: {BG_INPUT};
+}}
+
+QLabel#poolChip {{
+    background-color: {BG_PANEL};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    padding: 1px 8px;
 }}
 
 QGroupBox#exportPanel {{
@@ -128,6 +138,16 @@ QLabel#hintLabel {{
 
 QLabel#errorLabel {{
     color: {MAGENTA};
+}}
+
+QLabel#expiredFollowTip {{
+    background-color: #1A1014;
+    color: #FF6B6B;
+    border: 1px solid #FF5555;
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 12px;
+    font-weight: 600;
 }}
 
 /* ---- Line edits / date edits ---- */
@@ -372,6 +392,26 @@ QPushButton#fieldRemoveButton:hover {{
     color: {BG};
     background-color: {MAGENTA};
     border: 1px solid {CYAN};
+}}
+
+QPushButton#headerClearButton {{
+    background-color: transparent;
+    color: {TEXT_DIM};
+    border: none;
+    border-radius: 4px;
+    padding: 0px;
+    min-height: 14px;
+    max-height: 20px;
+    min-width: 14px;
+    max-width: 20px;
+    font-size: 12px;
+    font-weight: 700;
+}}
+
+QPushButton#headerClearButton:hover {{
+    color: {MAGENTA};
+    background-color: rgba(255, 0, 255, 0.16);
+    border: none;
 }}
 
 QPushButton#poolToggle {{

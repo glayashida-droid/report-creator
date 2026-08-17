@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 class LoadStateDialog(QDialog):
     def __init__(self, projects, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("加载状态")
+        self.setWindowTitle("加载项目")
         self.resize(560, 340)
 
         layout = QVBoxLayout(self)

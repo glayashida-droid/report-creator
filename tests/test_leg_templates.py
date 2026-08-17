@@ -19,6 +19,7 @@ from src.models.project_state import (
     TestNode,
     TestResult,
     TestSample,
+    TestStandard,
 )
 
 
@@ -36,6 +37,16 @@ def _sample_legs():
                     standard_desc="随机振动条件",
                     result_desc="功能正常",
                     evaluation_req="无损坏",
+                    standards=[
+                        TestStandard(
+                            standard_id="VW 80000",
+                            chapter="4.1",
+                            test_name="随机振动",
+                            standard_desc="随机振动条件",
+                            result_desc="功能正常",
+                            evaluation_req="无损坏",
+                        )
+                    ],
                     equipment_name="振动台",
                     equipments=[TestEquipment(name="振动台", code="EQ-1")],
                     start_date="2026-08-01",
@@ -75,6 +86,7 @@ def test_save_strips_project_fields_and_keeps_standards():
         assert node["standard_desc"] == "随机振动条件"
         assert node["result_desc"] == "功能正常"
         assert node["evaluation_req"] == "无损坏"
+        assert node["standards"][0]["result_desc"] == "功能正常"
         assert not node.get("equipment_name")
         assert node.get("equipments") == []
         assert not node.get("start_date")
@@ -116,6 +128,7 @@ def test_import_does_not_mutate_quotation_pool_or_rewrite_names():
         assert unique_test_names(state.legs) == ["随机振动", "绝缘电阻"]
         assert state.legs[0].nodes[0].test_name == "随机振动"
         assert state.legs[0].nodes[0].standard_id == "VW 80000"
+        assert state.legs[0].nodes[0].standards[0].result_desc == "功能正常"
         assert not state.legs[0].nodes[0].equipment_name
         assert state.legs[0].nodes[0].samples == []
         assert state.last_leg_template_name == "宇通-电性能"

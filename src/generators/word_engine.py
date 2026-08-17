@@ -133,63 +133,74 @@ class WordGenerator:
         doc.add_paragraph(self._format_equipments(node))
         
         self._safe_add_heading(doc, "3. 检测方法", level=3)
-        std_lines = [f"标准号: {node.standard_id or '/'}"]
-        if getattr(node, "standard_chapter", None):
-            std_lines.append(f"章节号: {node.standard_chapter}")
-        if getattr(node, "standard_test_name", None):
-            std_lines.append(f"试验名称: {node.standard_test_name}")
-        doc.add_paragraph("\n".join(std_lines))
+        doc.add_paragraph(node.joined_test_method() or "/")
         
         self._safe_add_heading(doc, "4. 样品描述", level=3)
-        # Assuming we just list the IDs
         s_ids = [s.sample_id for s in node.samples if s.sample_id]
         doc.add_paragraph(f"样品编号: {', '.join(s_ids) if s_ids else '/'}")
         
         self._safe_add_heading(doc, "5. 检测条件", level=3)
-        doc.add_paragraph(node.standard_desc or "/")
+        doc.add_paragraph(node.standard_desc or node.joined_standard_desc() or "/")
         
         self._safe_add_heading(doc, "6. 数量", level=3)
         doc.add_paragraph(f"{len(node.samples)} pcs")
         
         self._safe_add_heading(doc, "7. 评判要求", level=3)
-        doc.add_paragraph(node.evaluation_req or "/")
+        doc.add_paragraph(node.evaluation_req or node.joined_evaluation_req() or "/")
         
         self._safe_add_heading(doc, "8. 检测结果", level=3)
-        
-        # Build results table
-        if node.samples:
-            table = doc.add_table(rows=1, cols=3)
-            # Default style that is almost always available
-            try:
-                table.style = 'Table Grid'
-            except KeyError:
-                pass # skip if template doesn't have it
-                
-            hdr_cells = table.rows[0].cells
-            hdr_cells[0].text = '样品编号'
-            hdr_cells[1].text = '结果描述'
-            hdr_cells[2].text = '结果'
-            
-            all_pass = True
-            node_desc = getattr(node, "result_desc", None) or ""
-            for sample in node.samples:
-                row_cells = table.add_row().cells
-                row_cells[0].text = sample.sample_id
-                row_cells[1].text = getattr(sample, "result_desc", None) or node_desc or "/"
-                row_cells[2].text = sample.result.value
-                if sample.result != TestResult.PASS:
-                    all_pass = False
-                    
-            conclusion = "合格" if all_pass else "不合格"
-            doc.add_paragraph(f"\n结论: {conclusion}")
-        else:
-            doc.add_paragraph("无结果记录")
+        self._append_result_desc_table(doc, node)
+        self._append_sample_result_table(doc, node)
             
         # 10. Test Photos
         if project_path and node.test_name:
             from src.generators.photo_scraper import PhotoScraper
             scraper = PhotoScraper(project_path)
             scraper.add_photos_to_document(doc, node.test_name)
+
+    def _style_table(self, table):
+        try:
+            table.style = "Table Grid"
+        except KeyError:
+            pass
+
+    def _append_result_desc_table(self, doc, node: TestNode):
+        stds = node.resolved_standards()
+        if not stds:
+            doc.add_paragraph("无结果描述")
+            return
+        table = doc.add_table(rows=1, cols=4)
+        self._style_table(table)
+        hdr = table.rows[0].cells
+        hdr[0].text = "标准号"
+        hdr[1].text = "章节号"
+        hdr[2].text = "试验名称"
+        hdr[3].text = "结果描述"
+        for std in stds:
+            cells = table.add_row().cells
+            cells[0].text = std.standard_id or "/"
+            cells[1].text = std.chapter or "/"
+            cells[2].text = std.test_name or "/"
+            cells[3].text = std.result_desc or "/"
+
+    def _append_sample_result_table(self, doc, node: TestNode):
+        if not node.samples:
+            doc.add_paragraph("无结果记录")
+            return
+        table = doc.add_table(rows=1, cols=2)
+        self._style_table(table)
+        hdr = table.rows[0].cells
+        hdr[0].text = "样品编号"
+        hdr[1].text = "结果"
+        all_pass = True
+        for sample in node.samples:
+            cells = table.add_row().cells
+            cells[0].text = sample.sample_id
+            cells[1].text = sample.result.value
+            if sample.result != TestResult.PASS:
+                all_pass = False
+        conclusion = "合格" if all_pass else "不合格"
+        doc.add_paragraph(f"\n结论: {conclusion}")
 
     def _format_equipments(self, node: TestNode) -> str:
         items = getattr(node, "equipments", None) or []

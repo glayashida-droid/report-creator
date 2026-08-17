@@ -35,6 +35,43 @@ class TestEquipment(BaseModel):
     code: str = ""
     model: str = ""
 
+
+class TestStandard(BaseModel):
+    """One library row, stored in the order the user checked it."""
+    standard_id: str = ""
+    chapter: str = ""
+    test_name: str = ""
+    standard_desc: str = ""
+    result_desc: str = ""
+    evaluation_req: str = ""
+
+    def identity_key(self) -> tuple:
+        return (self.standard_id or "", self.chapter or "", self.test_name or "")
+
+    def label(self) -> str:
+        return " / ".join(p for p in (self.standard_id, self.chapter, self.test_name) if p)
+
+    def ref_label(self) -> str:
+        return " / ".join(p for p in (self.standard_id, self.chapter) if p)
+
+    def condition_title(self) -> str:
+        bits = []
+        if self.standard_id:
+            bits.append(self.standard_id)
+        if self.chapter:
+            bits.append(f"章节号 {self.chapter}")
+        if self.test_name:
+            bits.append(self.test_name)
+        return "，".join(bits) or "未命名标准"
+
+    def method_block(self) -> str:
+        return self.ref_label()
+
+
+def _join_blocks(parts) -> str:
+    return "\n\n".join(p.strip() for p in parts if p and str(p).strip())
+
+
 class TestNode(BaseModel):
     test_name: str
     standard_id: Optional[str] = None
@@ -43,6 +80,7 @@ class TestNode(BaseModel):
     standard_desc: Optional[str] = None
     result_desc: Optional[str] = None
     evaluation_req: Optional[str] = None
+    standards: List[TestStandard] = Field(default_factory=list)
     equipment_name: Optional[str] = None
     equipments: List[TestEquipment] = Field(default_factory=list)
     start_date: Optional[str] = None
@@ -53,9 +91,66 @@ class TestNode(BaseModel):
     def _has_text(value) -> bool:
         return bool(value and str(value).strip())
 
+    def resolved_standards(self) -> List[TestStandard]:
+        """Checked standards in selection order; falls back to legacy scalar fields."""
+        if self.standards:
+            return list(self.standards)
+        if any(
+            self._has_text(v)
+            for v in (
+                self.standard_id,
+                self.standard_chapter,
+                self.standard_test_name,
+                self.standard_desc,
+                self.result_desc,
+                self.evaluation_req,
+            )
+        ):
+            return [
+                TestStandard(
+                    standard_id=self.standard_id or "",
+                    chapter=self.standard_chapter or "",
+                    test_name=self.standard_test_name or "",
+                    standard_desc=self.standard_desc or "",
+                    result_desc=self.result_desc or "",
+                    evaluation_req=self.evaluation_req or "",
+                )
+            ]
+        return []
+
+    def joined_test_method(self) -> str:
+        return "；".join(s.ref_label() for s in self.resolved_standards() if s.ref_label())
+
+    def joined_standard_desc(self) -> str:
+        return _join_blocks(s.standard_desc for s in self.resolved_standards())
+
+    def joined_evaluation_req(self) -> str:
+        return _join_blocks(s.evaluation_req for s in self.resolved_standards())
+
+    def apply_standards(self, picked: List[TestStandard]) -> None:
+        """Persist selection order. Concatenate method/conditions/eval; never smash result_desc."""
+        self.standards = list(picked or [])
+        if not self.standards:
+            self.standard_id = None
+            self.standard_chapter = None
+            self.standard_test_name = None
+            self.standard_desc = None
+            self.result_desc = None
+            self.evaluation_req = None
+            return
+        self.standard_id = _join_blocks(s.standard_id for s in self.standards) or None
+        self.standard_chapter = _join_blocks(s.chapter for s in self.standards) or None
+        self.standard_test_name = _join_blocks(s.test_name for s in self.standards) or None
+        self.standard_desc = self.joined_standard_desc() or None
+        self.evaluation_req = self.joined_evaluation_req() or None
+        if len(self.standards) == 1:
+            self.result_desc = self.standards[0].result_desc or None
+        else:
+            self.result_desc = None
+
     def is_detail_complete(self) -> bool:
         """True when standard, equipment, and sample results are all filled."""
-        has_standard = any(
+        has_standard = bool(self.resolved_standards()) or any(
             self._has_text(v)
             for v in (self.standard_id, self.standard_chapter, self.standard_test_name)
         )

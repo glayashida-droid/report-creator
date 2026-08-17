@@ -7,11 +7,11 @@ from urllib.parse import unquote, urlparse
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QListWidget, QListView, QGroupBox, QSplitter,
-    QComboBox, QMessageBox, QDateEdit, QFileDialog, QFormLayout, QScrollArea,
-    QSizePolicy, QFrame, QInputDialog, QButtonGroup,
+    QLineEdit, QPushButton, QGroupBox, QSplitter, QComboBox, QMessageBox,
+    QDateEdit, QFileDialog, QFormLayout, QScrollArea, QSizePolicy, QFrame,
+    QInputDialog, QButtonGroup,
 )
-from PySide6.QtCore import Qt, QDate, QSize, QThread, Signal
+from PySide6.QtCore import Qt, QDate, QThread, Signal
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
@@ -30,6 +30,7 @@ from src.io.leg_templates import (
 from src.ui.leg_graph import LegGraphArea
 from src.ui.load_state_dialog import LoadStateDialog
 from src.ui.leg_template_dialog import ImportTemplateDialog
+from src.ui.candidate_pool import CandidatePoolList
 
 
 class MirrorWorker(QThread):
@@ -54,7 +55,7 @@ class MirrorWorker(QThread):
             self.failed.emit(self._generation, str(e))
 
 
-APP_VERSION = "1.0"
+APP_VERSION = "1.1.1"
 
 
 class MainWindow(QMainWindow):
@@ -234,18 +235,7 @@ class MainWindow(QMainWindow):
         toggle_row.addWidget(self.btn_pool_template, stretch=1)
         pool_layout.addLayout(toggle_row)
 
-        self.list_candidates = QListWidget()
-        self.list_candidates.setFlow(QListView.LeftToRight)
-        self.list_candidates.setWrapping(True)
-        self.list_candidates.setResizeMode(QListView.Adjust)
-        self.list_candidates.setMovement(QListView.Static)
-        self.list_candidates.setSpacing(1)
-        self.list_candidates.setWordWrap(True)
-        self.list_candidates.setGridSize(QSize(80, 24))
-        # Force multi-column wrapping layout
-        self.list_candidates.setViewMode(QListView.IconMode)
-        self.list_candidates.setUniformItemSizes(True)
-        self.list_candidates.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.list_candidates = CandidatePoolList()
         pool_layout.addWidget(self.list_candidates)
         left_layout.addWidget(pool_group, stretch=1)
 
@@ -323,6 +313,7 @@ class MainWindow(QMainWindow):
     def showEvent(self, event):
         super().showEvent(event)
         self._apply_golden_split()
+        self.list_candidates.fit_grid()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -440,12 +431,7 @@ class MainWindow(QMainWindow):
         self.lbl_project_id.style().polish(self.lbl_project_id)
 
     def _fill_candidates(self, items: list):
-        self.list_candidates.clear()
-        self.list_candidates.addItems(items)
-        if items:
-            longest = max(len(i) for i in items)
-            w = max(72, min(148, longest * 13 + 18))
-            self.list_candidates.setGridSize(QSize(w, 24))
+        self.list_candidates.set_items(items)
 
     def _refresh_pool_list(self, *_args):
         if self.btn_pool_template.isChecked():
@@ -545,7 +531,7 @@ class MainWindow(QMainWindow):
                 self.leg_graph.state = self.state
                 self.leg_graph.notify_pool_changed()
             except Exception as e:
-                self.list_candidates.addItem(f"解析报价单失败: {e}")
+                self.list_candidates.set_items([f"解析报价单失败: {e}"])
 
         self.lbl_project_id.setText(f"项目号: {self.state.project_id}")
         self._on_export_mode_changed()
@@ -767,14 +753,14 @@ class MainWindow(QMainWindow):
         save_path = self._local_path / "project_state.json"
         self.state.save_to_file(str(save_path))
         self._is_dirty = False
-        QMessageBox.information(self, "已保存", f"状态已保存至:\n{save_path}")
+        QMessageBox.information(self, "已保存", f"项目已保存至:\n{save_path}")
 
     def load_saved_state(self):
         if not self._confirm_discard_if_dirty():
             return
         projects = list_saved_projects()
         if not projects:
-            QMessageBox.information(self, "加载状态", "暂无已保存的项目")
+            QMessageBox.information(self, "加载项目", "暂无已保存的项目")
             return
         dialog = LoadStateDialog(projects, self)
         if not dialog.exec():
