@@ -114,6 +114,63 @@ QLabel#drawerTitle, QLabel#drawerArrow {{
     background: transparent;
 }}
 
+QLabel#stdImageLink {{
+    color: {CYAN};
+    font-weight: 600;
+    text-decoration: underline;
+    padding: 0 2px;
+    background: transparent;
+}}
+
+QLabel#stdImageLink:hover {{
+    color: {TEXT};
+}}
+
+QWidget#stdImageHost {{
+    background: transparent;
+}}
+
+QLabel#stdImagePopup {{
+    background-color: {BG};
+    border: 1px solid {CYAN};
+    border-radius: 8px;
+    padding: 8px;
+}}
+
+QWidget#drawerAccessory {{
+    background: transparent;
+    border: none;
+}}
+
+QLabel#keyParamLabel {{
+    color: {CYAN};
+    font-weight: 600;
+    background: transparent;
+}}
+
+QLabel#keyParamConfirmed {{
+    color: {CYAN};
+    background: transparent;
+}}
+
+QCheckBox#keyParamCheck {{
+    background: transparent;
+    spacing: 4px;
+}}
+
+QCheckBox#keyParamCheck::indicator {{
+    width: 16px;
+    height: 16px;
+    border: 1px solid {CYAN_DIM};
+    border-radius: 3px;
+    background-color: {BG_INPUT};
+}}
+
+QCheckBox#keyParamCheck::indicator:checked {{
+    background-color: {CYAN};
+    border: 1px solid {CYAN};
+}}
+
 QWidget#drawerBody {{
     background: transparent;
     border: none;

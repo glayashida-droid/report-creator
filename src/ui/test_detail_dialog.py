@@ -6,11 +6,12 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QDateEdit, QGroupBox, QMessageBox,
     QTextEdit, QSizePolicy, QAbstractItemView, QScrollArea, QFrame, QWidget,
-    QStyledItemDelegate, QStyle, QStyleOptionViewItem,
+    QStyledItemDelegate, QStyle, QStyleOptionViewItem, QCheckBox,
 )
 from PySide6.QtCore import Qt, QDate, Signal, QTimer, QEvent, QPoint
-from PySide6.QtGui import QColor, QCursor
+from PySide6.QtGui import QColor, QCursor, QPixmap
 from src.models.project_state import TestNode, TestSample, TestResult, TestEquipment, TestStandard
+from src.parsers.key_params import KeyParamReplaceError, apply_key_params, parse_key_params
 
 _EQ_EXPIRED_ROLE = Qt.UserRole + 1
 _EXPIRED_RED = QColor("#FF5555")
@@ -175,14 +176,95 @@ class ElidedLabel(QLabel):
         super().setText(metrics.elidedText(self._full, Qt.ElideRight, max(self.width(), 1)))
 
 
+class StdImagePopup(QLabel):
+    """Frameless enlarged image; click to dismiss."""
+
+    def __init__(self, pixmap, parent=None):
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint)
+        self.setObjectName("stdImagePopup")
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setPixmap(pixmap)
+        self.adjustSize()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.close()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class StdImageLink(QLabel):
+    """Header chip that toggles an enlarged preview of a standard-library image."""
+
+    def __init__(self, text, image_bytes, parent=None):
+        super().__init__(text, parent)
+        self._bytes = image_bytes
+        self._popup = None
+        self.setObjectName("stdImageLink")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("点击放大，再次点击缩回")
+        self.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.setAttribute(Qt.WA_Hover, True)
+        self.setWordWrap(False)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.toggle_preview()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def toggle_preview(self):
+        if self._popup is not None:
+            self._close_popup()
+            return
+        pix = QPixmap()
+        if not pix.loadFromData(self._bytes) or pix.isNull():
+            return
+        host = self.window()
+        max_w = max(int((host.width() if host else 800) * 0.75), 240)
+        max_h = max(int((host.height() if host else 600) * 0.75), 180)
+        if pix.width() > max_w or pix.height() > max_h:
+            pix = pix.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        popup = StdImagePopup(pix, host)
+        popup.destroyed.connect(self._on_popup_destroyed)
+        self._popup = popup
+        if host is not None:
+            top_left = host.mapToGlobal(host.rect().center()) - popup.rect().center()
+            popup.move(top_left)
+        popup.show()
+        popup.raise_()
+
+    def _on_popup_destroyed(self, *_args):
+        self._popup = None
+
+    def _close_popup(self):
+        popup = self._popup
+        self._popup = None
+        if popup is not None:
+            popup.close()
+
+    def hideEvent(self, event):
+        self._close_popup()
+        super().hideEvent(event)
+
+
+def _image_link_text(index, total):
+    return "图片" if total == 1 else f"图片{index}"
+
+
 class DrawerSection(QFrame):
     """Collapsible drawer: header stays visible, body toggles."""
 
-    def __init__(self, title, parent=None):
+    def __init__(self, title, parent=None, wrap_title=False):
         super().__init__(parent)
         self.setObjectName("drawerSection")
         self._title = title
         self._expanded = True
+        self._wrap_title = wrap_title
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -192,23 +274,50 @@ class DrawerSection(QFrame):
         self.header.setObjectName("drawerHeader")
         self.header.setCursor(Qt.PointingHandCursor)
         self.header.setAttribute(Qt.WA_Hover, True)
-        self.header.setFixedHeight(36)
+        if wrap_title:
+            self.header.setMinimumHeight(36)
+        else:
+            self.header.setFixedHeight(36)
         head = QHBoxLayout(self.header)
         head.setContentsMargins(12, 6, 12, 6)
         head.setSpacing(8)
+        if wrap_title:
+            head.setAlignment(Qt.AlignTop)
+        self.header_layout = head
         self.lbl_arrow = QLabel("▼")
         self.lbl_arrow.setObjectName("drawerArrow")
         self.lbl_arrow.setFixedWidth(14)
-        self.lbl_title = ElidedLabel(title)
+        if wrap_title:
+            self.lbl_title = QLabel(title)
+            self.lbl_title.setWordWrap(True)
+            self.lbl_title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        else:
+            self.lbl_title = ElidedLabel(title)
         self.lbl_title.setObjectName("drawerTitle")
         self.lbl_summary = ElidedLabel("")
         self.lbl_summary.setObjectName("dimLabel")
         self.lbl_summary.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        head.addWidget(self.lbl_arrow)
+        self.image_host = QWidget()
+        self.image_host.setObjectName("stdImageHost")
+        self.image_layout = QHBoxLayout(self.image_host)
+        self.image_layout.setContentsMargins(0, 0, 0, 0)
+        self.image_layout.setSpacing(8)
+        self.image_host.setVisible(False)
+        head.addWidget(self.lbl_arrow, 0, Qt.AlignTop)
         head.addWidget(self.lbl_title, stretch=1)
-        head.addWidget(self.lbl_summary, stretch=2)
+        self.lbl_summary.hide()
+        head.addWidget(self.lbl_summary, stretch=0 if wrap_title else 2)
+        head.addWidget(self.image_host, 0, Qt.AlignRight | Qt.AlignVCenter)
         self.header.clicked.connect(self.toggle)
         root.addWidget(self.header)
+
+        self.accessory = QWidget()
+        self.accessory.setObjectName("drawerAccessory")
+        self.accessory_layout = QHBoxLayout(self.accessory)
+        self.accessory_layout.setContentsMargins(12, 2, 12, 6)
+        self.accessory_layout.setSpacing(8)
+        self.accessory.hide()
+        root.addWidget(self.accessory)
 
         self.body = QWidget()
         self.body.setObjectName("drawerBody")
@@ -222,6 +331,21 @@ class DrawerSection(QFrame):
         self.lbl_summary.setText(text or "")
         self.lbl_summary.setVisible(bool(text))
 
+    def set_images(self, images):
+        while self.image_layout.count():
+            item = self.image_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        blobs = [b for b in (images or []) if b]
+        self.image_host.setVisible(bool(blobs))
+        total = len(blobs)
+        for i, blob in enumerate(blobs, start=1):
+            self.image_layout.addWidget(
+                StdImageLink(_image_link_text(i, total), blob, self.image_host)
+            )
+
     def toggle(self):
         self.set_expanded(not self._expanded)
 
@@ -233,8 +357,12 @@ class DrawerSection(QFrame):
             self.setMinimumHeight(0)
             self.setMaximumHeight(16777215)
             self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        elif self._wrap_title:
+            self.setMinimumHeight(0)
+            self.setMaximumHeight(16777215)
+            self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         else:
-            self.setFixedHeight(self.header.height())
+            self.setFixedHeight(max(self.header.height(), 36))
             self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.updateGeometry()
         parent = self.parentWidget()
@@ -255,9 +383,16 @@ class TestDetailDialog(QDialog):
         self.equipments = equipments or []
         self._std_pick_order = []
         self._std_updating = False
+        self._std_images = {}
         self._cond_edits = {}
         self._cond_editors = {}
         self._cond_drawers = []
+        self._key_param_edits = {}
+        self._key_param_defaults = {}
+        self._key_param_confirmed = {}
+        self._key_param_library = {}
+        self._key_param_rows = {}
+        self._key_param_updating = False
         self._eval_edits = {}
         self._eval_editors = {}
         self._eval_drawers = []
@@ -348,6 +483,7 @@ class TestDetailDialog(QDialog):
             table.blockSignals(False)
         if table is self.std_table:
             self._std_pick_order = []
+            self._forget_all_key_params()
             self._refresh_std_summary()
         elif table is self.eq_table:
             self._refresh_eq_summary()
@@ -438,12 +574,10 @@ class TestDetailDialog(QDialog):
 
         std_layout.addWidget(QLabel("结果描述（按勾选顺序分列，可编辑）:"))
         self.result_desc_table = self._make_table(
-            ["标准号", "章节号", "试验名称", "结果描述"], 160
+            ["试验名称", "结果描述"], 160
         )
         self.result_desc_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.result_desc_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.result_desc_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.result_desc_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.result_desc_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         std_layout.addWidget(self.result_desc_table)
         layout.addWidget(self.drawer_std)
 
@@ -682,22 +816,24 @@ class TestDetailDialog(QDialog):
             self.eq_table.setRowHidden(row, not _matches_query(query, code, name))
 
     @staticmethod
-    def _std_key(std):
+    def _std_ref_key(std):
+        if isinstance(std, TestStandard):
+            return std.ref_key()
         return (
             _cell_text((std or {}).get("标准号")),
             _cell_text((std or {}).get("章节号")),
-            _cell_text((std or {}).get("试验名称")),
         )
 
     def _on_std_item_changed(self, item):
         if self._std_updating or item is None or item.column() != 0:
             return
-        key = self._std_key(item.data(Qt.UserRole) or {})
+        key = self._std_ref_key(item.data(Qt.UserRole) or {})
         if item.checkState() == Qt.Checked:
             if key not in self._std_pick_order:
                 self._std_pick_order.append(key)
         elif key in self._std_pick_order:
             self._std_pick_order.remove(key)
+            self._forget_key_params(key)
         self._refresh_std_summary()
 
     def _on_std_cell_clicked(self, row, col):
@@ -712,18 +848,20 @@ class TestDetailDialog(QDialog):
         self._collect_cond_edits()
         self._collect_eval_edits()
         self._collect_result_edits()
+        self._collect_key_param_edits()
         by_key = {}
         for row in range(self.std_table.rowCount()):
             chk = self.std_table.item(row, 0)
             if chk is None or chk.checkState() != Qt.Checked:
                 continue
             data = chk.data(Qt.UserRole) or {}
-            by_key[self._std_key(data)] = data
+            by_key[self._std_ref_key(data)] = data
         picked = []
         for key in self._std_pick_order:
             data = by_key.get(key)
             if not data:
                 continue
+            self._ensure_key_param_state(key, data)
             desc = self._cond_edits.get(key)
             if desc is None:
                 desc = _cell_text(data.get("标准描述"))
@@ -733,6 +871,9 @@ class TestDetailDialog(QDialog):
             result_desc = self._result_edits.get(key)
             if result_desc is None:
                 result_desc = _cell_text(data.get("结果描述"))
+            images = self._std_images.get(key)
+            if images is None:
+                images = list(data.get("_images") or [])
             picked.append(TestStandard(
                 standard_id=_cell_text(data.get("标准号")),
                 chapter=_cell_text(data.get("章节号")),
@@ -740,6 +881,10 @@ class TestDetailDialog(QDialog):
                 standard_desc=desc,
                 result_desc=result_desc,
                 evaluation_req=eval_req,
+                images=list(images or []),
+                key_params=list(self._key_param_edits.get(key) or []),
+                key_params_defaults=list(self._key_param_defaults.get(key) or []),
+                key_params_confirmed=bool(self._key_param_confirmed.get(key)),
             ))
         return picked
 
@@ -777,6 +922,58 @@ class TestDetailDialog(QDialog):
 
     def _collect_cond_edits(self):
         self._collect_map_edits(self._cond_editors, self._cond_edits)
+        allowed = set(self._std_pick_order)
+        self._cond_edits = {key: value for key, value in self._cond_edits.items() if key in allowed}
+
+    def _collect_key_param_edits(self):
+        allowed = set(self._std_pick_order)
+        for key, row in list(self._key_param_rows.items()):
+            if key not in allowed:
+                continue
+            edits = row.get("edits") or []
+            values = []
+            alive = False
+            for edit in edits:
+                try:
+                    values.append(edit.text().strip())
+                    alive = True
+                except RuntimeError:
+                    continue
+            if alive:
+                self._key_param_edits[key] = values
+            chk = row.get("check")
+            if chk is None:
+                continue
+            try:
+                self._key_param_confirmed[key] = chk.isChecked()
+            except RuntimeError:
+                continue
+
+    def _ensure_key_param_state(self, key, data):
+        library = _cell_text(data.get("标准描述"))
+        self._key_param_library[key] = library
+        if key not in self._key_param_defaults:
+            self._key_param_defaults[key] = parse_key_params(data.get("关键参数"))
+        if key not in self._key_param_edits:
+            self._key_param_edits[key] = list(self._key_param_defaults[key])
+        if key not in self._key_param_confirmed:
+            self._key_param_confirmed[key] = False
+
+    def _forget_key_params(self, key):
+        self._key_param_edits.pop(key, None)
+        self._key_param_defaults.pop(key, None)
+        self._key_param_confirmed.pop(key, None)
+        self._key_param_library.pop(key, None)
+        self._key_param_rows.pop(key, None)
+        self._cond_edits.pop(key, None)
+
+    def _forget_all_key_params(self):
+        self._key_param_edits.clear()
+        self._key_param_defaults.clear()
+        self._key_param_confirmed.clear()
+        self._key_param_library.clear()
+        self._key_param_rows.clear()
+        self._cond_edits.clear()
 
     def _collect_eval_edits(self):
         self._collect_map_edits(self._eval_editors, self._eval_edits)
@@ -787,7 +984,7 @@ class TestDetailDialog(QDialog):
             key = key_item.data(Qt.UserRole) if key_item else None
             if not key:
                 continue
-            widget = self.result_desc_table.cellWidget(row, 3)
+            widget = self.result_desc_table.cellWidget(row, 1)
             if widget is None:
                 continue
             try:
@@ -803,7 +1000,19 @@ class TestDetailDialog(QDialog):
                 widget.setParent(None)
                 widget.deleteLater()
 
-    def _rebuild_field_drawers(self, layout, picked, edits, get_text, placeholder):
+    def _catalog_images(self, std):
+        key = self._std_ref_key(std)
+        saved = self._std_images.get(key)
+        if saved:
+            return list(saved)
+        if getattr(std, "images", None):
+            return list(std.images)
+        for rec in self.standards:
+            if self._std_ref_key(rec) == key:
+                return list(rec.get("_images") or [])
+        return []
+
+    def _rebuild_field_drawers(self, layout, picked, edits, get_text, placeholder, image_getter=None):
         if not picked:
             self._clear_layout(layout)
             empty = QLabel("未选择标准")
@@ -814,9 +1023,11 @@ class TestDetailDialog(QDialog):
         editors = {}
         self._clear_layout(layout)
         for std in picked:
-            key = std.identity_key()
-            drawer = DrawerSection(std.condition_title())
+            key = self._std_ref_key(std)
+            drawer = DrawerSection(std.field_title(), wrap_title=True)
             drawer.set_expanded(False)
+            if image_getter is not None:
+                drawer.set_images(image_getter(std))
             editor = QTextEdit()
             editor.setMinimumHeight(120)
             editor.setPlaceholderText(placeholder)
@@ -842,13 +1053,122 @@ class TestDetailDialog(QDialog):
 
     def _rebuild_cond_drawers(self, picked):
         self._collect_cond_edits()
+        self._collect_key_param_edits()
         self._cond_drawers, self._cond_editors = self._rebuild_field_drawers(
             self.cond_layout,
             picked,
             self._cond_edits,
             lambda s: s.standard_desc,
             "该标准的检测条件，可直接修改",
+            image_getter=self._catalog_images,
         )
+        self._key_param_rows = {}
+        for std, drawer in zip(picked, self._cond_drawers):
+            self._attach_key_param_row(drawer, std)
+
+    def _attach_key_param_row(self, drawer, std):
+        layout = drawer.accessory_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        key = self._std_ref_key(std)
+        defaults = list(self._key_param_defaults.get(key) or std.key_params_defaults or [])
+        if not defaults:
+            drawer.accessory.hide()
+            return
+        values = list(self._key_param_edits.get(key) or defaults)
+        if len(values) < len(defaults):
+            values = values + defaults[len(values):]
+        confirmed = bool(self._key_param_confirmed.get(key))
+
+        lbl = QLabel("关键参数：")
+        lbl.setObjectName("keyParamLabel")
+        layout.addWidget(lbl)
+
+        edits = []
+        self._key_param_updating = True
+        try:
+            for index, default in enumerate(defaults):
+                edit = QLineEdit()
+                edit.setObjectName("keyParamEdit")
+                edit.setText(values[index] if index < len(values) else default)
+                edit.setMinimumWidth(120)
+                edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                edit.textChanged.connect(lambda _text, k=key: self._on_key_param_text_changed(k))
+                layout.addWidget(edit, stretch=1)
+                edits.append(edit)
+            chk = QCheckBox()
+            chk.setObjectName("keyParamCheck")
+            chk.setToolTip("确认后将关键参数代入下方检测条件")
+            chk.setChecked(confirmed)
+            chk.toggled.connect(lambda checked, k=key: self._on_key_param_toggled(k, checked))
+            layout.addWidget(chk)
+            ok = QLabel("参数已确认")
+            ok.setObjectName("keyParamConfirmed")
+            ok.setVisible(confirmed)
+            layout.addWidget(ok)
+        finally:
+            self._key_param_updating = False
+        layout.addStretch(0)
+        drawer.accessory.show()
+        self._key_param_rows[key] = {"edits": edits, "check": chk, "ok": ok}
+
+    def _on_key_param_text_changed(self, key):
+        if self._key_param_updating:
+            return
+        row = self._key_param_rows.get(key) or {}
+        chk = row.get("check")
+        if chk is None or not chk.isChecked():
+            return
+        chk.setChecked(False)
+
+    def _on_key_param_toggled(self, key, checked):
+        if self._key_param_updating:
+            return
+        row = self._key_param_rows.get(key) or {}
+        chk = row.get("check")
+        ok = row.get("ok")
+        editor = self._cond_editors.get(key)
+        library = self._key_param_library.get(key, "")
+        if checked:
+            values = []
+            for edit in row.get("edits") or []:
+                try:
+                    values.append(edit.text().strip())
+                except RuntimeError:
+                    values.append("")
+            defaults = list(self._key_param_defaults.get(key) or [])
+            try:
+                text = apply_key_params(library, defaults, values)
+            except KeyParamReplaceError as exc:
+                QMessageBox.warning(self, "提示", str(exc))
+                self._key_param_updating = True
+                try:
+                    if chk is not None:
+                        chk.setChecked(False)
+                    if ok is not None:
+                        ok.setVisible(False)
+                finally:
+                    self._key_param_updating = False
+                self._key_param_confirmed[key] = False
+                return
+            if editor is not None:
+                editor.setPlainText(text)
+            self._cond_edits[key] = text
+            self._key_param_edits[key] = values
+            self._key_param_confirmed[key] = True
+            if ok is not None:
+                ok.setVisible(True)
+            return
+        if editor is not None:
+            editor.setPlainText(library)
+        self._cond_edits[key] = library
+        self._key_param_confirmed[key] = False
+        if ok is not None:
+            ok.setVisible(False)
 
     def _rebuild_eval_drawers(self, picked):
         self._collect_eval_edits()
@@ -866,19 +1186,13 @@ class TestDetailDialog(QDialog):
         if not picked:
             return
         for std in picked:
-            key = std.identity_key()
+            key = self._std_ref_key(std)
             row = self.result_desc_table.rowCount()
             self.result_desc_table.insertRow(row)
-            id_item = QTableWidgetItem(std.standard_id)
-            id_item.setData(Qt.UserRole, key)
-            id_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            ch_item = QTableWidgetItem(std.chapter)
-            ch_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             name_item = QTableWidgetItem(std.test_name)
+            name_item.setData(Qt.UserRole, key)
             name_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            self.result_desc_table.setItem(row, 0, id_item)
-            self.result_desc_table.setItem(row, 1, ch_item)
-            self.result_desc_table.setItem(row, 2, name_item)
+            self.result_desc_table.setItem(row, 0, name_item)
             editor = QTextEdit()
             editor.setFixedHeight(52)
             editor.setPlaceholderText("可直接修改")
@@ -886,7 +1200,7 @@ class TestDetailDialog(QDialog):
             if text is None:
                 text = std.result_desc or ""
             editor.setPlainText(text)
-            self.result_desc_table.setCellWidget(row, 3, editor)
+            self.result_desc_table.setCellWidget(row, 1, editor)
             self.result_desc_table.setRowHeight(row, 56)
         rows = self.result_desc_table.rowCount()
         self.result_desc_table.setFixedHeight(min(56 * rows + 36, 220) if rows else 80)
@@ -1111,25 +1425,20 @@ class TestDetailDialog(QDialog):
         self._refresh_sample_summary()
 
     def _find_std_row(self, want: TestStandard, used):
-        want_key = want.identity_key()
+        want_key = want.ref_key()
         fallback = None
         for row in range(self.std_table.rowCount()):
             if row in used:
                 continue
             chk = self.std_table.item(row, 0)
             data = (chk.data(Qt.UserRole) if chk else None) or {}
-            key = self._std_key(data)
+            key = self._std_ref_key(data)
             if key == want_key:
                 return row
-            std_no, chapter, test_name = key
-            if want.chapter or want.test_name:
-                if (
-                    std_no == (want.standard_id or "")
-                    and (not want.chapter or chapter == want.chapter)
-                    and (not want.test_name or test_name == want.test_name)
-                ):
-                    return row
-            elif std_no == (want.standard_id or "") and fallback is None:
+            std_no, chapter = key
+            if want.chapter:
+                continue
+            if std_no == (want.standard_id or "") and fallback is None:
                 fallback = row
         return fallback
 
@@ -1156,7 +1465,7 @@ class TestDetailDialog(QDialog):
                 if chk is None:
                     continue
                 chk.setCheckState(Qt.Checked)
-                order.append(self._std_key(chk.data(Qt.UserRole) or {}))
+                order.append(self._std_ref_key(chk.data(Qt.UserRole) or {}))
                 if len(order) == 1:
                     self.std_table.scrollToItem(chk)
             self._std_pick_order = order
@@ -1164,13 +1473,20 @@ class TestDetailDialog(QDialog):
             self.std_table.blockSignals(False)
             self._std_updating = False
         for want in wanted:
-            key = want.identity_key()
+            key = want.ref_key()
             if want.standard_desc:
                 self._cond_edits[key] = want.standard_desc
             if want.evaluation_req:
                 self._eval_edits[key] = want.evaluation_req
             if want.result_desc:
                 self._result_edits[key] = want.result_desc
+            if want.images:
+                self._std_images[key] = list(want.images)
+            defaults = list(want.key_params_defaults or want.key_params or [])
+            if defaults:
+                self._key_param_defaults[key] = defaults
+                self._key_param_edits[key] = list(want.key_params or defaults)
+                self._key_param_confirmed[key] = bool(want.key_params_confirmed)
         self._refresh_std_summary()
 
     def _restore_equipments(self):

@@ -29,23 +29,7 @@ class WordGenerator:
         self._append_overview_table(doc, state)
                         
         # 2. Extract nodes to generate
-        nodes_to_generate = []
-        if not leg_filter or leg_filter == "ALL":
-            for leg in state.legs:
-                nodes_to_generate.extend(leg.nodes)
-        elif leg_filter.startswith("TEST:"):
-            # Handle single test item filter
-            test_target = leg_filter.replace("TEST:", "")
-            for leg in state.legs:
-                for node in leg.nodes:
-                    if f"{leg.leg_name} - {node.test_name}" == test_target:
-                        nodes_to_generate.append(node)
-                        break
-        else:
-            for leg in state.legs:
-                if leg.leg_id == leg_filter:
-                    nodes_to_generate.extend(leg.nodes)
-                    break
+        nodes_to_generate = [node for _, node in state.iter_nodes_for_export(leg_filter)]
                     
         # 3. Dynamic Tables and Content
         if nodes_to_generate:

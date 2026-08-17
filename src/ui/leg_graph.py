@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, Q
 from PySide6.QtCore import Qt, Signal
 
 from src.models.project_state import TestLeg, TestNode
-
+from src.parsers.db_loader import DuplicateStandardError, duplicate_standard_message
 from src.ui.test_detail_dialog import TestDetailDialog
 
 PLACEHOLDER_TEST = "请选择试验..."
@@ -68,7 +68,7 @@ class TestNodeWidget(QFrame):
 
         self.lbl_complete = QLabel("✓")
         self.lbl_complete.setObjectName("nodeCompleteMark")
-        self.lbl_complete.setToolTip("标准、设备、结果均已填写")
+        self.lbl_complete.setToolTip("标准、关键参数、设备、结果均已填写")
         self.lbl_complete.setAlignment(Qt.AlignCenter)
         self.lbl_complete.setFixedWidth(16)
         grid.addWidget(self.lbl_complete, 0, 1, Qt.AlignCenter)
@@ -102,9 +102,15 @@ class TestNodeWidget(QFrame):
             QMessageBox.warning(self, "提示", "标准库尚未就绪，无法编辑明细")
             return
 
+        try:
+            standards = self.db_loader.load_standards()
+        except DuplicateStandardError as exc:
+            QMessageBox.warning(self, "提示", duplicate_standard_message(exc))
+            return
+
         dialog = TestDetailDialog(
             self.node_data,
-            self.db_loader.load_standards(),
+            standards,
             self.db_loader.load_equipments(),
             self
         )
@@ -232,7 +238,7 @@ class LegGraphArea(QWidget):
         self.btn_save = QPushButton("保存项目")
         self.btn_save.setObjectName("accentButton")
         self.btn_load_state = QPushButton("加载项目")
-        self.btn_save_template = QPushButton("保存为模板")
+        self.btn_save_template = QPushButton("存为模板")
         self.btn_import_template = QPushButton("导入模板")
         toolbar.addWidget(self.btn_add_leg)
         toolbar.addStretch()

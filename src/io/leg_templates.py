@@ -10,6 +10,7 @@ from typing import List, Optional, Tuple
 
 from src.io.project_mirror import default_data_root
 from src.models.project_state import ProjectState, TestLeg, TestNode, TestStandard
+from src.parsers.db_loader import hydrate_legs_from_catalog
 
 _INVALID_CHARS = re.compile(r'[<>:"/\\|?*]')
 
@@ -47,17 +48,18 @@ def unique_test_names(legs: List[TestLeg]) -> List[str]:
 
 
 def node_for_template(node: TestNode) -> TestNode:
-    standards = [TestStandard(**item.model_dump()) for item in (node.standards or [])]
-    return TestNode(
-        test_name=node.test_name or "",
-        standard_id=node.standard_id,
-        standard_chapter=node.standard_chapter,
-        standard_test_name=node.standard_test_name,
-        standard_desc=node.standard_desc,
-        result_desc=node.result_desc,
-        evaluation_req=node.evaluation_req,
-        standards=standards,
-    )
+    """Keep card name and standard identity; drop library-sourced content."""
+    standards = [
+        TestStandard(
+            standard_id=item.standard_id,
+            chapter=item.chapter,
+            test_name=item.test_name,
+        )
+        for item in (node.resolved_standards() or [])
+    ]
+    out = TestNode(test_name=node.test_name or "")
+    out.apply_standards(standards)
+    return out
 
 
 def legs_for_template(legs: List[TestLeg]) -> List[TestLeg]:
@@ -117,9 +119,15 @@ def load_leg_template(path: Path) -> Tuple[str, List[TestLeg]]:
     return name, legs
 
 
-def apply_leg_template(state: ProjectState, name: str, legs: List[TestLeg]) -> None:
-    """Replace legs and refresh template_pool. Never mutates candidate_pool."""
-    state.legs = legs_for_template(legs)
+def apply_leg_template(state: ProjectState, name: str, legs: List[TestLeg], catalog=None) -> None:
+    """Replace legs and refresh template_pool. Never mutates candidate_pool.
+
+    Identity-only legs are filled from the live standard catalog when provided.
+    """
+    stripped = legs_for_template(legs)
+    if catalog is not None:
+        hydrate_legs_from_catalog(stripped, catalog)
+    state.legs = stripped
     state.template_pool = unique_test_names(state.legs)
     state.last_leg_template_name = (name or "").strip()
 

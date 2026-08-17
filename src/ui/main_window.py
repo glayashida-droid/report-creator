@@ -27,6 +27,7 @@ from src.io.leg_templates import (
     load_leg_template as read_leg_template,
     save_leg_template as write_leg_template,
 )
+from src.parsers.db_loader import DuplicateStandardError, duplicate_standard_message
 from src.ui.leg_graph import LegGraphArea
 from src.ui.load_state_dialog import LoadStateDialog
 from src.ui.leg_template_dialog import ImportTemplateDialog
@@ -55,7 +56,7 @@ class MirrorWorker(QThread):
             self.failed.emit(self._generation, str(e))
 
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 
 
 class MainWindow(QMainWindow):
@@ -850,7 +851,12 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "导入失败", f"无法读取模板:\n{exc}")
             return
-        apply_leg_template(self.state, name, legs)
+        try:
+            catalog = self.leg_graph.db_loader.load_standards() if self.leg_graph.db_loader else []
+        except DuplicateStandardError as exc:
+            QMessageBox.warning(self, "提示", duplicate_standard_message(exc))
+            return
+        apply_leg_template(self.state, name, legs, catalog=catalog)
         self.btn_pool_template.setChecked(True)
         self._refresh_pool_list()
         self.leg_graph.state = self.state
@@ -890,30 +896,35 @@ class MainWindow(QMainWindow):
             target_text = self.combo_export_target.currentText()
 
             if mode == "导出单条 Leg":
-                leg_id = self.combo_export_target.currentData()
-                if not leg_id:
+                leg_filter = self.combo_export_target.currentData()
+                if not leg_filter:
                     QMessageBox.warning(self, "错误", "请先选择要导出的 Leg")
                     return
-                engine.generate(
-                    self.state, str(out_path),
-                    project_path=target_project_path, leg_filter=leg_id,
-                )
                 scope_note = f"\n导出范围: Leg → {target_text}"
             elif mode == "导出单项试验":
-                test_key = self.combo_export_target.currentData()
-                if not test_key:
+                leg_filter = self.combo_export_target.currentData()
+                if not leg_filter:
                     QMessageBox.warning(self, "错误", "请先选择要导出的试验")
                     return
-                engine.generate(
-                    self.state, str(out_path),
-                    project_path=target_project_path, leg_filter=test_key,
-                )
                 scope_note = f"\n导出范围: 试验 → {target_text}"
             else:
-                engine.generate(
-                    self.state, str(out_path), project_path=target_project_path
-                )
+                leg_filter = None
                 scope_note = "\n导出范围: 全部 Leg"
+
+            incomplete = self.state.incomplete_export_labels(leg_filter)
+            if incomplete:
+                QMessageBox.warning(
+                    self,
+                    "无法导出",
+                    "以下试验尚未完成明细（含关键参数确认），无法导出报告：\n"
+                    + "\n".join(incomplete),
+                )
+                return
+
+            engine.generate(
+                self.state, str(out_path),
+                project_path=target_project_path, leg_filter=leg_filter,
+            )
 
             msg = QMessageBox(self)
             msg.setWindowTitle("导出成功")

@@ -1,8 +1,9 @@
+import base64
 import json
 from enum import Enum
 from pathlib import Path
-from typing import ClassVar, Dict, List, Optional
-from pydantic import BaseModel, Field, field_validator
+from typing import ClassVar, Dict, Iterator, List, Optional, Tuple
+from pydantic import BaseModel, Field, field_serializer, field_validator
 
 class TestResult(str, Enum):
     PASS = "合格"
@@ -44,6 +45,32 @@ class TestStandard(BaseModel):
     standard_desc: str = ""
     result_desc: str = ""
     evaluation_req: str = ""
+    images: List[bytes] = Field(default_factory=list)
+    key_params: List[str] = Field(default_factory=list)
+    key_params_defaults: List[str] = Field(default_factory=list)
+    key_params_confirmed: bool = False
+
+    @field_serializer("images")
+    def _serialize_images(self, value):
+        return [base64.b64encode(blob).decode("ascii") for blob in (value or []) if blob]
+
+    @field_validator("images", mode="before")
+    @classmethod
+    def _parse_images(cls, value):
+        if not value:
+            return []
+        out = []
+        for item in value:
+            if isinstance(item, bytes):
+                if item:
+                    out.append(item)
+            elif isinstance(item, str) and item.strip():
+                out.append(base64.b64decode(item))
+        return out
+
+    def ref_key(self) -> tuple:
+        """Library lookup key: 标准号 + 章节号, never 试验名称."""
+        return (self.standard_id or "", self.chapter or "")
 
     def identity_key(self) -> tuple:
         return (self.standard_id or "", self.chapter or "", self.test_name or "")
@@ -64,8 +91,15 @@ class TestStandard(BaseModel):
             bits.append(self.test_name)
         return "，".join(bits) or "未命名标准"
 
+    def field_title(self) -> str:
+        """Drawer / result-row label: test name only, no repeated 标准号 / 章节号."""
+        return self.test_name or self.condition_title()
+
     def method_block(self) -> str:
         return self.ref_label()
+
+    def needs_key_param_confirm(self) -> bool:
+        return bool(self.key_params_defaults) and not self.key_params_confirmed
 
 
 def _join_blocks(parts) -> str:
@@ -149,7 +183,7 @@ class TestNode(BaseModel):
             self.result_desc = None
 
     def is_detail_complete(self) -> bool:
-        """True when standard, equipment, and sample results are all filled."""
+        """True when standard, key params, equipment, and sample results are filled."""
         has_standard = bool(self.resolved_standards()) or any(
             self._has_text(v)
             for v in (self.standard_id, self.standard_chapter, self.standard_test_name)
@@ -159,7 +193,8 @@ class TestNode(BaseModel):
             for eq in (self.equipments or [])
         )
         has_results = any(self._has_text(s.sample_id) for s in (self.samples or []))
-        return has_standard and has_equipment and has_results
+        params_ok = all(not s.needs_key_param_confirm() for s in self.resolved_standards())
+        return has_standard and has_equipment and has_results and params_ok
     
 class TestLeg(BaseModel):
     leg_id: str
@@ -187,6 +222,36 @@ class ProjectState(BaseModel):
     template_pool: List[str] = Field(default_factory=list)
     last_leg_template_name: str = ""
     legs: List[TestLeg] = Field(default_factory=list)
+
+    def iter_nodes_for_export(self, leg_filter: Optional[str] = None) -> Iterator[Tuple["TestLeg", TestNode]]:
+        """Same scope rules as WordGenerator.generate."""
+        if not leg_filter or leg_filter == "ALL":
+            for leg in self.legs or []:
+                for node in leg.nodes or []:
+                    yield leg, node
+            return
+        if str(leg_filter).startswith("TEST:"):
+            test_target = str(leg_filter).replace("TEST:", "", 1)
+            for leg in self.legs or []:
+                for node in leg.nodes or []:
+                    if f"{leg.leg_name} - {node.test_name}" == test_target:
+                        yield leg, node
+                        return
+            return
+        for leg in self.legs or []:
+            if leg.leg_id == leg_filter:
+                for node in leg.nodes or []:
+                    yield leg, node
+                return
+
+    def incomplete_export_labels(self, leg_filter: Optional[str] = None) -> List[str]:
+        labels = []
+        for leg, node in self.iter_nodes_for_export(leg_filter):
+            if node.is_detail_complete():
+                continue
+            name = (node.test_name or "").strip() or "（未命名试验）"
+            labels.append(f"{leg.leg_name} / {name}")
+        return labels
 
     def combo_pool(self, extra: str = "") -> List[str]:
         """Dropdown items: quotation pool then template pool, exact-string unique."""
@@ -216,7 +281,7 @@ class ProjectState(BaseModel):
         path = Path(filepath)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.model_dump(), f, ensure_ascii=False, indent=2)
+            json.dump(self.model_dump(mode="json"), f, ensure_ascii=False, indent=2)
 
     _OVERVIEW_HEAD: ClassVar[tuple] = (
         "申请单号",
