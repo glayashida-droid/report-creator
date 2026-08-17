@@ -240,7 +240,7 @@ class MainWindow(QMainWindow):
         pool_layout.addWidget(self.list_candidates)
         left_layout.addWidget(pool_group, stretch=1)
 
-        # 2.3 Export — compact 2-row: mode+target | generate
+        # 2.3 Export — single row: mode + target + generate
         export_panel = QGroupBox("导出报告")
         export_panel.setObjectName("exportPanel")
         export_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
@@ -248,30 +248,31 @@ class MainWindow(QMainWindow):
         export_layout.setContentsMargins(8, 6, 8, 6)
         export_layout.setSpacing(6)
 
-        mode_target_row = QHBoxLayout()
-        mode_target_row.setSpacing(6)
+        export_row = QHBoxLayout()
+        export_row.setSpacing(6)
         self.combo_export_mode = QComboBox()
-        self.combo_export_mode.addItems(["导出全部 Leg", "导出单条 Leg", "导出单项试验"])
+        self.combo_export_mode.addItems(["全部 Leg", "单条 Leg", "单项试验"])
         self.combo_export_mode.currentIndexChanged.connect(self._on_export_mode_changed)
         self.combo_export_mode.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.combo_export_mode.setMinimumWidth(72)
-        mode_target_row.addWidget(QLabel("导出模式:"))
-        mode_target_row.addWidget(self.combo_export_mode, stretch=1)
+        export_row.addWidget(QLabel("导出模式:"))
+        export_row.addWidget(self.combo_export_mode, stretch=1)
 
         self.lbl_export_target = QLabel("导出目标:")
         self.combo_export_target = QComboBox()
         self.combo_export_target.setEnabled(False)
         self.combo_export_target.setPlaceholderText("全部 Leg")
         self.combo_export_target.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.combo_export_target.setMinimumWidth(72)
-        mode_target_row.addWidget(self.lbl_export_target)
-        mode_target_row.addWidget(self.combo_export_target, stretch=1)
-        export_layout.addLayout(mode_target_row)
+        self.combo_export_target.setMinimumWidth(56)
+        export_row.addWidget(self.lbl_export_target)
+        export_row.addWidget(self.combo_export_target, stretch=1)
 
-        self.btn_export = QPushButton("一键生成报告")
+        self.btn_export = QPushButton("生成")
         self.btn_export.setObjectName("primaryButton")
+        self.btn_export.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self.btn_export.clicked.connect(self.export_report)
-        export_layout.addWidget(self.btn_export)
+        export_row.addWidget(self.btn_export)
+        export_layout.addLayout(export_row)
 
         left_layout.addWidget(export_panel, stretch=0)
 
@@ -628,10 +629,10 @@ class MainWindow(QMainWindow):
         self.combo_export_target.blockSignals(True)
         self.combo_export_target.clear()
 
-        if mode == "导出全部 Leg":
+        if mode == "全部 Leg":
             self.combo_export_target.setEnabled(False)
             self.combo_export_target.addItem("全部 Leg")
-        elif mode == "导出单条 Leg":
+        elif mode == "单条 Leg":
             self.combo_export_target.setEnabled(True)
             legs = self.state.legs or []
             if not legs:
@@ -639,12 +640,8 @@ class MainWindow(QMainWindow):
                 self.combo_export_target.setEnabled(False)
             else:
                 for leg in legs:
-                    node_names = [n.test_name for n in leg.nodes if n.test_name]
-                    detail = " → ".join(node_names) if node_names else "（空）"
-                    self.combo_export_target.addItem(
-                        f"{leg.leg_name}  [{detail}]", userData=leg.leg_id
-                    )
-        else:  # 导出单项试验
+                    self.combo_export_target.addItem(leg.leg_name, userData=leg.leg_id)
+        else:  # 单项试验
             self.combo_export_target.setEnabled(True)
             found = False
             for leg in self.state.legs or []:
@@ -652,9 +649,9 @@ class MainWindow(QMainWindow):
                     if not node.test_name:
                         continue
                     found = True
-                    label = f"{leg.leg_name} / {node.test_name}"
                     self.combo_export_target.addItem(
-                        label, userData=f"TEST:{leg.leg_name} - {node.test_name}"
+                        f"{leg.leg_name} / {node.test_name}",
+                        userData=f"TEST:{leg.leg_name} - {node.test_name}",
                     )
             if not found:
                 self.combo_export_target.addItem("（当前无试验）")
@@ -895,13 +892,13 @@ class MainWindow(QMainWindow):
             target_project_path = str(project_path) if project_path else None
             target_text = self.combo_export_target.currentText()
 
-            if mode == "导出单条 Leg":
+            if mode == "单条 Leg":
                 leg_filter = self.combo_export_target.currentData()
                 if not leg_filter:
                     QMessageBox.warning(self, "错误", "请先选择要导出的 Leg")
                     return
                 scope_note = f"\n导出范围: Leg → {target_text}"
-            elif mode == "导出单项试验":
+            elif mode == "单项试验":
                 leg_filter = self.combo_export_target.currentData()
                 if not leg_filter:
                     QMessageBox.warning(self, "错误", "请先选择要导出的试验")
