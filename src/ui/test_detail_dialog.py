@@ -1,6 +1,7 @@
 import math
 import re
 from datetime import date, datetime
+from pathlib import Path
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox, QPushButton,
@@ -12,6 +13,7 @@ from PySide6.QtCore import Qt, QDate, Signal, QTimer, QEvent, QPoint
 from PySide6.QtGui import QColor, QCursor, QPixmap
 from src.models.project_state import TestNode, TestSample, TestResult, TestEquipment, TestStandard
 from src.parsers.key_params import KeyParamReplaceError, apply_key_params, parse_key_params
+from src.ui.test_photos_panel import TestPhotosPanel
 
 _EQ_EXPIRED_ROLE = Qt.UserRole + 1
 _EXPIRED_RED = QColor("#FF5555")
@@ -670,11 +672,28 @@ class TestDetailDialog(QDialog):
         sample_layout.addWidget(self.table)
         self._setup_result_header()
         layout.addWidget(self.drawer_sample)
+
+        self.drawer_photos = DrawerSection("试验照片")
+        project_root = None
+        project_id = ""
+        if self._project_state is not None:
+            raw = getattr(self._project_state, "project_path", "") or ""
+            if raw:
+                project_root = Path(raw)
+            project_id = getattr(self._project_state, "project_id", "") or ""
+        self.photos_panel = TestPhotosPanel(
+            project_root, self.node_data.test_name, project_id, self.drawer_photos
+        )
+        self.photos_panel.changed.connect(self._refresh_photo_summary)
+        self.drawer_photos.body_layout.addWidget(self.photos_panel)
+        layout.addWidget(self.drawer_photos)
         layout.addStretch(1)
 
         self.drawer_std.set_expanded(True)
         self.drawer_eq.set_expanded(False)
         self.drawer_sample.set_expanded(False)
+        self.drawer_photos.set_expanded(False)
+        self._refresh_photo_summary()
 
         scroll.setWidget(host)
         outer.addWidget(scroll, stretch=1)
@@ -1397,6 +1416,15 @@ class TestDetailDialog(QDialog):
     def _refresh_sample_summary(self):
         n = self.table.rowCount() if hasattr(self, "table") else 0
         self.drawer_sample.set_summary(f"{n} 行" if n else "未添加")
+
+    def _refresh_photo_summary(self):
+        if not hasattr(self, "photos_panel"):
+            return
+        albums, photos = self.photos_panel.counts()
+        if albums == 0:
+            self.drawer_photos.set_summary("未添加")
+        else:
+            self.drawer_photos.set_summary(f"{albums} 夹 / {photos} 张")
 
     def load_data(self):
         if self.node_data.start_date:

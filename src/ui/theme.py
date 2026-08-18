@@ -130,6 +130,50 @@ QWidget#stdImageHost {{
     background: transparent;
 }}
 
+QFrame#photoAlbumRow {{
+    background-color: {BG_INPUT};
+    border: 1px solid {CYAN_DIM};
+    border-radius: 18px;
+}}
+
+QWidget#photoFolderChip {{
+    background: transparent;
+    border: none;
+}}
+
+QRadioButton#photoRenameRadio {{
+    spacing: 8px;
+    background: transparent;
+}}
+
+QFrame#photoThumb {{
+    background-color: {BG_PANEL};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+}}
+
+QPushButton#photoThumbDelete {{
+    padding: 0px;
+    min-height: 16px;
+    border-radius: 9px;
+    font-size: 10px;
+}}
+
+QLabel#photoThumbName {{
+    color: {TEXT_DIM};
+    background: transparent;
+    font-size: 11px;
+    padding: 0px;
+}}
+
+QPushButton#photoRenameAllLink {{
+    padding: 2px 4px;
+    font-size: 11px;
+    font-weight: 600;
+    min-height: 18px;
+    border-radius: 6px;
+}}
+
 QLabel#stdImagePopup {{
     background-color: {BG};
     border: 1px solid {CYAN};
@@ -143,13 +187,32 @@ QWidget#drawerAccessory {{
 }}
 
 QLabel#keyParamLabel {{
-    color: {CYAN};
+    color: {MAGENTA};
     font-weight: 600;
     background: transparent;
 }}
 
+QLineEdit#keyParamEdit {{
+    background-color: {BG_INPUT};
+    color: {TEXT};
+    border: 1px solid {MAGENTA_DIM};
+    border-radius: 8px;
+    padding: 6px 10px;
+    selection-background-color: {MAGENTA};
+    selection-color: {BG};
+}}
+
+QLineEdit#keyParamEdit:hover {{
+    border: 1px solid {MAGENTA};
+}}
+
+QLineEdit#keyParamEdit:focus {{
+    border: 1px solid {MAGENTA};
+    background-color: #140A14;
+}}
+
 QLabel#keyParamConfirmed {{
-    color: {CYAN};
+    color: {MAGENTA};
     background: transparent;
 }}
 
@@ -161,14 +224,14 @@ QCheckBox#keyParamCheck {{
 QCheckBox#keyParamCheck::indicator {{
     width: 16px;
     height: 16px;
-    border: 1px solid {CYAN_DIM};
+    border: 1px solid {MAGENTA_DIM};
     border-radius: 3px;
     background-color: {BG_INPUT};
 }}
 
 QCheckBox#keyParamCheck::indicator:checked {{
-    background-color: {CYAN};
-    border: 1px solid {CYAN};
+    background-color: {MAGENTA};
+    border: 1px solid {MAGENTA};
 }}
 
 QWidget#drawerBody {{

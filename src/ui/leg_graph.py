@@ -1,13 +1,18 @@
 import sys
+from pathlib import Path
+
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton,
-                               QLabel, QScrollArea, QComboBox, QFrame, QSizePolicy, QMessageBox)
+                               QLabel, QScrollArea, QComboBox, QFrame, QSizePolicy, QMessageBox,
+                               QInputDialog)
 from PySide6.QtCore import Qt, Signal
 
 from src.models.project_state import TestLeg, TestNode
 from src.parsers.db_loader import DuplicateStandardError, duplicate_standard_message
 from src.ui.test_detail_dialog import TestDetailDialog
+from src.io.test_photos import CUSTOM_TEST_NAME, PhotoError, is_usable_test_name, rename_test_dir
 
 PLACEHOLDER_TEST = "请选择试验..."
+CUSTOM_TEST = CUSTOM_TEST_NAME
 
 
 def fill_test_combo(combo: QComboBox, pool: list, current_test: str = ""):
@@ -16,10 +21,11 @@ def fill_test_combo(combo: QComboBox, pool: list, current_test: str = ""):
     combo.addItem(PLACEHOLDER_TEST)
     items = list(pool or [])
     current = (current_test or "").strip()
-    if current and current not in items and current != PLACEHOLDER_TEST:
+    if current and current not in items and current not in {PLACEHOLDER_TEST, CUSTOM_TEST}:
         items.append(current)
     combo.addItems(items)
-    if current:
+    combo.addItem(CUSTOM_TEST)
+    if current and current != CUSTOM_TEST:
         combo.setCurrentText(current)
         combo.setEditText(current)
     else:
@@ -38,6 +44,7 @@ class TestNodeWidget(QFrame):
         self.node_data = node_data
         self.candidate_pool = candidate_pool
         self.db_loader = db_loader
+        self._committed_name = self._normalized_test_name(node_data.test_name)
         self.setObjectName("testNodeCard")
         self.setFrameShape(QFrame.StyledPanel)
         self.setFrameShadow(QFrame.Plain)
@@ -64,6 +71,7 @@ class TestNodeWidget(QFrame):
         fill_test_combo(self.combo, self.candidate_pool, self.node_data.test_name)
         self.combo.currentTextChanged.connect(self.on_test_changed)
         self.combo.lineEdit().editingFinished.connect(self.on_test_edit_finished)
+        self.combo.activated.connect(self._on_combo_activated)
         grid.addWidget(self.combo, 0, 0)
 
         self.lbl_complete = QLabel("✓")
@@ -120,9 +128,77 @@ class TestNodeWidget(QFrame):
 
     def _normalized_test_name(self, text: str) -> str:
         name = (text or "").strip()
-        if name == PLACEHOLDER_TEST:
+        if name in {PLACEHOLDER_TEST, CUSTOM_TEST}:
             return ""
         return name
+
+    def _restore_committed_combo(self):
+        self.combo.blockSignals(True)
+        fill_test_combo(self.combo, self.candidate_pool, self._committed_name)
+        self.combo.blockSignals(False)
+        self.node_data.test_name = self._committed_name
+        self._refresh_complete_mark()
+        self.node_updated.emit()
+
+    def _prompt_custom_name(self):
+        text, ok = QInputDialog.getText(
+            self,
+            "自定义试验名称",
+            "试验名称：",
+            text=self._committed_name or "",
+        )
+        if not ok:
+            self._restore_committed_combo()
+            return
+        name = (text or "").strip()
+        if not is_usable_test_name(name):
+            QMessageBox.warning(self, "提示", "请输入有效的试验名称")
+            self._restore_committed_combo()
+            return
+        self.combo.blockSignals(True)
+        fill_test_combo(self.combo, self.candidate_pool, name)
+        self.combo.blockSignals(False)
+        self._commit_test_name(name)
+
+    def _on_combo_activated(self, *_args):
+        if self.combo.currentText().strip() == CUSTOM_TEST:
+            self._prompt_custom_name()
+            return
+        self.on_test_edit_finished()
+
+    def _project_state(self):
+        widget = self.parent()
+        while widget is not None:
+            state = getattr(widget, "state", None)
+            if state is not None:
+                return state
+            widget = widget.parent()
+        return None
+
+    def _commit_test_name(self, name):
+        old = self._committed_name
+        self.node_data.test_name = name
+        if old == name:
+            self._refresh_complete_mark()
+            self.node_updated.emit()
+            return
+        state = self._project_state()
+        root = Path(state.project_path) if state and getattr(state, "project_path", "") else None
+        if root is not None and root.is_dir() and is_usable_test_name(old):
+            try:
+                rename_test_dir(root, old, name)
+            except PhotoError as exc:
+                QMessageBox.warning(self, "无法改名", str(exc))
+                self.combo.blockSignals(True)
+                fill_test_combo(self.combo, self.candidate_pool, old)
+                self.combo.blockSignals(False)
+                self.node_data.test_name = old
+                self._refresh_complete_mark()
+                self.node_updated.emit()
+                return
+        self._committed_name = name
+        self._refresh_complete_mark()
+        self.node_updated.emit()
 
     def on_test_changed(self, text):
         name = self._normalized_test_name(text)
@@ -135,8 +211,10 @@ class TestNodeWidget(QFrame):
     def on_test_edit_finished(self):
         name = self._normalized_test_name(self.combo.currentText())
         if self.combo.currentText() != name:
+            self.combo.blockSignals(True)
             self.combo.setEditText(name)
-        self.on_test_changed(name)
+            self.combo.blockSignals(False)
+        self._commit_test_name(name)
 
 class LegWidget(QFrame):
     """A single Leg column containing multiple Test Nodes"""

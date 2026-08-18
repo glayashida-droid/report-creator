@@ -56,7 +56,7 @@ class MirrorWorker(QThread):
             self.failed.emit(self._generation, str(e))
 
 
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.2"
 
 
 class MainWindow(QMainWindow):
