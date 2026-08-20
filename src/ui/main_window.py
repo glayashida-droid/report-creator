@@ -57,7 +57,7 @@ class MirrorWorker(QThread):
             self.failed.emit(self._generation, str(e))
 
 
-APP_VERSION = "1.2"
+APP_VERSION = "1.2.1"
 # Calendar popup floor. Dates before this are treated as "no end date"
 # because QDateEdit may clamp the blank sentinel to 1752-09-14.
 _EARLIEST_REAL_YEAR = 1990
@@ -933,7 +933,27 @@ class MainWindow(QMainWindow):
         try:
             from src.generators.word_engine import WordGenerator
 
-            template_path = Path("templates/template_raw.docx")
+            lang, ok = QInputDialog.getItem(
+                self,
+                "选择报告语言",
+                "请选择要生成的报告语言：",
+                ["中文", "英文", "中英文"],
+                0,
+                False,
+            )
+            if not ok:
+                return
+            if lang != "中文":
+                QMessageBox.information(
+                    self,
+                    "模板未就绪",
+                    f"「{lang}」模板尚未接入，当前仅支持中文报告。",
+                )
+                return
+
+            template_path = Path("templates/template_zh.docx")
+            if not template_path.exists():
+                template_path = Path("templates/template_raw.docx")
             if not template_path.exists():
                 QMessageBox.warning(self, "错误", f"找不到模板文件: {template_path}")
                 return
@@ -979,14 +999,19 @@ class MainWindow(QMainWindow):
                 )
                 return
 
+            report_no = WordGenerator.default_report_no(self.state, lang)
             engine.generate(
                 self.state, str(out_path),
                 project_path=target_project_path, leg_filter=leg_filter,
+                report_language=lang,
             )
 
             msg = QMessageBox(self)
             msg.setWindowTitle("导出成功")
-            msg.setText(f"报告已生成至:\n{out_path}{scope_note}")
+            msg.setText(
+                f"报告已生成至:\n{out_path}"
+                f"{scope_note}\n报告语言: {lang}\n报告编号: {report_no}"
+            )
             btn_open = msg.addButton("打开所在文件夹", QMessageBox.ActionRole)
             msg.addButton(QMessageBox.Ok)
             msg.exec()

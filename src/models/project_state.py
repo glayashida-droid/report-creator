@@ -40,8 +40,9 @@ class TestSample(BaseModel):
 
 class TestEquipment(BaseModel):
     name: str = ""
-    code: str = ""
+    code: str = ""  # report/UI number, e.g. TTE20236127-V066
     model: str = ""
+    valid_date: str = ""  # 校准有效期 yyyy-MM-dd, captured at selection time
 
 
 class TestStandard(BaseModel):

@@ -149,6 +149,46 @@ def test_restore_equipments_matches_code_not_shared_name():
         dlg.close()
 
 
+def test_equipment_displays_tte_and_saves_valid_date():
+    _app()
+    node = TestNode(test_name="冲击")
+    catalog = [
+        {
+            "设备编号": "SHAED-V066",
+            "内部编号": "TTE20236127",
+            "设备名称": "水平冲击试验台",
+            "型号": "SY12-100A",
+            "计划校准时间": datetime(2027, 1, 22),
+        },
+        {
+            "设备编号": "SHAED-V067",
+            "内部编号": "",
+            "设备名称": "单轴加速度传感器",
+            "型号": "BW23108",
+            "计划校准时间": datetime(2027, 3, 9),
+        },
+    ]
+    dlg = TestDetailDialog(node, [], catalog)
+    try:
+        assert dlg.eq_table.item(0, 1).text() == "TTE20236127-V066"
+        assert dlg.eq_table.item(1, 1).text() == "SHAED-V067"
+        dlg.eq_table.item(0, 0).setCheckState(Qt.Checked)
+        picked = dlg._selected_equipments()
+        assert len(picked) == 1
+        assert picked[0].code == "TTE20236127-V066"
+        assert picked[0].valid_date == "2027-01-22"
+        # restore from saved TTE code still checks the catalog row
+        node.equipments = picked
+        dlg2 = TestDetailDialog(node, [], catalog)
+        try:
+            assert dlg2.eq_table.item(0, 0).checkState() == Qt.Checked
+            assert dlg2.eq_table.item(1, 0).checkState() == Qt.Unchecked
+        finally:
+            dlg2.close()
+    finally:
+        dlg.close()
+
+
 def test_legacy_equipment_name_matches_codes_not_names():
     legacy = "SHAED-A050 电子万能试验机；SHAED-C001 温湿度环境箱"
     assert equipment_should_restore("SHAED-A050", "电子万能试验机", [], legacy)
@@ -163,5 +203,6 @@ if __name__ == "__main__":
     test_equipment_table_shows_cal_date_and_marks_expired()
     test_header_clear_unchecks_multiselect()
     test_restore_equipments_matches_code_not_shared_name()
+    test_equipment_displays_tte_and_saves_valid_date()
     test_legacy_equipment_name_matches_codes_not_names()
     print("ok")

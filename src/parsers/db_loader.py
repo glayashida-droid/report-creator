@@ -27,6 +27,34 @@ def cell_text(value) -> str:
     return text
 
 
+def equipment_display_code(row: Dict[str, Any] | None) -> str:
+    """Report/UI equipment number: 内部编号-后缀 (TTE…), fallback to 设备编号."""
+    rec = row or {}
+    raw = cell_text(rec.get("设备编号"))
+    internal = cell_text(rec.get("内部编号"))
+    if not internal:
+        return raw
+    if raw.upper().startswith("SHAED-") and "-" in raw:
+        suffix = raw.split("-", 1)[-1]
+        if suffix:
+            return f"{internal}-{suffix}"
+    return internal
+
+
+def equipment_match_codes(row: Dict[str, Any] | None) -> List[str]:
+    """All code forms that should match a catalog row when restoring picks."""
+    rec = row or {}
+    codes = []
+    for value in (
+        cell_text(rec.get("设备编号")),
+        cell_text(rec.get("内部编号")),
+        equipment_display_code(rec),
+    ):
+        if value and value not in codes:
+            codes.append(value)
+    return codes
+
+
 def standard_ref_key(std_no, chapter) -> Tuple[str, str]:
     return (cell_text(std_no), cell_text(chapter))
 

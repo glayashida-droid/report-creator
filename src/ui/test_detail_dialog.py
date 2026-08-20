@@ -22,6 +22,7 @@ from src.models.project_state import (
     TestStandard,
 )
 from src.parsers.key_params import KeyParamReplaceError, apply_key_params, parse_key_params
+from src.parsers.db_loader import equipment_display_code, equipment_match_codes
 from src.io.data_tables import (
     DataTableError,
     PreviewSnapshot,
@@ -74,17 +75,18 @@ def _legacy_equipment_codes(legacy_name):
     return codes
 
 
-def equipment_should_restore(code, name, saved, legacy_name=""):
+def equipment_should_restore(code, name, saved, legacy_name="", match_codes=None):
     """Match a catalog row to saved picks by equipment code, never by shared name."""
     saved = list(saved or [])
     codes = {_cell_text(e.code) for e in saved if _cell_text(getattr(e, "code", ""))}
+    candidates = [c for c in ([code] + list(match_codes or [])) if _cell_text(c)]
     if codes:
-        return bool(code) and code in codes
+        return any(c in codes for c in candidates)
     names = {_cell_text(e.name) for e in saved if _cell_text(getattr(e, "name", ""))}
     if names:
         return bool(name) and name in names
     legacy_codes = _legacy_equipment_codes(legacy_name)
-    return bool(code) and code in legacy_codes
+    return any(c in legacy_codes for c in candidates)
 
 
 def _parse_qdate(value):
@@ -664,7 +666,7 @@ class TestDetailDialog(QDialog):
         eq_layout.addWidget(QLabel("可多选，点击行或勾选"))
 
         self.txt_eq_search = QLineEdit()
-        self.txt_eq_search.setPlaceholderText("搜索设备编号或设备名称，如 SHAED、温湿度")
+        self.txt_eq_search.setPlaceholderText("搜索设备编号或设备名称，如 TTE、温湿度")
         self.txt_eq_search.textChanged.connect(self._filter_equipments)
         eq_layout.addWidget(self.txt_eq_search)
 
@@ -892,7 +894,7 @@ class TestDetailDialog(QDialog):
         self.eq_table.blockSignals(True)
         self.eq_table.setRowCount(0)
         for eq in self.equipments:
-            code = _cell_text(eq.get("设备编号"))
+            code = equipment_display_code(eq)
             name = _cell_text(eq.get("设备名称"))
             model = _cell_text(eq.get("型号"))
             cal = _format_cal_date(eq.get("计划校准时间"))
@@ -943,8 +945,9 @@ class TestDetailDialog(QDialog):
             if key not in self._std_pick_order:
                 self._std_pick_order.append(key)
         elif key in self._std_pick_order:
+            # Keep in-session edits / key-param confirm so uncheck→recheck
+            # restores the same state (and the detail-complete mark stays).
             self._std_pick_order.remove(key)
-            self._forget_key_params(key)
         self._refresh_std_summary()
 
     def _on_std_cell_clicked(self, row, col):
@@ -1034,9 +1037,9 @@ class TestDetailDialog(QDialog):
                 continue
 
     def _collect_cond_edits(self):
+        # Do not prune by pick order: unchecked standards may be re-checked
+        # in the same dialog session and should keep their edited text.
         self._collect_map_edits(self._cond_editors, self._cond_edits)
-        allowed = set(self._std_pick_order)
-        self._cond_edits = {key: value for key, value in self._cond_edits.items() if key in allowed}
 
     def _collect_key_param_edits(self):
         allowed = set(self._std_pick_order)
@@ -1449,10 +1452,15 @@ class TestDetailDialog(QDialog):
             if chk is None or chk.checkState() != Qt.Checked:
                 continue
             data = chk.data(Qt.UserRole) or {}
+            code_item = self.eq_table.item(row, 1)
+            cal_item = self.eq_table.item(row, 4)
             picked.append(TestEquipment(
                 name=_cell_text(data.get("设备名称")),
-                code=_cell_text(data.get("设备编号")),
+                code=(code_item.text().strip() if code_item else "")
+                or equipment_display_code(data),
                 model=_cell_text(data.get("型号")),
+                valid_date=(cal_item.text().strip() if cal_item else "")
+                or _format_cal_date(data.get("计划校准时间")),
             ))
         return picked
 
@@ -2034,7 +2042,13 @@ class TestDetailDialog(QDialog):
             data = chk.data(Qt.UserRole) if chk else {}
             code = _cell_text((data or {}).get("设备编号"))
             name = _cell_text((data or {}).get("设备名称"))
-            checked = equipment_should_restore(code, name, saved, legacy)
+            checked = equipment_should_restore(
+                code,
+                name,
+                saved,
+                legacy,
+                match_codes=equipment_match_codes(data),
+            )
             if chk is not None:
                 chk.setCheckState(Qt.Checked if checked else Qt.Unchecked)
         self.eq_table.blockSignals(False)

@@ -173,6 +173,51 @@ def test_dialog_confirm_uncheck_reconfirm_uses_original():
         dlg.close()
 
 
+def test_dialog_uncheck_recheck_keeps_key_param_confirm():
+    """Uncheck→recheck a standard must not clear key_params_confirmed (detail ✓)."""
+    _app()
+    original = "将样品在（70±2.5）℃恒温箱中保持408小时。"
+    node = _filled_node(
+        key_params=["（85±2.5）℃"],
+        key_params_defaults=["（70±2.5）℃"],
+        key_params_confirmed=True,
+    )
+    assert node.is_detail_complete() is True
+    catalog = [
+        {
+            "标准号": "ABC",
+            "章节号": "1.1",
+            "试验名称": "耐热",
+            "标准描述": original,
+            "评价要求": "无损坏",
+            "结果描述": "完好",
+            "关键参数": "（70±2.5）℃",
+        }
+    ]
+    dlg = TestDetailDialog(node, catalog, [{"设备编号": "EQ-1", "设备名称": "恒温箱"}])
+    try:
+        dlg.show()
+        chk = dlg.std_table.item(0, 0)
+        assert chk.checkState() == Qt.Checked
+        assert dlg._key_param_confirmed[("ABC", "1.1")] is True
+
+        chk.setCheckState(Qt.Unchecked)
+        assert ("ABC", "1.1") not in dlg._std_pick_order
+        chk.setCheckState(Qt.Checked)
+        assert dlg._std_pick_order == [("ABC", "1.1")]
+        assert dlg._key_param_confirmed[("ABC", "1.1")] is True
+
+        picked = dlg._selected_standards()
+        assert picked[0].key_params_confirmed is True
+        assert picked[0].key_params == ["（85±2.5）℃"]
+
+        dlg.save_and_close()
+        assert node.is_detail_complete() is True
+        assert node.standards[0].key_params_confirmed is True
+    finally:
+        dlg.close()
+
+
 if __name__ == "__main__":
     test_parse_splits_ascii_and_chinese_commas()
     test_apply_replaces_from_original_not_previous_result()
@@ -182,4 +227,5 @@ if __name__ == "__main__":
     test_detail_complete_requires_key_param_confirm()
     test_incomplete_export_labels_follow_scope()
     test_dialog_confirm_uncheck_reconfirm_uses_original()
+    test_dialog_uncheck_recheck_keeps_key_param_confirm()
     print("test_key_params: ok")
