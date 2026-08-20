@@ -4,17 +4,28 @@ from __future__ import annotations
 
 import re
 import shutil
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, List, Sequence, Tuple
+from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 from openpyxl import Workbook, load_workbook
 
+from src.io.project_mirror import repo_root
 from src.io.test_photos import is_usable_test_name, test_dir
 from src.models.project_state import DataTableRef
 
 ATTACHMENT_DIR = "数据表附件"
 _BAD_NAME = re.compile(r'[\\/:*?"<>|]')
+
+# macOS .app bundle names / Windows executable stems, preferred order
+_EXCEL_APP_NAMES = ("Microsoft Excel",)
+_WPS_APP_NAMES = ("wpsoffice", "WPS Office", "kingsoft")
+
+
+def default_templates_dir() -> Path:
+    return repo_root() / "templates" / "data_tables"
 
 
 class DataTableError(Exception):
@@ -98,6 +109,124 @@ def upload_existing_xlsx(
     title = src.name
     rel = dest.relative_to(Path(project_root)).as_posix()
     return DataTableRef(title=title, relative_path=rel)
+
+
+def list_data_table_templates(templates_dir: Path | None = None) -> List[Path]:
+    """List .xlsx files in the app-level templates folder (sorted by name)."""
+    folder = Path(templates_dir) if templates_dir is not None else default_templates_dir()
+    if not folder.is_dir():
+        return []
+    return sorted(
+        (p for p in folder.iterdir() if p.is_file() and p.suffix.lower() == ".xlsx"),
+        key=lambda p: p.name.lower(),
+    )
+
+
+def copy_from_template(
+    project_root: Path, test_name: str, template_path: Path
+) -> DataTableRef:
+    """Copy a template .xlsx into the attachment folder (same semantics as upload)."""
+    return upload_existing_xlsx(project_root, test_name, template_path)
+
+
+def _col1_has_content(ws) -> bool:
+    for row in ws.iter_rows(min_col=1, max_col=1):
+        for cell in row:
+            if _is_nonempty(cell.value):
+                return True
+    return False
+
+
+def import_sample_ids(path: Path, sample_ids: Sequence[str]) -> None:
+    """Write sample ids into the first sheet from row 2; insert col 1 if it has content."""
+    xlsx = Path(path)
+    if not xlsx.is_file():
+        raise DataTableError("数据表文件不存在")
+    ids = [str(s).strip() for s in sample_ids if str(s).strip()]
+    wb = load_workbook(xlsx)
+    try:
+        ws = wb.worksheets[0]
+        if _col1_has_content(ws):
+            ws.insert_cols(1)
+        for i, sid in enumerate(ids):
+            ws.cell(row=2 + i, column=1, value=sid)
+        wb.save(xlsx)
+    finally:
+        wb.close()
+
+
+def _default_app_exists(app_name: str) -> bool:
+    """True if a macOS .app or a PATH executable named app_name is present."""
+    if sys.platform == "darwin":
+        candidates = [
+            Path("/Applications") / f"{app_name}.app",
+            Path.home() / "Applications" / f"{app_name}.app",
+        ]
+        if any(c.is_dir() for c in candidates):
+            return True
+    return shutil.which(app_name) is not None
+
+
+def resolve_open_argv(
+    path: Path,
+    *,
+    platform: Optional[str] = None,
+    app_exists: Optional[Callable[[str], bool]] = None,
+) -> List[str]:
+    """Build argv to open an xlsx: Excel → WPS → system default. Does not launch."""
+    target = str(Path(path))
+    plat = platform if platform is not None else sys.platform
+    exists = app_exists or _default_app_exists
+
+    if plat == "darwin":
+        for name in _EXCEL_APP_NAMES:
+            if exists(name):
+                return ["open", "-a", name, target]
+        for name in _WPS_APP_NAMES:
+            if exists(name):
+                return ["open", "-a", name, target]
+        return ["open", target]
+
+    if plat.startswith("win"):
+        for name in ("EXCEL.EXE", "excel"):
+            exe = shutil.which(name) if app_exists is None else (name if exists(name) else None)
+            if exe:
+                return [exe, target]
+        for name in ("wps", "wpsoffice"):
+            exe = shutil.which(name) if app_exists is None else (name if exists(name) else None)
+            if exe:
+                return [exe, target]
+        return ["cmd", "/c", "start", "", target]
+
+    # Linux / other: PATH then xdg-open
+    for name in ("excel", "soffice", "wps", "wpsoffice"):
+        if exists(name):
+            exe = shutil.which(name) or name
+            return [exe, target]
+    return ["xdg-open", target]
+
+
+def open_attachment(
+    path: Path,
+    *,
+    runner: Optional[Callable[..., Any]] = None,
+    resolve_argv: Optional[Callable[[Path], List[str]]] = None,
+) -> None:
+    """Open the attachment in an external spreadsheet app. Raises DataTableError on failure."""
+    xlsx = Path(path)
+    if not xlsx.is_file():
+        raise DataTableError("数据表文件不存在")
+    argv = (resolve_argv or resolve_open_argv)(xlsx)
+    run = runner or subprocess.run
+    try:
+        result = run(argv, check=False, capture_output=True, text=True)
+    except OSError as exc:
+        raise DataTableError(f"无法打开数据表：{exc}") from exc
+    code = getattr(result, "returncode", 0)
+    if code:
+        err = (getattr(result, "stderr", None) or getattr(result, "stdout", None) or "").strip()
+        detail = f"：{err}" if err else ""
+        raise DataTableError(f"无法打开数据表{detail}")
 
 
 def _cell_display(value: Any) -> str:

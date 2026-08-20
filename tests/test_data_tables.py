@@ -6,8 +6,13 @@ from openpyxl import Workbook, load_workbook
 from src.io.data_tables import (
     DataTableError,
     attachment_dir,
+    copy_from_template,
     create_blank_workbook,
+    import_sample_ids,
+    list_data_table_templates,
+    open_attachment,
     read_preview_snapshot,
+    resolve_open_argv,
     upload_existing_xlsx,
 )
 from src.models.project_state import DataTableRef, ProjectState, TestLeg, TestNode
@@ -167,6 +172,152 @@ def test_preview_refresh_rereads_disk_changes():
         assert after.values != before.values
 
 
+def test_import_sample_ids_empty_col1_writes_from_row2():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "empty.xlsx"
+        wb = Workbook()
+        wb.save(path)
+        wb.close()
+        import_sample_ids(path, ["A01", "A02", "A03"])
+        wb = load_workbook(path)
+        ws = wb.active
+        assert ws["A1"].value in (None, "")
+        assert ws["A2"].value == "A01"
+        assert ws["A3"].value == "A02"
+        assert ws["A4"].value == "A03"
+        wb.close()
+
+
+def test_import_sample_ids_inserts_col_when_col1_has_content():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "filled.xlsx"
+        wb = Workbook()
+        ws = wb.active
+        ws["A1"] = "结果"
+        ws["A2"] = "Pass"
+        ws["B1"] = "备注"
+        wb.save(path)
+        wb.close()
+        import_sample_ids(path, ["S1", "S2"])
+        wb = load_workbook(path)
+        ws = wb.active
+        assert ws["A2"].value == "S1"
+        assert ws["A3"].value == "S2"
+        assert ws["B1"].value == "结果"
+        assert ws["B2"].value == "Pass"
+        assert ws["C1"].value == "备注"
+        wb.close()
+
+
+def test_import_sample_ids_missing_file_raises():
+    try:
+        import_sample_ids(Path("/tmp/no-such-data-table.xlsx"), ["A01"])
+        raise AssertionError("expected DataTableError")
+    except DataTableError:
+        pass
+
+
+def test_resolve_open_argv_prefers_excel_then_wps_then_default():
+    excel = resolve_open_argv(
+        Path("/tmp/a.xlsx"),
+        platform="darwin",
+        app_exists=lambda name: name == "Microsoft Excel",
+    )
+    assert excel == ["open", "-a", "Microsoft Excel", "/tmp/a.xlsx"]
+
+    wps = resolve_open_argv(
+        Path("/tmp/a.xlsx"),
+        platform="darwin",
+        app_exists=lambda name: name == "wpsoffice",
+    )
+    assert wps == ["open", "-a", "wpsoffice", "/tmp/a.xlsx"]
+
+    fallback = resolve_open_argv(
+        Path("/tmp/a.xlsx"),
+        platform="darwin",
+        app_exists=lambda _name: False,
+    )
+    assert fallback == ["open", "/tmp/a.xlsx"]
+
+
+def test_open_attachment_uses_injected_runner_and_raises_on_failure():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "a.xlsx"
+        wb = Workbook()
+        wb.save(path)
+        wb.close()
+
+        calls = []
+
+        def runner(argv, **_kwargs):
+            calls.append(argv)
+
+            class R:
+                returncode = 0
+
+            return R()
+
+        open_attachment(
+            path,
+            runner=runner,
+            resolve_argv=lambda p: ["open", "-a", "Microsoft Excel", str(p)],
+        )
+        assert calls == [["open", "-a", "Microsoft Excel", str(path)]]
+
+        def fail_runner(_argv, **_kwargs):
+            class R:
+                returncode = 1
+                stderr = "boom"
+
+            return R()
+
+        try:
+            open_attachment(
+                path,
+                runner=fail_runner,
+                resolve_argv=lambda p: ["open", str(p)],
+            )
+            raise AssertionError("expected DataTableError")
+        except DataTableError as exc:
+            assert "无法打开" in str(exc) or "打开" in str(exc)
+
+
+def test_list_templates_empty_or_missing_is_safe():
+    with tempfile.TemporaryDirectory() as tmp:
+        missing = Path(tmp) / "nope"
+        assert list_data_table_templates(missing) == []
+        empty = Path(tmp) / "empty"
+        empty.mkdir()
+        assert list_data_table_templates(empty) == []
+
+
+def test_copy_from_template_copies_and_titles_from_filename():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "project"
+        root.mkdir()
+        templates = Path(tmp) / "templates"
+        templates.mkdir()
+        src = templates / "高温记录.xlsx"
+        _write_bbox_fixture(src)
+        ref = copy_from_template(root, "高温试验", src)
+        assert ref.title == "高温记录.xlsx"
+        dest = root / ref.relative_path
+        assert dest.is_file()
+        assert dest.parent == attachment_dir(root, "高温试验")
+        assert dest.read_bytes() == src.read_bytes()
+
+
+def test_list_templates_returns_xlsx_sorted_by_name():
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = Path(tmp)
+        (folder / "b.xlsx").write_bytes(b"PK")
+        (folder / "a.xlsx").write_bytes(b"PK")
+        (folder / "readme.txt").write_text("x")
+        (folder / "skip").mkdir()
+        names = [p.name for p in list_data_table_templates(folder)]
+        assert names == ["a.xlsx", "b.xlsx"]
+
+
 if __name__ == "__main__":
     test_create_blank_workbook_writes_xlsx_and_returns_ref()
     test_create_blank_rejects_unusable_test_name()
@@ -177,4 +328,12 @@ if __name__ == "__main__":
     test_upload_then_preview_snapshot_keeps_bbox_empties()
     test_preview_snapshot_is_bbox_keeps_empty_cells_and_merges()
     test_preview_refresh_rereads_disk_changes()
+    test_import_sample_ids_empty_col1_writes_from_row2()
+    test_import_sample_ids_inserts_col_when_col1_has_content()
+    test_import_sample_ids_missing_file_raises()
+    test_resolve_open_argv_prefers_excel_then_wps_then_default()
+    test_open_attachment_uses_injected_runner_and_raises_on_failure()
+    test_list_templates_empty_or_missing_is_safe()
+    test_copy_from_template_copies_and_titles_from_filename()
+    test_list_templates_returns_xlsx_sorted_by_name()
     print("test_data_tables: ok")

@@ -25,7 +25,11 @@ from src.parsers.key_params import KeyParamReplaceError, apply_key_params, parse
 from src.io.data_tables import (
     DataTableError,
     PreviewSnapshot,
+    copy_from_template,
     create_blank_workbook,
+    import_sample_ids,
+    list_data_table_templates,
+    open_attachment,
     read_preview_snapshot,
     resolve_attachment_path,
     upload_existing_xlsx,
@@ -683,7 +687,7 @@ class TestDetailDialog(QDialog):
         toolbar.addWidget(self.btn_gen_samples)
 
         self.btn_add_data_table = QPushButton("添加数据表")
-        self.btn_add_data_table.setToolTip("上传 Excel / 自由编辑 / 模版（模版后续票完善）")
+        self.btn_add_data_table.setToolTip("上传 Excel / 自由编辑 / 模版")
         self.btn_add_data_table.clicked.connect(self._on_add_data_table)
         toolbar.addWidget(self.btn_add_data_table)
         toolbar.addStretch()
@@ -1585,6 +1589,16 @@ class TestDetailDialog(QDialog):
             drawer.set_expanded(False)
             bar = QHBoxLayout()
             bar.addStretch()
+            btn_open = QPushButton("打开编辑")
+            btn_open.setToolTip("用本机 Excel / WPS / 系统默认程序打开")
+            btn_open.clicked.connect(lambda _=False, r=ref: self._open_data_table(r))
+            bar.addWidget(btn_open)
+            btn_import = QPushButton("导入样品编号")
+            btn_import.setToolTip("从当前样品表写入本表第 1 列（有内容则左插一列），从第 2 行起")
+            btn_import.clicked.connect(
+                lambda _=False, r=ref: self._import_sample_ids_to_data_table(r)
+            )
+            bar.addWidget(btn_import)
             btn_refresh = QPushButton("刷新")
             btn_refresh.setToolTip("从磁盘重新读取预览（外部改过文件后点这里）")
             btn_refresh.clicked.connect(
@@ -1644,8 +1658,7 @@ class TestDetailDialog(QDialog):
         btn_upload = QPushButton("1 · 上传现有 Excel")
         btn_free = QPushButton("2 · 自由编辑")
         btn_template = QPushButton("3 · 模版")
-        btn_template.setEnabled(False)
-        btn_template.setToolTip("后续票实现")
+        btn_template.setToolTip("从 templates/data_tables/ 复制一份")
         layout.addWidget(btn_upload)
         layout.addWidget(btn_free)
         layout.addWidget(btn_template)
@@ -1661,10 +1674,13 @@ class TestDetailDialog(QDialog):
 
         btn_upload.clicked.connect(lambda: pick("upload"))
         btn_free.clicked.connect(lambda: pick("free"))
+        btn_template.clicked.connect(lambda: pick("template"))
         if chooser.exec() != QDialog.Accepted or not chosen["mode"]:
             return
         if chosen["mode"] == "upload":
             self._add_upload_data_table()
+        elif chosen["mode"] == "template":
+            self._add_template_data_table()
         else:
             self._add_free_edit_data_table()
 
@@ -1708,6 +1724,69 @@ class TestDetailDialog(QDialog):
         self._refresh_data_table_list()
         if self._data_table_drawers:
             self._data_table_drawers[-1].set_expanded(True)
+
+    def _add_template_data_table(self):
+        templates = list_data_table_templates()
+        if not templates:
+            QMessageBox.information(
+                self,
+                "模版",
+                "templates/data_tables/ 中暂无可用的 .xlsx 模版。",
+            )
+            return
+        labels = [p.name for p in templates]
+        choice, ok = QInputDialog.getItem(
+            self, "选择模版", "模版文件：", labels, 0, False
+        )
+        if not ok or not choice:
+            return
+        src = next((p for p in templates if p.name == choice), None)
+        if src is None:
+            return
+        root = self._project_root()
+        try:
+            ref = copy_from_template(root, self.node_data.test_name, src)
+        except DataTableError as exc:
+            QMessageBox.warning(self, "提示", str(exc))
+            return
+        self._data_tables.append(ref)
+        self._load_preview_for_ref(ref, force=True)
+        self._refresh_data_table_list()
+        if self._data_table_drawers:
+            self._data_table_drawers[-1].set_expanded(True)
+
+    def _open_data_table(self, ref: DataTableRef):
+        root = self._project_root()
+        if root is None:
+            QMessageBox.warning(self, "提示", "请先加载项目以确定本地镜像路径")
+            return
+        path = resolve_attachment_path(root, ref)
+        try:
+            open_attachment(path)
+        except DataTableError as exc:
+            QMessageBox.warning(self, "无法打开", str(exc))
+
+    def _import_sample_ids_to_data_table(self, ref: DataTableRef):
+        root = self._project_root()
+        if root is None:
+            QMessageBox.warning(self, "提示", "请先加载项目以确定本地镜像路径")
+            return
+        ids = self._existing_sample_ids()
+        if not ids:
+            QMessageBox.warning(self, "提示", "当前样品表没有可用的样品编号")
+            return
+        path = resolve_attachment_path(root, ref)
+        try:
+            import_sample_ids(path, ids)
+        except DataTableError as exc:
+            QMessageBox.warning(self, "提示", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "导入完成",
+            f"已写入 {len(ids)} 个样品编号。点「刷新」可更新预览。",
+        )
+
     def _find_std_row(self, want: TestStandard, used):
         want_key = want.ref_key()
         fallback = None
