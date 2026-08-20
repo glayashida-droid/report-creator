@@ -8,10 +8,11 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QDateEdit, QGroupBox, QMessageBox,
     QTextEdit, QSizePolicy, QAbstractItemView, QScrollArea, QFrame, QWidget,
     QStyledItemDelegate, QStyle, QStyleOptionViewItem, QCheckBox, QInputDialog,
-    QListWidget, QListWidgetItem, QDialogButtonBox,
+    QDialogButtonBox, QFileDialog,
 )
 from PySide6.QtCore import Qt, QDate, Signal, QTimer, QEvent, QPoint
 from PySide6.QtGui import QColor, QCursor, QPixmap
+from openpyxl.utils import range_boundaries
 from src.models.project_state import (
     DataTableRef,
     TestNode,
@@ -21,7 +22,14 @@ from src.models.project_state import (
     TestStandard,
 )
 from src.parsers.key_params import KeyParamReplaceError, apply_key_params, parse_key_params
-from src.io.data_tables import DataTableError, create_blank_workbook
+from src.io.data_tables import (
+    DataTableError,
+    PreviewSnapshot,
+    create_blank_workbook,
+    read_preview_snapshot,
+    resolve_attachment_path,
+    upload_existing_xlsx,
+)
 from src.io.test_photos import is_usable_test_name
 from src.ui.test_photos_panel import TestPhotosPanel
 
@@ -413,6 +421,9 @@ class TestDetailDialog(QDialog):
             DataTableRef(title=r.title, relative_path=r.relative_path)
             for r in (node_data.data_tables or [])
         ]
+        self._data_table_drawers = []
+        self._data_table_preview_cache = {}
+        self._data_table_preview_tables = {}
 
         self.proj_start_date = None
         self.proj_end_date = None
@@ -672,7 +683,7 @@ class TestDetailDialog(QDialog):
         toolbar.addWidget(self.btn_gen_samples)
 
         self.btn_add_data_table = QPushButton("添加数据表")
-        self.btn_add_data_table.setToolTip("上传 Excel / 自由编辑 / 模版")
+        self.btn_add_data_table.setToolTip("上传 Excel / 自由编辑 / 模版（模版后续票完善）")
         self.btn_add_data_table.clicked.connect(self._on_add_data_table)
         toolbar.addWidget(self.btn_add_data_table)
         toolbar.addStretch()
@@ -692,10 +703,11 @@ class TestDetailDialog(QDialog):
         self._setup_result_header()
 
         sample_layout.addWidget(QLabel("数据表"))
-        self.data_table_list = QListWidget()
-        self.data_table_list.setMinimumHeight(72)
-        self.data_table_list.setMaximumHeight(140)
-        sample_layout.addWidget(self.data_table_list)
+        self.data_table_host = QWidget()
+        self.data_table_layout = QVBoxLayout(self.data_table_host)
+        self.data_table_layout.setContentsMargins(0, 0, 0, 0)
+        self.data_table_layout.setSpacing(4)
+        sample_layout.addWidget(self.data_table_host)
         layout.addWidget(self.drawer_sample)
 
         self.drawer_photos = DrawerSection("试验照片")
@@ -1495,10 +1507,127 @@ class TestDetailDialog(QDialog):
         else:
             self.btn_add_data_table.setToolTip("上传 Excel / 自由编辑 / 模版")
 
+    def _clear_data_table_drawers(self):
+        while self.data_table_layout.count():
+            item = self.data_table_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._data_table_drawers = []
+        self._data_table_preview_tables = {}
+
+    def _load_preview_for_ref(self, ref: DataTableRef, force: bool = False) -> PreviewSnapshot:
+        key = ref.relative_path
+        if not force and key in self._data_table_preview_cache:
+            return self._data_table_preview_cache[key]
+        root = self._project_root()
+        if root is None:
+            snap = PreviewSnapshot(sheet_name="", values=[], merges=[])
+            self._data_table_preview_cache[key] = snap
+            return snap
+        path = resolve_attachment_path(root, ref)
+        try:
+            snap = read_preview_snapshot(path)
+        except DataTableError:
+            snap = PreviewSnapshot(sheet_name="", values=[], merges=[])
+        self._data_table_preview_cache[key] = snap
+        return snap
+
+    def _fill_preview_table(self, table: QTableWidget, snap: PreviewSnapshot):
+        table.clearSpans()
+        table.clear()
+        rows = snap.values or []
+        cols = max((len(r) for r in rows), default=0)
+        table.setRowCount(len(rows))
+        table.setColumnCount(cols)
+        table.setHorizontalHeaderLabels([str(i + 1) for i in range(cols)])
+        table.verticalHeader().setVisible(True)
+        for r, row in enumerate(rows):
+            for c in range(cols):
+                text = row[c] if c < len(row) else ""
+                item = QTableWidgetItem(text)
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                table.setItem(r, c, item)
+        origin_r = snap.origin_row or 1
+        origin_c = snap.origin_col or 1
+        for merge in snap.merges or []:
+            try:
+                min_c, min_r, max_c, max_r = range_boundaries(merge)
+            except Exception:
+                continue
+            r0 = min_r - origin_r
+            c0 = min_c - origin_c
+            r1 = max_r - origin_r
+            c1 = max_c - origin_c
+            if r0 < 0 or c0 < 0 or r1 >= len(rows) or c1 >= cols:
+                continue
+            row_span = r1 - r0 + 1
+            col_span = c1 - c0 + 1
+            if row_span > 1 or col_span > 1:
+                table.setSpan(r0, c0, row_span, col_span)
+        table.resizeColumnsToContents()
+
     def _refresh_data_table_list(self):
-        self.data_table_list.clear()
+        keep = {ref.relative_path for ref in self._data_tables}
+        self._data_table_preview_cache = {
+            k: v for k, v in self._data_table_preview_cache.items() if k in keep
+        }
+        self._clear_data_table_drawers()
+        if not self._data_tables:
+            empty = QLabel("尚未添加数据表")
+            empty.setObjectName("dimLabel")
+            self.data_table_layout.addWidget(empty)
+            return
         for ref in self._data_tables:
-            self.data_table_list.addItem(QListWidgetItem(ref.title))
+            drawer = DrawerSection(ref.title, wrap_title=True)
+            drawer._data_table_rel = ref.relative_path
+            drawer.set_expanded(False)
+            bar = QHBoxLayout()
+            bar.addStretch()
+            btn_refresh = QPushButton("刷新")
+            btn_refresh.setToolTip("从磁盘重新读取预览（外部改过文件后点这里）")
+            btn_refresh.clicked.connect(
+                lambda _=False, r=ref: self._refresh_data_table_preview(r)
+            )
+            bar.addWidget(btn_refresh)
+            drawer.body_layout.addLayout(bar)
+
+            preview = QTableWidget(0, 0)
+            preview.setObjectName("dataTablePreview")
+            preview.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            preview.setSelectionMode(QAbstractItemView.NoSelection)
+            preview.setFocusPolicy(Qt.NoFocus)
+            preview.setMinimumHeight(120)
+            preview.setMaximumHeight(220)
+            preview.horizontalHeader().setStretchLastSection(False)
+            snap = self._load_preview_for_ref(ref, force=False)
+            self._fill_preview_table(preview, snap)
+            if snap.merges:
+                merge_lbl = QLabel("合并：" + "、".join(snap.merges))
+                merge_lbl.setObjectName("dimLabel")
+                merge_lbl.setWordWrap(True)
+                drawer.body_layout.addWidget(merge_lbl)
+            drawer.body_layout.addWidget(preview)
+            drawer.header.clicked.connect(
+                lambda _=False, d=drawer, bank=self._data_table_drawers: self._accordion(d, bank)
+            )
+            self.data_table_layout.addWidget(drawer)
+            self._data_table_drawers.append(drawer)
+            self._data_table_preview_tables[ref.relative_path] = preview
+        if len(self._data_table_drawers) == 1:
+            self._data_table_drawers[0].set_expanded(True)
+
+    def _refresh_data_table_preview(self, ref: DataTableRef):
+        self._load_preview_for_ref(ref, force=True)
+        expanded_paths = {
+            getattr(d, "_data_table_rel", ""): d._expanded for d in self._data_table_drawers
+        }
+        self._refresh_data_table_list()
+        for d in self._data_table_drawers:
+            rel = getattr(d, "_data_table_rel", "")
+            if expanded_paths.get(rel) or rel == ref.relative_path:
+                d.set_expanded(True)
 
     def _on_add_data_table(self):
         if not is_usable_test_name(self.node_data.test_name):
@@ -1513,8 +1642,6 @@ class TestDetailDialog(QDialog):
         layout = QVBoxLayout(chooser)
         layout.addWidget(QLabel("请选择添加方式："))
         btn_upload = QPushButton("1 · 上传现有 Excel")
-        btn_upload.setEnabled(False)
-        btn_upload.setToolTip("后续票实现")
         btn_free = QPushButton("2 · 自由编辑")
         btn_template = QPushButton("3 · 模版")
         btn_template.setEnabled(False)
@@ -1528,14 +1655,39 @@ class TestDetailDialog(QDialog):
 
         chosen = {"mode": None}
 
-        def pick_free():
-            chosen["mode"] = "free"
+        def pick(mode):
+            chosen["mode"] = mode
             chooser.accept()
 
-        btn_free.clicked.connect(pick_free)
-        if chooser.exec() != QDialog.Accepted or chosen["mode"] != "free":
+        btn_upload.clicked.connect(lambda: pick("upload"))
+        btn_free.clicked.connect(lambda: pick("free"))
+        if chooser.exec() != QDialog.Accepted or not chosen["mode"]:
             return
-        self._add_free_edit_data_table()
+        if chosen["mode"] == "upload":
+            self._add_upload_data_table()
+        else:
+            self._add_free_edit_data_table()
+
+    def _add_upload_data_table(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 Excel 数据表",
+            "",
+            "Excel 文件 (*.xlsx)",
+        )
+        if not path:
+            return
+        root = self._project_root()
+        try:
+            ref = upload_existing_xlsx(root, self.node_data.test_name, Path(path))
+        except DataTableError as exc:
+            QMessageBox.warning(self, "提示", str(exc))
+            return
+        self._data_tables.append(ref)
+        self._load_preview_for_ref(ref, force=True)
+        self._refresh_data_table_list()
+        if self._data_table_drawers:
+            self._data_table_drawers[-1].set_expanded(True)
 
     def _add_free_edit_data_table(self):
         title, ok = QInputDialog.getText(self, "自由编辑", "数据表标题：")
@@ -1552,8 +1704,10 @@ class TestDetailDialog(QDialog):
             QMessageBox.warning(self, "提示", str(exc))
             return
         self._data_tables.append(ref)
+        self._load_preview_for_ref(ref, force=True)
         self._refresh_data_table_list()
-
+        if self._data_table_drawers:
+            self._data_table_drawers[-1].set_expanded(True)
     def _find_std_row(self, want: TestStandard, used):
         want_key = want.ref_key()
         fallback = None

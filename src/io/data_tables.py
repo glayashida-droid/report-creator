@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import re
+import shutil
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, List, Sequence, Tuple
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 from src.io.test_photos import is_usable_test_name, test_dir
 from src.models.project_state import DataTableRef
@@ -16,6 +19,18 @@ _BAD_NAME = re.compile(r'[\\/:*?"<>|]')
 
 class DataTableError(Exception):
     pass
+
+
+@dataclass
+class PreviewSnapshot:
+    """Readonly first-sheet bbox: values as strings, empty cells kept, merges as A1:B2."""
+
+    sheet_name: str
+    values: List[List[str]] = field(default_factory=list)
+    merges: List[str] = field(default_factory=list)
+    # 1-based origin of values[0][0] in the sheet (for mapping merge refs onto the grid)
+    origin_row: int = 1
+    origin_col: int = 1
 
 
 def attachment_dir(project_root: Path, test_name: str) -> Path:
@@ -64,3 +79,105 @@ def create_blank_workbook(
     wb.close()
     rel = dest.relative_to(Path(project_root)).as_posix()
     return DataTableRef(title=name, relative_path=rel)
+
+
+def upload_existing_xlsx(
+    project_root: Path, test_name: str, source: Path
+) -> DataTableRef:
+    """Copy an existing .xlsx into the attachment folder; title is the filename."""
+    test = _require_usable_test_name(test_name)
+    src = Path(source)
+    if not src.is_file():
+        raise DataTableError("找不到所选 Excel 文件")
+    if src.suffix.lower() != ".xlsx":
+        raise DataTableError("仅支持 .xlsx 文件")
+    folder = attachment_dir(project_root, test)
+    stem = sanitize_filename_stem(src.stem)
+    dest = unique_xlsx_path(folder, stem)
+    shutil.copy2(src, dest)
+    title = src.name
+    rel = dest.relative_to(Path(project_root)).as_posix()
+    return DataTableRef(title=title, relative_path=rel)
+
+
+def _cell_display(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and value != value:  # NaN
+        return ""
+    if isinstance(value, str):
+        return value
+    text = str(value).strip()
+    if text in {"", "nan", "NaT", "None"}:
+        return ""
+    return str(value)
+
+
+def _is_nonempty(value: Any) -> bool:
+    return _cell_display(value) != ""
+
+
+def _used_bbox(ws) -> Tuple[int, int, int, int] | None:
+    """Return 1-based (min_row, min_col, max_row, max_col) for nonempty cells, or None."""
+    min_r = min_c = max_r = max_c = None
+    for row in ws.iter_rows():
+        for cell in row:
+            if not _is_nonempty(cell.value):
+                continue
+            r, c = cell.row, cell.column
+            min_r = r if min_r is None else min(min_r, r)
+            max_r = r if max_r is None else max(max_r, r)
+            min_c = c if min_c is None else min(min_c, c)
+            max_c = c if max_c is None else max(max_c, c)
+    if min_r is None:
+        return None
+    return min_r, min_c, max_r, max_c
+
+
+def _merges_in_bbox(
+    merges: Sequence, min_r: int, min_c: int, max_r: int, max_c: int
+) -> List[str]:
+    out: List[str] = []
+    for rng in merges:
+        # CellRange has min_row/min_col/max_row/max_col
+        if rng.max_row < min_r or rng.min_row > max_r:
+            continue
+        if rng.max_col < min_c or rng.min_col > max_c:
+            continue
+        out.append(str(rng))
+    return out
+
+
+def read_preview_snapshot(path: Path) -> PreviewSnapshot:
+    """Read first sheet as a nonempty bounding box; keep holes; list intersecting merges."""
+    xlsx = Path(path)
+    if not xlsx.is_file():
+        raise DataTableError("数据表文件不存在")
+    wb = load_workbook(xlsx, data_only=False)
+    try:
+        ws = wb.worksheets[0]
+        sheet_name = ws.title or ""
+        bbox = _used_bbox(ws)
+        if bbox is None:
+            return PreviewSnapshot(sheet_name=sheet_name, values=[], merges=[])
+        min_r, min_c, max_r, max_c = bbox
+        values: List[List[str]] = []
+        for r in range(min_r, max_r + 1):
+            row_vals: List[str] = []
+            for c in range(min_c, max_c + 1):
+                row_vals.append(_cell_display(ws.cell(r, c).value))
+            values.append(row_vals)
+        merges = _merges_in_bbox(ws.merged_cells.ranges, min_r, min_c, max_r, max_c)
+        return PreviewSnapshot(
+            sheet_name=sheet_name,
+            values=values,
+            merges=merges,
+            origin_row=min_r,
+            origin_col=min_c,
+        )
+    finally:
+        wb.close()
+
+
+def resolve_attachment_path(project_root: Path, ref: DataTableRef) -> Path:
+    return Path(project_root) / ref.relative_path
