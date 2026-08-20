@@ -175,7 +175,7 @@ QPushButton#photoRenameAllLink {{
 }}
 
 QLabel#stdImagePopup {{
-    background-color: {BG};
+    background-color: #FFFFFF;
     border: 1px solid {CYAN};
     border-radius: 8px;
     padding: 8px;
@@ -338,6 +338,10 @@ QCalendarWidget QWidget {{
     color: {TEXT};
 }}
 
+QCalendarWidget QWidget#qt_calendar_navigationbar {{
+    background-color: {BG_PANEL};
+}}
+
 QCalendarWidget QToolButton {{
     background-color: transparent;
     color: {CYAN};
@@ -349,6 +353,22 @@ QCalendarWidget QToolButton {{
 QCalendarWidget QToolButton:hover {{
     background-color: {BG_HOVER};
     color: {MAGENTA};
+}}
+
+QCalendarWidget QToolButton#qt_calendar_prevmonth,
+QCalendarWidget QToolButton#qt_calendar_nextmonth {{
+    background-color: transparent;
+    border: none;
+    border-radius: 4px;
+    padding: 4px;
+    width: 28px;
+    height: 28px;
+    color: {CYAN};
+}}
+
+QCalendarWidget QToolButton#qt_calendar_prevmonth:hover,
+QCalendarWidget QToolButton#qt_calendar_nextmonth:hover {{
+    background-color: {BG_HOVER};
 }}
 
 QCalendarWidget QAbstractItemView:enabled {{
@@ -650,6 +670,49 @@ QFrame#legCard, QFrame#testNodeCard {{
     border-radius: 10px;
 }}
 
+QPushButton#ganttZoomButton {{
+    background-color: {BG_INPUT};
+    color: {CYAN};
+    border: 1px solid {CYAN_DIM};
+    border-radius: 6px;
+    font-weight: 700;
+    font-size: 15px;
+    padding: 0;
+    margin: 0;
+    min-width: 28px;
+    max-width: 28px;
+    min-height: 28px;
+    max-height: 28px;
+}}
+
+QPushButton#legToolbarButton, QPushButton#legToolbarAccentButton {{
+    background-color: {BG_INPUT};
+    border-radius: 6px;
+    padding: 0 10px;
+    font-size: 12px;
+    min-height: 28px;
+    max-height: 28px;
+}}
+
+QPushButton#legToolbarAccentButton {{
+    border: 1px solid {MAGENTA};
+}}
+
+QPushButton#legToolbarAccentButton:hover {{
+    color: {MAGENTA};
+    border: 1px solid {MAGENTA};
+}}
+
+QPushButton#ganttZoomButton:hover:enabled {{
+    border: 1px solid {CYAN};
+    color: {TEXT};
+}}
+
+QPushButton#ganttZoomButton:disabled {{
+    color: {TEXT_DIM};
+    border-color: {BORDER};
+}}
+
 QFrame#testNodeCard:hover {{
     border: 1px solid {CYAN_DIM};
 }}
@@ -698,6 +761,101 @@ QInputDialog, QFileDialog {{
     color: {TEXT};
 }}
 """
+
+
+# Project date pickers open in this year when the field is still blank.
+DEFAULT_PROJECT_YEAR = 2026
+_EARLIEST_REAL_YEAR = 1990
+
+
+def default_project_qdate():
+    """Today's month/day clamped into DEFAULT_PROJECT_YEAR."""
+    from PySide6.QtCore import QDate
+
+    today = QDate.currentDate()
+    days = QDate(DEFAULT_PROJECT_YEAR, today.month(), 1).daysInMonth()
+    return QDate(DEFAULT_PROJECT_YEAR, today.month(), min(today.day(), days))
+
+
+def _triangle_icon(pointing: str, color: str, size: int = 16):
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap, QPolygonF
+
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setBrush(QColor(color))
+    painter.setPen(Qt.NoPen)
+    margin = size * 0.22
+    if pointing == "left":
+        points = [
+            QPointF(size - margin, margin),
+            QPointF(margin, size / 2),
+            QPointF(size - margin, size - margin),
+        ]
+    else:
+        points = [
+            QPointF(margin, margin),
+            QPointF(size - margin, size / 2),
+            QPointF(margin, size - margin),
+        ]
+    painter.drawPolygon(QPolygonF(points))
+    painter.end()
+    return QIcon(pm)
+
+
+def style_calendar_nav_arrows(calendar):
+    """Replace default black prev/next icons with cyan triangles."""
+    from PySide6.QtWidgets import QToolButton
+
+    if calendar is None:
+        return
+    prev_btn = calendar.findChild(QToolButton, "qt_calendar_prevmonth")
+    next_btn = calendar.findChild(QToolButton, "qt_calendar_nextmonth")
+    if prev_btn is not None:
+        prev_btn.setIcon(_triangle_icon("left", CYAN))
+    if next_btn is not None:
+        next_btn.setIcon(_triangle_icon("right", CYAN))
+
+
+class _BlankDateCalendarFilter:
+    """Keep a QObject event filter alive on the date edit."""
+
+    def __init__(self, date_edit, default_year: int = DEFAULT_PROJECT_YEAR):
+        from PySide6.QtCore import QDate, QEvent, QObject, QTimer
+
+        class _Filter(QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == QEvent.Show:
+                    value = date_edit.date()
+                    if (not value.isValid()) or value.year() < _EARLIEST_REAL_YEAR:
+                        # Defer so we win over QDateEdit's own page sync on show.
+                        year = default_year
+                        month = QDate.currentDate().month()
+                        QTimer.singleShot(0, lambda: obj.setCurrentPage(year, month))
+                return False
+
+        self._filter = _Filter(date_edit)
+
+    def install(self, calendar):
+        calendar.installEventFilter(self._filter)
+
+
+def polish_date_edit_calendar(date_edit, *, blank_opens_at_default_year: bool = False):
+    """Style calendar arrows; optionally open blank fields at DEFAULT_PROJECT_YEAR."""
+    from PySide6.QtCore import QDate
+
+    calendar = date_edit.calendarWidget()
+    if calendar is None:
+        return
+    style_calendar_nav_arrows(calendar)
+    calendar.setCurrentPage(DEFAULT_PROJECT_YEAR, QDate.currentDate().month())
+    if blank_opens_at_default_year:
+        popup_filter = _BlankDateCalendarFilter(date_edit)
+        popup_filter.install(calendar)
+        # Keep the filter alive for the lifetime of the date edit.
+        date_edit._blank_date_calendar_filter = popup_filter
 
 
 def apply_cyberpunk_theme(app):

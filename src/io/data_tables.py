@@ -310,3 +310,10 @@ def read_preview_snapshot(path: Path) -> PreviewSnapshot:
 
 def resolve_attachment_path(project_root: Path, ref: DataTableRef) -> Path:
     return Path(project_root) / ref.relative_path
+
+
+def delete_attachment(path: Path) -> None:
+    """Remove the xlsx from disk if present. Missing file is a no-op."""
+    target = Path(path)
+    if target.is_file():
+        target.unlink()

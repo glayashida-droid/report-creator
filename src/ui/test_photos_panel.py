@@ -17,6 +17,7 @@ from src.io.test_photos import (
     PhotoError,
     collect_drop_images,
     copy_into_album,
+    copy_into_album_keep_names,
     create_album,
     create_template_albums,
     delete_album,
@@ -26,8 +27,12 @@ from src.io.test_photos import (
     list_photos,
     rename_album,
     rename_all_in_album,
+    rename_photo,
     album_dir,
 )
+
+# Sentinel from RenamePhotosDialog / _ask_prefix: keep source basenames on import.
+KEEP_ORIGINAL = object()
 
 
 THUMB = 72
@@ -225,7 +230,14 @@ class FolderChip(QWidget):
 
 
 class RenamePhotosDialog(QDialog):
-    def __init__(self, folder_name, project_id, parent=None, title="重命名照片"):
+    def __init__(
+        self,
+        folder_name,
+        project_id,
+        parent=None,
+        title="重命名照片",
+        allow_keep_original=False,
+    ):
         super().__init__(parent)
         self.setWindowTitle(title)
         self._folder_name = folder_name or "照片"
@@ -239,20 +251,29 @@ class RenamePhotosDialog(QDialog):
             f"按项目号（{self._project_id}-001）" if self._project_id else "按项目号（当前没有项目号）"
         )
         self.radio_custom = QRadioButton("自定义前缀")
+        self.radio_keep = QRadioButton("保持原图片名") if allow_keep_original else None
         self.radio_folder.setChecked(True)
         self.radio_project.setEnabled(bool(self._project_id))
         radio_qss = _radio_indicator_qss()
-        for i, radio in enumerate((self.radio_folder, self.radio_project, self.radio_custom)):
+
+        def _add_radio(radio, idx):
             radio.setObjectName("photoRenameRadio")
             radio.setStyleSheet(radio_qss)
-            self.group.addButton(radio, i)
+            self.group.addButton(radio, idx)
             layout.addWidget(radio)
+
+        _add_radio(self.radio_folder, 0)
+        _add_radio(self.radio_project, 1)
+        _add_radio(self.radio_custom, 2)
 
         self.txt_custom = QLineEdit()
         self.txt_custom.setPlaceholderText("例如：样品")
         self.txt_custom.setEnabled(False)
         self.radio_custom.toggled.connect(self.txt_custom.setEnabled)
         layout.addWidget(self.txt_custom)
+
+        if self.radio_keep is not None:
+            _add_radio(self.radio_keep, 3)
 
         buttons = QHBoxLayout()
         buttons.addStretch()
@@ -266,13 +287,16 @@ class RenamePhotosDialog(QDialog):
 
     def _accept(self):
         try:
-            self.prefix()
+            self.choice()
         except PhotoError as exc:
             QMessageBox.warning(self, "提示", str(exc))
             return
         self.accept()
 
-    def prefix(self):
+    def choice(self):
+        """Return KEEP_ORIGINAL or a prefix string."""
+        if self.radio_keep is not None and self.radio_keep.isChecked():
+            return KEEP_ORIGINAL
         if self.radio_folder.isChecked():
             return self._folder_name
         if self.radio_project.isChecked():
@@ -284,9 +308,17 @@ class RenamePhotosDialog(QDialog):
             raise PhotoError("请输入自定义前缀")
         return text
 
+    def prefix(self):
+        """Backward-compatible: prefix string only (not keep-original)."""
+        result = self.choice()
+        if result is KEEP_ORIGINAL:
+            raise PhotoError("当前选择是保持原图片名")
+        return result
+
 
 class PhotoThumb(QFrame):
     removed = Signal()
+    renamed = Signal()
 
     def __init__(self, path: Path, parent=None):
         super().__init__(parent)
@@ -294,6 +326,7 @@ class PhotoThumb(QFrame):
         self._popup = None
         self.setObjectName("photoThumb")
         self.setFixedSize(THUMB + 18, THUMB + 10 + NAME_H)
+        self.setToolTip("单击放大，双击重命名")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 2)
         layout.setSpacing(2)
@@ -306,14 +339,23 @@ class PhotoThumb(QFrame):
             self.lbl.setPixmap(
                 pix.scaled(THUMB, THUMB, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             )
-        self.lbl.mousePressEvent = self._on_click
+        self.lbl.mousePressEvent = self._on_press
+        self.lbl.mouseDoubleClickEvent = self._on_double_click
         layout.addWidget(self.lbl)
 
         self.lbl_name = QLabel()
         self.lbl_name.setObjectName("photoThumbName")
         self.lbl_name.setAlignment(Qt.AlignCenter)
-        self.lbl_name.setToolTip(self.path.name)
+        self.lbl_name.setToolTip(self.path.name + "（双击重命名）")
+        self.lbl_name.setCursor(Qt.PointingHandCursor)
+        self.lbl_name.mousePressEvent = self._on_press
+        self.lbl_name.mouseDoubleClickEvent = self._on_double_click
         layout.addWidget(self.lbl_name)
+
+        self._click_timer = QTimer(self)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.setInterval(280)
+        self._click_timer.timeout.connect(self._show_popup)
 
         btn = QPushButton("✕")
         btn.setObjectName("photoThumbDelete")
@@ -341,9 +383,19 @@ class PhotoThumb(QFrame):
             self.lbl_name.fontMetrics().elidedText(self.path.name, Qt.ElideMiddle, width)
         )
 
-    def _on_click(self, event):
+    def _on_press(self, event):
         if event.button() != Qt.LeftButton:
             return
+        self._click_timer.start()
+
+    def _on_double_click(self, event):
+        if event.button() != Qt.LeftButton:
+            return
+        self._click_timer.stop()
+        self._rename()
+        event.accept()
+
+    def _show_popup(self):
         from src.ui.test_detail_dialog import StdImagePopup
 
         pix = QPixmap(str(self.path))
@@ -361,7 +413,23 @@ class PhotoThumb(QFrame):
         popup.show()
         popup.raise_()
 
+    def _rename(self):
+        text, ok = QInputDialog.getText(
+            self, "重命名照片", "新的文件名：", text=self.path.name
+        )
+        if not ok:
+            return
+        try:
+            self.path = rename_photo(self.path, text)
+        except PhotoError as exc:
+            QMessageBox.warning(self, "提示", str(exc))
+            return
+        self.lbl_name.setToolTip(self.path.name + "（双击重命名）")
+        self._elide_name()
+        self.renamed.emit()
+
     def _delete(self):
+        self._click_timer.stop()
         delete_photo(self.path)
         self.removed.emit()
 
@@ -438,6 +506,7 @@ class PhotoAlbumRow(QFrame):
         for path in photos:
             thumb = PhotoThumb(path, self.thumb_host)
             thumb.removed.connect(self._on_thumb_removed)
+            thumb.renamed.connect(self._on_thumb_renamed)
             self.thumb_layout.addWidget(thumb)
         self.chip.setText(self.album_name)
         QTimer.singleShot(0, self.scroll._fit_host)
@@ -446,11 +515,21 @@ class PhotoAlbumRow(QFrame):
         self.reload()
         self.changed.emit()
 
-    def _ask_prefix(self, title):
-        dlg = RenamePhotosDialog(self.album_name, self.project_id, self, title=title)
+    def _on_thumb_renamed(self):
+        self.reload()
+        self.changed.emit()
+
+    def _ask_prefix(self, title, allow_keep_original=False):
+        dlg = RenamePhotosDialog(
+            self.album_name,
+            self.project_id,
+            self,
+            title=title,
+            allow_keep_original=allow_keep_original,
+        )
         if dlg.exec() != QDialog.Accepted:
             return None
-        return dlg.prefix()
+        return dlg.choice()
 
     def _import_paths(self, paths):
         images, skipped = collect_drop_images(paths)
@@ -458,10 +537,13 @@ class PhotoAlbumRow(QFrame):
             extra = f"\n已跳过：{', '.join(skipped[:6])}" if skipped else ""
             QMessageBox.information(self, "提示", "没有可导入的 jpg / jpeg / png。" + extra)
             return
-        prefix = self._ask_prefix("重命名照片")
-        if not prefix:
+        choice = self._ask_prefix("重命名照片", allow_keep_original=True)
+        if choice is None:
             return
-        copy_into_album(self.folder(), images, prefix)
+        if choice is KEEP_ORIGINAL:
+            copy_into_album_keep_names(self.folder(), images)
+        else:
+            copy_into_album(self.folder(), images, choice)
         self.reload()
         self.changed.emit()
 

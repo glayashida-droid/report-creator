@@ -3,8 +3,8 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton,
                                QLabel, QScrollArea, QComboBox, QFrame, QSizePolicy, QMessageBox,
-                               QInputDialog)
-from PySide6.QtCore import Qt, Signal
+                               QInputDialog, QStackedWidget)
+from PySide6.QtCore import Qt, Signal, QTimer
 
 from src.models.project_state import TestLeg, TestNode
 from src.parsers.db_loader import DuplicateStandardError, duplicate_standard_message
@@ -294,38 +294,95 @@ class LegWidget(QFrame):
             fill_test_combo(nw.combo, new_pool, nw.node_data.test_name)
 
 from src.parsers.db_loader import BaseDataLoader
+from src.ui.gantt_chart import GanttChartWidget
+
+_TOOLBAR_BTN_H = 28
+
+
+def _style_toolbar_button(btn: QPushButton, object_name: str = "legToolbarButton") -> None:
+    btn.setObjectName(object_name)
+    btn.setFixedHeight(_TOOLBAR_BTN_H)
+    btn.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+
+
+def _style_zoom_button(btn: QPushButton) -> None:
+    btn.setObjectName("ganttZoomButton")
+    btn.setFixedSize(_TOOLBAR_BTN_H, _TOOLBAR_BTN_H)
+    btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
 
 class LegGraphArea(QWidget):
     """The main scrollable area containing all Legs"""
     structure_changed = Signal()
+    VIEW_LAYOUT = 0
+    VIEW_GANTT = 1
 
     def __init__(self, state_ref, parent=None):
         super().__init__(parent)
-        self.state = state_ref
+        self._state_ref = state_ref
         self.db_loader = BaseDataLoader() # Initialize loader here
         self.leg_widgets = []
         self.init_ui()
+
+    @property
+    def state(self):
+        return self._state_ref
+
+    @state.setter
+    def state(self, value):
+        self._state_ref = value
+        if hasattr(self, "gantt_chart"):
+            self.gantt_chart.state = value
+            if self.is_gantt_mode():
+                self.gantt_chart.refresh()
         
     def init_ui(self):
         main_layout = QVBoxLayout(self)
-        
-        # Toolbar
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # Shared toolbar (layout controls + gantt toggle)
         toolbar = QHBoxLayout()
+        toolbar.setSpacing(6)
+        self.btn_view_toggle = QPushButton("甘特图")
+        self.btn_view_toggle.clicked.connect(self.toggle_view_mode)
+        _style_toolbar_button(self.btn_view_toggle)
         self.btn_add_leg = QPushButton("+ 添加 Leg")
         self.btn_add_leg.clicked.connect(self.add_leg)
+        _style_toolbar_button(self.btn_add_leg)
+        self.btn_gantt_zoom_out = QPushButton("-")
+        _style_zoom_button(self.btn_gantt_zoom_out)
+        self.btn_gantt_zoom_out.clicked.connect(lambda: self.zoom_gantt(-1))
+        self.btn_gantt_zoom_in = QPushButton("+")
+        _style_zoom_button(self.btn_gantt_zoom_in)
+        self.btn_gantt_zoom_in.clicked.connect(lambda: self.zoom_gantt(1))
         self.btn_save = QPushButton("保存项目")
-        self.btn_save.setObjectName("accentButton")
+        _style_toolbar_button(self.btn_save, "legToolbarAccentButton")
         self.btn_load_state = QPushButton("加载项目")
+        _style_toolbar_button(self.btn_load_state)
         self.btn_save_template = QPushButton("存为模板")
+        _style_toolbar_button(self.btn_save_template)
         self.btn_import_template = QPushButton("导入模板")
-        toolbar.addWidget(self.btn_add_leg)
+        _style_toolbar_button(self.btn_import_template)
+        toolbar.addWidget(self.btn_view_toggle, 0, Qt.AlignVCenter)
+        toolbar.addWidget(self.btn_add_leg, 0, Qt.AlignVCenter)
+        toolbar.addWidget(self.btn_gantt_zoom_out, 0, Qt.AlignVCenter)
+        toolbar.addWidget(self.btn_gantt_zoom_in, 0, Qt.AlignVCenter)
         toolbar.addStretch()
-        toolbar.addWidget(self.btn_save)
-        toolbar.addWidget(self.btn_load_state)
-        toolbar.addWidget(self.btn_save_template)
-        toolbar.addWidget(self.btn_import_template)
+        toolbar.addWidget(self.btn_save, 0, Qt.AlignVCenter)
+        toolbar.addWidget(self.btn_load_state, 0, Qt.AlignVCenter)
+        toolbar.addWidget(self.btn_save_template, 0, Qt.AlignVCenter)
+        toolbar.addWidget(self.btn_import_template, 0, Qt.AlignVCenter)
         main_layout.addLayout(toolbar)
-        
+
+        self.stack = QStackedWidget()
+        self.stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        self.layout_page = QWidget()
+        layout_page_layout = QVBoxLayout(self.layout_page)
+        layout_page_layout.setContentsMargins(0, 0, 0, 0)
+        layout_page_layout.setSpacing(0)
+
         # Scroll Area for Legs
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
@@ -339,8 +396,50 @@ class LegGraphArea(QWidget):
         self.legs_layout.addStretch(1)
 
         self.scroll_area.setWidget(self.scroll_content)
-        main_layout.addWidget(self.scroll_area)
+        layout_page_layout.addWidget(self.scroll_area, stretch=1)
+
+        self.gantt_chart = GanttChartWidget(self.state)
+        self.gantt_chart.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.gantt_chart.schedule_changed.connect(self.structure_changed.emit)
+
+        self.stack.addWidget(self.layout_page)
+        self.stack.addWidget(self.gantt_chart)
+        main_layout.addWidget(self.stack, stretch=1)
+        self._sync_view_toolbar()
         
+    def is_gantt_mode(self) -> bool:
+        return self.stack.currentIndex() == self.VIEW_GANTT
+
+    def _sync_view_toolbar(self) -> None:
+        gantt = self.is_gantt_mode()
+        self.btn_add_leg.setVisible(not gantt)
+        self.btn_save.setVisible(not gantt)
+        self.btn_load_state.setVisible(not gantt)
+        self.btn_save_template.setVisible(not gantt)
+        self.btn_import_template.setVisible(not gantt)
+        self.btn_gantt_zoom_out.setVisible(gantt)
+        self.btn_gantt_zoom_in.setVisible(gantt)
+        self.btn_view_toggle.setText("Leg排布" if gantt else "甘特图")
+
+    def set_gantt_mode(self, enabled: bool) -> None:
+        self.stack.setCurrentIndex(self.VIEW_GANTT if enabled else self.VIEW_LAYOUT)
+        self._sync_view_toolbar()
+        if enabled:
+            self.gantt_chart.state = self.state
+            QTimer.singleShot(0, self._enter_gantt_mode)
+
+    def _enter_gantt_mode(self) -> None:
+        self.gantt_chart.refresh()
+        self.gantt_chart.warn_if_overlaps()
+
+    def toggle_view_mode(self) -> None:
+        self.set_gantt_mode(not self.is_gantt_mode())
+
+    def zoom_gantt(self, delta: int) -> None:
+        if not self.is_gantt_mode():
+            return
+        self.gantt_chart.zoom_step(delta)
+
     def reload_from_state(self):
         # Clear existing
         for lw in self.leg_widgets:
@@ -351,6 +450,9 @@ class LegGraphArea(QWidget):
         # Load from state
         for leg_data in self.state.legs:
             self._add_leg_widget(leg_data)
+        if self.is_gantt_mode():
+            self.gantt_chart.refresh()
+            self.gantt_chart.warn_if_overlaps()
         self.structure_changed.emit()
             
     def add_leg(self):

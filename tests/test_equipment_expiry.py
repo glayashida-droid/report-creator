@@ -140,6 +140,9 @@ def test_restore_equipments_matches_code_not_shared_name():
         ]
         assert checked == ["SHAED-A050", "SHAED-C001"]
         assert dlg.drawer_eq.lbl_summary._full.startswith("已选 2 台")
+        tip = dlg.drawer_eq.lbl_summary.toolTip()
+        assert "SHAED-A050" in tip and "SHAED-C001" in tip
+        assert "\n" in tip
         assert not hasattr(dlg, "lbl_eq_pick")
         assert not hasattr(dlg, "lbl_std_pick")
     finally:

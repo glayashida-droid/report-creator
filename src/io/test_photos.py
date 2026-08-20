@@ -211,6 +211,25 @@ def numbered_name(prefix: str, number: int, suffix: str) -> str:
     return f"{prefix}-{number:03d}{ext.lower()}"
 
 
+def unique_dest_name(folder: Path, filename: str) -> Path:
+    """Pick folder/filename, or folder/stem_N.ext if that name is taken."""
+    dest_dir = Path(folder)
+    name = Path(filename).name
+    if not name or name in {".", ".."} or _BAD_NAME.search(name):
+        raise PhotoError("文件名不合法")
+    dest = dest_dir / name
+    if not dest.exists():
+        return dest
+    stem = Path(name).stem
+    suffix = Path(name).suffix
+    n = 1
+    while True:
+        candidate = dest_dir / f"{stem}_{n}{suffix}"
+        if not candidate.exists():
+            return candidate
+        n += 1
+
+
 def copy_into_album(folder: Path, sources: Sequence[Path], prefix: str) -> List[Path]:
     dest_dir = Path(folder)
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -226,6 +245,45 @@ def copy_into_album(folder: Path, sources: Sequence[Path], prefix: str) -> List[
         written.append(dest)
         seq += 1
     return written
+
+
+def copy_into_album_keep_names(folder: Path, sources: Sequence[Path]) -> List[Path]:
+    """Copy images keeping each source basename; collide → stem_1.ext, stem_2.ext…"""
+    dest_dir = Path(folder)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    written: List[Path] = []
+    for src in sources:
+        src = Path(src)
+        dest = unique_dest_name(dest_dir, src.name)
+        shutil.copy2(src, dest)
+        written.append(dest)
+    return written
+
+
+def rename_photo(path: Path, new_name: str) -> Path:
+    """Rename one image in place. Keeps original suffix if new_name has none."""
+    src = Path(path)
+    if not src.is_file():
+        raise PhotoError("找不到照片")
+    text = (new_name or "").strip()
+    if not text or text in {".", ".."} or _BAD_NAME.search(text) or "/" in text or "\\" in text:
+        raise PhotoError("文件名不合法")
+    candidate = Path(text).name
+    if not Path(candidate).suffix:
+        candidate = f"{candidate}{src.suffix.lower()}"
+    elif Path(candidate).suffix.lower() not in IMAGE_EXTS:
+        raise PhotoError("只支持 jpg / jpeg / png")
+    else:
+        stem = Path(candidate).stem
+        ext = Path(candidate).suffix.lower()
+        candidate = f"{stem}{ext}"
+    dest = src.with_name(candidate)
+    if dest.resolve() == src.resolve():
+        return src
+    if dest.exists():
+        raise PhotoError(f"已存在同名文件：{candidate}")
+    src.rename(dest)
+    return dest
 
 
 def _parse_exif_datetime(value) -> Optional[float]:

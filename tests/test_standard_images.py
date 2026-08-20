@@ -12,6 +12,7 @@ from src.ui.test_detail_dialog import (
     StdImageLink,
     TestDetailDialog,
     _image_link_text,
+    _pixmap_from_standard_bytes,
 )
 
 _MIN_PNG = (
@@ -33,6 +34,29 @@ def test_image_link_caption():
     assert _image_link_text(1, 1) == "图片"
     assert _image_link_text(1, 2) == "图片1"
     assert _image_link_text(2, 2) == "图片2"
+
+
+def test_transparent_standard_image_composites_onto_white():
+    """Black line-art on transparent PNG must not stay transparent in the preview."""
+    _app()
+    # 2x2 RGBA: opaque black + transparent white corner
+    from PIL import Image
+    import io
+
+    im = Image.new("RGBA", (4, 4), (0, 0, 0, 0))
+    for x in range(4):
+        im.putpixel((x, 1), (0, 0, 0, 255))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    pix = _pixmap_from_standard_bytes(buf.getvalue())
+    assert not pix.isNull()
+    img = pix.toImage()
+    # Former transparent pixel is now white
+    c = img.pixelColor(0, 0)
+    assert (c.red(), c.green(), c.blue(), c.alpha()) == (255, 255, 255, 255)
+    # Black ink preserved
+    ink = img.pixelColor(1, 1)
+    assert (ink.red(), ink.green(), ink.blue()) == (0, 0, 0)
 
 
 def test_library_attaches_example_image():
@@ -187,6 +211,7 @@ def test_restore_matches_by_standard_and_chapter_keeps_project_snapshot():
 
 if __name__ == "__main__":
     test_image_link_caption()
+    test_transparent_standard_image_composites_onto_white()
     test_library_attaches_example_image()
     test_condition_header_shows_image_and_full_title()
     test_wrap_title_drawer_keeps_full_text()

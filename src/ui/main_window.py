@@ -32,6 +32,7 @@ from src.ui.leg_graph import LegGraphArea
 from src.ui.load_state_dialog import LoadStateDialog
 from src.ui.leg_template_dialog import ImportTemplateDialog
 from src.ui.candidate_pool import CandidatePoolList
+from src.ui.theme import polish_date_edit_calendar
 
 
 class MirrorWorker(QThread):
@@ -57,6 +58,13 @@ class MirrorWorker(QThread):
 
 
 APP_VERSION = "1.2"
+# Calendar popup floor. Dates before this are treated as "no end date"
+# because QDateEdit may clamp the blank sentinel to 1752-09-14.
+_EARLIEST_REAL_YEAR = 1990
+
+
+def _is_blank_project_date(value: QDate) -> bool:
+    return (not value.isValid()) or value.year() < _EARLIEST_REAL_YEAR
 
 
 class MainWindow(QMainWindow):
@@ -94,23 +102,28 @@ class MainWindow(QMainWindow):
         row.setSpacing(6)
         self.txt_project_path = QLineEdit()
         self.txt_project_path.setPlaceholderText(
-            "粘贴项目文件夹路径 / 链接，或点击右侧选择目录"
+            "粘贴项目文件夹路径 / 链接，或点击「选择目录…」"
         )
         self.txt_project_path.returnPressed.connect(self.load_from_pasted_path)
+
+        btn_load = QPushButton("加载项目")
+        btn_load.setFixedWidth(88)
+        btn_load.clicked.connect(self.load_from_pasted_path)
 
         btn_browse = QPushButton("选择目录…")
         btn_browse.setObjectName("accentButton")
         btn_browse.setFixedWidth(100)
         btn_browse.clicked.connect(self.browse_project_folder)
 
-        btn_load = QPushButton("加载")
-        btn_load.setFixedWidth(64)
-        btn_load.clicked.connect(self.load_from_pasted_path)
+        btn_reload_info = QPushButton("重载申请单")
+        btn_reload_info.setFixedWidth(96)
+        btn_reload_info.clicked.connect(self.restore_excluded_overview_fields)
 
         row.addWidget(QLabel("路径:"))
         row.addWidget(self.txt_project_path, stretch=1)
-        row.addWidget(btn_browse)
         row.addWidget(btn_load)
+        row.addWidget(btn_browse)
+        row.addWidget(btn_reload_info)
         top_outer.addLayout(row)
 
         meta_row = QHBoxLayout()
@@ -134,7 +147,7 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
 
         # 2.1 Project overview — all homepage fields
-        info_group = QGroupBox("项目概况")
+        info_group = QGroupBox("项目信息")
         info_group.setObjectName("overviewGroup")
         info_layout = QVBoxLayout(info_group)
         info_layout.setContentsMargins(10, 18, 10, 10)
@@ -174,8 +187,8 @@ class MainWindow(QMainWindow):
             date_edit = QDateEdit()
             date_edit.setCalendarPopup(True)
             date_edit.setDisplayFormat("yyyy-MM-dd")
-            date_edit.setDate(QDate.currentDate())
             date_edit.lineEdit().setReadOnly(True)
+            self._configure_optional_date(date_edit)
             col.addWidget(lbl)
             col.addWidget(date_edit)
             return col, date_edit
@@ -278,7 +291,7 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(left_panel)
 
-        self.right_panel = QGroupBox("Leg 图排布区")
+        self.right_panel = QGroupBox("项目明细")
         right_layout = QVBoxLayout(self.right_panel)
         self.leg_graph = LegGraphArea(self.state)
         self.leg_graph.btn_save.clicked.connect(self.save_state)
@@ -286,7 +299,7 @@ class MainWindow(QMainWindow):
         self.leg_graph.btn_save_template.clicked.connect(self.save_leg_template)
         self.leg_graph.btn_import_template.clicked.connect(self.import_leg_template)
         self.leg_graph.structure_changed.connect(self._on_structure_changed)
-        right_layout.addWidget(self.leg_graph)
+        right_layout.addWidget(self.leg_graph, stretch=1)
         splitter.addWidget(self.right_panel)
 
         # Left:right = 1:φ (golden ratio), locked on window resize
@@ -378,6 +391,17 @@ class MainWindow(QMainWindow):
         self.txt_project_path.setText(str(path))
         self.load_project_folder(path)
 
+    def restore_excluded_overview_fields(self):
+        """Show overview fields again after ✕ removals (no re-parse)."""
+        if not (self.state.application_fields or self.state.project_id):
+            QMessageBox.warning(self, "提示", "请先加载项目")
+            return
+        if not self.state.excluded_overview_keys:
+            return
+        self.state.excluded_overview_keys = []
+        self.refresh_overview_ui()
+        self._mark_dirty()
+
     # ---------- overview form ----------
 
     def _clear_info_form(self):
@@ -466,12 +490,11 @@ class MainWindow(QMainWindow):
         self.leg_graph.state = self.state
         self.leg_graph.reload_from_state()
 
-        today = QDate.currentDate()
         self._updating_dates = True
         try:
-            self.date_receive.setDate(today)
-            self.date_start.setDate(today)
-            self.date_end.setDate(today)
+            self._clear_date(self.date_receive)
+            self._clear_date(self.date_start)
+            self._clear_date(self.date_end)
         finally:
             self._updating_dates = False
         self._on_dates_changed()
@@ -483,50 +506,61 @@ class MainWindow(QMainWindow):
         self._is_dirty = False
         self._on_export_mode_changed()
 
-    def _parse_fresh_project(self, project_path):
-        sample_dir = project_path / "1.接样组"
+    def _find_sample_files(self, project_path: Path):
+        """Locate 申请单 Excel and 报价单 PDF under 1.接样组."""
+        sample_dir = Path(project_path) / "1.接样组"
         app_excel = None
         quote_pdf = None
-
         if sample_dir.exists():
             for f in sample_dir.iterdir():
                 if f.name.endswith(".xlsx") and not f.name.startswith("~"):
                     app_excel = f
                 elif f.name.endswith(".pdf") and "报价单" in f.name:
                     quote_pdf = f
+        return app_excel, quote_pdf
 
-        if app_excel:
-            try:
-                raw = app_excel.read_bytes()
-                clean, name = prepare_excel_bytes(raw, app_excel.name)
-                data = parse_application(clean, name)
-
-                self.state.applicant_name = data.applicant_name_cn or data.applicant_name
-                self.state.applicant_address = data.applicant_address_cn or data.applicant_address
-                self.state.report_title_name = data.report_title_name_cn or data.report_title_name_en
-                self.state.report_title_address = (
-                    data.report_title_address_cn or data.report_title_address_en
-                )
-                self.state.sample_name = data.sample_info.get("样品名称", "")
-
-                fields = {}
-                for k, v in (data.sample_info or {}).items():
-                    if v is not None and str(v).strip():
-                        fields[k] = str(v).strip()
-                self.state.application_fields = fields
-                self.refresh_overview_ui()
-            except Exception as e:
-                self._clear_info_form()
-                self.info_form.addRow(QLabel(f"解析申请单失败: {e}"))
-        else:
+    def _parse_application_only(self, project_path: Path) -> bool:
+        """Parse 申请单 into left-panel overview fields. Returns True on success."""
+        app_excel, _quote_pdf = self._find_sample_files(project_path)
+        if not app_excel:
             self._clear_info_form()
             self.info_form.addRow(QLabel("未找到申请单 Excel"))
+            self.lbl_project_id.setText(f"项目号: {self.state.project_id or '—'}")
+            return False
+        try:
+            raw = app_excel.read_bytes()
+            clean, name = prepare_excel_bytes(raw, app_excel.name)
+            data = parse_application(clean, name)
 
+            self.state.applicant_name = data.applicant_name_cn or data.applicant_name
+            self.state.applicant_address = data.applicant_address_cn or data.applicant_address
+            self.state.report_title_name = data.report_title_name_cn or data.report_title_name_en
+            self.state.report_title_address = (
+                data.report_title_address_cn or data.report_title_address_en
+            )
+            self.state.sample_name = data.sample_info.get("样品名称", "")
+
+            fields = {}
+            for k, v in (data.sample_info or {}).items():
+                if v is not None and str(v).strip():
+                    fields[k] = str(v).strip()
+            self.state.application_fields = fields
+            self.refresh_overview_ui()
+            return True
+        except Exception as e:
+            self._clear_info_form()
+            self.info_form.addRow(QLabel(f"解析申请单失败: {e}"))
+            self.lbl_project_id.setText(f"项目号: {self.state.project_id or '—'}")
+            return False
+
+    def _parse_fresh_project(self, project_path):
+        self._parse_application_only(project_path)
+
+        _app_excel, quote_pdf = self._find_sample_files(project_path)
         self.list_candidates.clear()
         if quote_pdf:
             try:
                 items = QuotationParser.extract_test_items(str(quote_pdf))
-                items = [it for it in items if it != "服务项目Service Item"]
                 self.state.candidate_pool = items
                 self.btn_pool_quote.setChecked(True)
                 self._refresh_pool_list()
@@ -540,14 +574,42 @@ class MainWindow(QMainWindow):
 
     # ---------- dates ----------
 
+    @staticmethod
+    def _configure_optional_date(date_edit: QDateEdit):
+        date_edit.setSpecialValueText(" ")
+        date_edit.setMinimumDate(QDate(1, 1, 1))
+        date_edit.setMaximumDate(QDate(9999, 12, 31))
+        date_edit.setDate(date_edit.minimumDate())
+        calendar = date_edit.calendarWidget()
+        if calendar is not None:
+            calendar.setMinimumDate(QDate(_EARLIEST_REAL_YEAR, 1, 1))
+            calendar.setMaximumDate(QDate(9999, 12, 31))
+        polish_date_edit_calendar(date_edit, blank_opens_at_default_year=True)
+
+    def _clear_date(self, date_edit: QDateEdit):
+        date_edit.setMinimumDate(QDate(1, 1, 1))
+        date_edit.setDate(date_edit.minimumDate())
+
+    def _date_or_none(self, date_edit: QDateEdit):
+        value = date_edit.date()
+        if _is_blank_project_date(value):
+            return None
+        return value
+
     def _sync_dates_to_state(self):
-        self.state.sample_receive_date = self.date_receive.date().toString("yyyy-MM-dd")
-        self.state.test_start_date = self.date_start.date().toString("yyyy-MM-dd")
-        self.state.test_end_date = self.date_end.date().toString("yyyy-MM-dd")
+        recv = self._date_or_none(self.date_receive)
+        start = self._date_or_none(self.date_start)
+        end = self._date_or_none(self.date_end)
+        self.state.sample_receive_date = recv.toString("yyyy-MM-dd") if recv else ""
+        self.state.test_start_date = start.toString("yyyy-MM-dd") if start else ""
+        self.state.test_end_date = end.toString("yyyy-MM-dd") if end else ""
 
     def _apply_date_string(self, date_edit, date_str):
         parsed = QDate.fromString(date_str or "", "yyyy-MM-dd")
-        date_edit.setDate(parsed if parsed.isValid() else QDate.currentDate())
+        if parsed.isValid() and not _is_blank_project_date(parsed):
+            date_edit.setDate(parsed)
+        else:
+            self._clear_date(date_edit)
 
     def _apply_loaded_dates(self):
         self._updating_dates = True
@@ -560,67 +622,66 @@ class MainWindow(QMainWindow):
         self._on_dates_changed()
 
     def _on_dates_changed(self, *_args):
-        """receive ≤ start ≤ end."""
+        """receive ≤ start ≤ end, but blank fields stay blank."""
         if getattr(self, "_updating_dates", False):
             return
         self._updating_dates = True
         try:
-            recv = self.date_receive.date()
-            start = self.date_start.date()
-            end = self.date_end.date()
+            recv = self._date_or_none(self.date_receive)
+            start = self._date_or_none(self.date_start)
+            end = self._date_or_none(self.date_end)
             source = self.sender()
 
-            unbounded_lo = QDate(1000, 1, 1)
-            unbounded_hi = QDate(9999, 12, 31)
-            for widget in (self.date_receive, self.date_start, self.date_end):
-                widget.setMinimumDate(unbounded_lo)
-                widget.setMaximumDate(unbounded_hi)
-
-            if source is self.date_receive:
-                if recv > start:
+            if source is self.date_receive and recv is not None:
+                if start is not None and recv > start:
                     start = recv
                     self.date_start.setDate(start)
-                if start > end:
+                if end is not None and start is not None and start > end:
                     end = start
                     self.date_end.setDate(end)
-            elif source is self.date_start:
-                if start < recv:
-                    start = recv
-                    self.date_start.setDate(start)
-                if start > end:
-                    end = start
-                    self.date_end.setDate(end)
-            elif source is self.date_end:
-                if end < recv:
+                elif end is not None and recv > end:
                     end = recv
                     self.date_end.setDate(end)
-                if end < start:
+            elif source is self.date_start and start is not None:
+                if recv is not None and start < recv:
+                    start = recv
+                    self.date_start.setDate(start)
+                if end is not None and start > end:
+                    end = start
+                    self.date_end.setDate(end)
+            elif source is self.date_end and end is not None:
+                if recv is not None and end < recv:
+                    end = recv
+                    self.date_end.setDate(end)
+                if start is not None and end < start:
                     start = end
-                    if start < recv:
+                    if recv is not None and start < recv:
                         start = recv
                         end = recv
                         self.date_end.setDate(end)
                     self.date_start.setDate(start)
             else:
-                if start < recv:
+                if recv is not None and start is not None and start < recv:
                     start = recv
                     self.date_start.setDate(start)
-                if end < start:
+                if start is not None and end is not None and end < start:
                     end = start
                     self.date_end.setDate(end)
 
-            self.date_start.setMinimumDate(recv)
-            self.date_end.setMinimumDate(start)
             self._sync_dates_to_state()
             self._update_duration_display(start, end)
             if source in (self.date_receive, self.date_start, self.date_end):
                 self._mark_dirty()
+                if self.leg_graph.is_gantt_mode():
+                    self.leg_graph.gantt_chart.refresh()
         finally:
             self._updating_dates = False
 
     def _update_duration_display(self, start, end):
-        days = start.daysTo(end)
-        self.txt_duration.setText(str(days))
+        if start is None or end is None:
+            self.txt_duration.setText("")
+            return
+        self.txt_duration.setText(str(start.daysTo(end)))
 
     # ---------- export target UI ----------
 

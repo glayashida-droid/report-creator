@@ -8,6 +8,7 @@ from src.io.data_tables import (
     attachment_dir,
     copy_from_template,
     create_blank_workbook,
+    delete_attachment,
     import_sample_ids,
     list_data_table_templates,
     open_attachment,
@@ -318,6 +319,17 @@ def test_list_templates_returns_xlsx_sorted_by_name():
         assert names == ["a.xlsx", "b.xlsx"]
 
 
+def test_delete_attachment_removes_file_missing_is_noop():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        ref = create_blank_workbook(root, "高温试验", "待删")
+        path = root / ref.relative_path
+        assert path.is_file()
+        delete_attachment(path)
+        assert not path.exists()
+        delete_attachment(path)  # missing → no error
+
+
 if __name__ == "__main__":
     test_create_blank_workbook_writes_xlsx_and_returns_ref()
     test_create_blank_rejects_unusable_test_name()
@@ -336,4 +348,5 @@ if __name__ == "__main__":
     test_list_templates_empty_or_missing_is_safe()
     test_copy_from_template_copies_and_titles_from_filename()
     test_list_templates_returns_xlsx_sorted_by_name()
+    test_delete_attachment_removes_file_missing_is_noop()
     print("test_data_tables: ok")

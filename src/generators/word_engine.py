@@ -171,16 +171,19 @@ class WordGenerator:
         if not node.samples:
             doc.add_paragraph("无结果记录")
             return
-        table = doc.add_table(rows=1, cols=2)
+        table = doc.add_table(rows=1, cols=3)
         self._style_table(table)
         hdr = table.rows[0].cells
         hdr[0].text = "样品编号"
-        hdr[1].text = "结果"
+        hdr[1].text = "结果描述"
+        hdr[2].text = "结果"
         all_pass = True
+        node_desc = getattr(node, "result_desc", None) or ""
         for sample in node.samples:
             cells = table.add_row().cells
             cells[0].text = sample.sample_id
-            cells[1].text = sample.result.value
+            cells[1].text = getattr(sample, "result_desc", None) or node_desc or "/"
+            cells[2].text = sample.result.value
             if sample.result != TestResult.PASS:
                 all_pass = False
         conclusion = "合格" if all_pass else "不合格"

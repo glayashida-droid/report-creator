@@ -9,6 +9,7 @@ from src.io.test_photos import (
     PhotoError,
     collect_drop_images,
     copy_into_album,
+    copy_into_album_keep_names,
     create_album,
     create_template_albums,
     iter_export_photos,
@@ -18,6 +19,7 @@ from src.io.test_photos import (
     numbered_name,
     rename_album,
     rename_all_in_album,
+    rename_photo,
     rename_test_dir,
 )
 
@@ -158,6 +160,41 @@ def test_rename_album_keeps_files():
         assert (renamed / "试验前-001.png").exists()
 
 
+def test_copy_keep_original_names_and_collision():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        album = create_album(root, "高温试验", "试验前")
+        src_dir = Path(tmp) / "src"
+        a = _png(src_dir / "微信图片_001.png", "red")
+        b = _png(src_dir / "外观检查.png", "green")
+        written = copy_into_album_keep_names(album, [a, b])
+        assert [p.name for p in written] == ["微信图片_001.png", "外观检查.png"]
+        again = copy_into_album_keep_names(album, [a])
+        assert again[0].name == "微信图片_001_1.png"
+        assert (album / "微信图片_001.png").exists()
+
+
+def test_rename_photo_validates_and_keeps_suffix():
+    with tempfile.TemporaryDirectory() as tmp:
+        album = Path(tmp) / "album"
+        album.mkdir()
+        src = _png(album / "old.png", "red")
+        _png(album / "taken.png", "blue")
+        renamed = rename_photo(src, "新样品")
+        assert renamed.name == "新样品.png"
+        assert renamed.exists()
+        try:
+            rename_photo(renamed, "taken.png")
+            raise AssertionError("expected conflict")
+        except PhotoError:
+            pass
+        try:
+            rename_photo(renamed, "a/b.png")
+            raise AssertionError("expected illegal")
+        except PhotoError:
+            pass
+
+
 def test_export_list_skips_fuzzy_and_loose_files():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -175,5 +212,7 @@ if __name__ == "__main__":
     test_rename_all_uses_exif_then_mtime()
     test_rename_test_dir_blocks_existing_target()
     test_rename_album_keeps_files()
+    test_copy_keep_original_names_and_collision()
+    test_rename_photo_validates_and_keeps_suffix()
     test_export_list_skips_fuzzy_and_loose_files()
     print("test_test_photos: ok")

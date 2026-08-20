@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox, QFileDialog,
 )
 from PySide6.QtCore import Qt, QDate, Signal, QTimer, QEvent, QPoint
-from PySide6.QtGui import QColor, QCursor, QPixmap
+from PySide6.QtGui import QColor, QCursor, QPainter, QPixmap
 from openpyxl.utils import range_boundaries
 from src.models.project_state import (
     DataTableRef,
@@ -27,6 +27,7 @@ from src.io.data_tables import (
     PreviewSnapshot,
     copy_from_template,
     create_blank_workbook,
+    delete_attachment,
     import_sample_ids,
     list_data_table_templates,
     open_attachment,
@@ -36,6 +37,17 @@ from src.io.data_tables import (
 )
 from src.io.test_photos import is_usable_test_name
 from src.ui.test_photos_panel import TestPhotosPanel
+from src.ui.theme import default_project_qdate, polish_date_edit_calendar
+from src.ui.gantt_utils import (
+    cascade_subsequent_nodes,
+    find_leg_for_node,
+    leg_has_overlap,
+    node_index_in_leg,
+    parse_date,
+    restore_leg_dates,
+    snapshot_leg_dates,
+    would_node_overlap_in_leg,
+)
 
 _EQ_EXPIRED_ROLE = Qt.UserRole + 1
 _EXPIRED_RED = QColor("#FF5555")
@@ -200,6 +212,25 @@ class ElidedLabel(QLabel):
         super().setText(metrics.elidedText(self._full, Qt.ElideRight, max(self.width(), 1)))
 
 
+def _pixmap_from_standard_bytes(data: bytes) -> QPixmap:
+    """Load standard-library PNG bytes for on-screen preview.
+
+    Library figures are often black line art on a transparent background.
+    Compositing onto white keeps ink readable against the dark UI theme.
+    """
+    pix = QPixmap()
+    if not data or not pix.loadFromData(data) or pix.isNull():
+        return QPixmap()
+    if not pix.hasAlphaChannel():
+        return pix
+    flat = QPixmap(pix.size())
+    flat.fill(QColor("white"))
+    painter = QPainter(flat)
+    painter.drawPixmap(0, 0, pix)
+    painter.end()
+    return flat
+
+
 class StdImagePopup(QLabel):
     """Frameless enlarged image; click to dismiss."""
 
@@ -245,8 +276,8 @@ class StdImageLink(QLabel):
         if self._popup is not None:
             self._close_popup()
             return
-        pix = QPixmap()
-        if not pix.loadFromData(self._bytes) or pix.isNull():
+        pix = _pixmap_from_standard_bytes(self._bytes)
+        if pix.isNull():
             return
         host = self.window()
         max_w = max(int((host.width() if host else 800) * 0.75), 240)
@@ -351,9 +382,12 @@ class DrawerSection(QFrame):
         root.addWidget(self.body)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
-    def set_summary(self, text):
-        self.lbl_summary.setText(text or "")
-        self.lbl_summary.setVisible(bool(text))
+    def set_summary(self, text, tooltip=None):
+        summary = text or ""
+        self.lbl_summary.setText(summary)
+        if tooltip is not None:
+            self.lbl_summary.setToolTip(tooltip)
+        self.lbl_summary.setVisible(bool(summary))
 
     def set_images(self, images):
         while self.image_layout.count():
@@ -432,6 +466,7 @@ class TestDetailDialog(QDialog):
         self.proj_start_date = None
         self.proj_end_date = None
         self._project_state = None
+        self._prev_node_end = None  # QDate | None — end of the preceding node in the same Leg
 
         p = self.parent()
         while p and not hasattr(p, "state"):
@@ -440,11 +475,16 @@ class TestDetailDialog(QDialog):
             self._project_state = p.state
             try:
                 if p.state.test_start_date:
-                    self.proj_start_date = QDate.fromString(p.state.test_start_date, "yyyy-MM-dd")
+                    start = QDate.fromString(p.state.test_start_date, "yyyy-MM-dd")
+                    if start.isValid() and start.year() >= 1990:
+                        self.proj_start_date = start
                 if p.state.test_end_date:
-                    self.proj_end_date = QDate.fromString(p.state.test_end_date, "yyyy-MM-dd")
+                    end = QDate.fromString(p.state.test_end_date, "yyyy-MM-dd")
+                    if end.isValid() and end.year() >= 1990:
+                        self.proj_end_date = end
             except Exception:
                 pass
+            self._prev_node_end = self._compute_prev_end(p.state, node_data)
 
         self.setWindowTitle(f"编辑明细 - {node_data.test_name}")
         self.resize(860, 760)
@@ -457,8 +497,15 @@ class TestDetailDialog(QDialog):
         date_edit = QDateEdit()
         date_edit.setCalendarPopup(True)
         date_edit.setDisplayFormat("yyyy-MM-dd")
-        date_edit.setDate(QDate.currentDate())
+        date_edit.setMinimumDate(QDate(1990, 1, 1))
+        date_edit.setMaximumDate(QDate(9999, 12, 31))
+        date_edit.setDate(default_project_qdate())
         date_edit.lineEdit().setReadOnly(True)
+        calendar = date_edit.calendarWidget()
+        if calendar is not None:
+            calendar.setMinimumDate(QDate(1990, 1, 1))
+            calendar.setMaximumDate(QDate(9999, 12, 31))
+        polish_date_edit_calendar(date_edit)
         return date_edit
 
     def _make_table(self, headers, min_height):
@@ -665,7 +712,7 @@ class TestDetailDialog(QDialog):
         self.txt_sample_start = QLineEdit()
         self.txt_sample_start.setPlaceholderText("01")
         self.txt_sample_start.setText("01")
-        self.txt_sample_start.setFixedWidth(48)
+        self.txt_sample_start.setFixedWidth(144)
         toolbar.addWidget(self.txt_sample_start)
 
         toolbar.addWidget(QLabel("数量"))
@@ -680,7 +727,7 @@ class TestDetailDialog(QDialog):
         self.btn_add_appno.clicked.connect(self._prepend_application_no)
         toolbar.addWidget(self.btn_add_appno)
 
-        self.btn_gen_samples = QPushButton("生成")
+        self.btn_gen_samples = QPushButton("生成编号列")
         self.btn_gen_samples.setObjectName("accentButton")
         self.btn_gen_samples.setToolTip("按首字母+起始号+数量生成样品，已存在的编号会跳过")
         self.btn_gen_samples.clicked.connect(self._generate_samples)
@@ -693,14 +740,18 @@ class TestDetailDialog(QDialog):
         toolbar.addStretch()
         sample_layout.addLayout(toolbar)
 
-        self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["样品编号", "测试结果"])
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["", "样品编号", "结果描述", "测试结果"])
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
         header.setSectionResizeMode(1, QHeaderView.Fixed)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.Fixed)
         header.setMinimumHeight(32)
         header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.table.setColumnWidth(1, 168)
+        self.table.setColumnWidth(0, 28)
+        self.table.setColumnWidth(1, 158)
+        self.table.setColumnWidth(3, 168)
         self.table.setMinimumHeight(400)
         self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         sample_layout.addWidget(self.table)
@@ -784,14 +835,14 @@ class TestDetailDialog(QDialog):
         if not hasattr(self, "combo_bulk_result"):
             return
         header = self.table.horizontalHeader()
-        x = header.sectionViewportPosition(1)
-        section_w = header.sectionSize(1)
+        x = header.sectionViewportPosition(3)
+        section_w = header.sectionSize(3)
         combo_w = 86
         combo_h = 24
         left_pad = 8
         gap = 6
         right_margin = 12
-        label = header.model().headerData(1, Qt.Horizontal) or "测试结果"
+        label = header.model().headerData(3, Qt.Horizontal) or "测试结果"
         label_w = header.fontMetrics().horizontalAdvance(str(label))
         cx = x + left_pad + label_w + gap
         max_cx = x + max(section_w - combo_w - right_margin, 0)
@@ -808,7 +859,7 @@ class TestDetailDialog(QDialog):
         if text in ("", "—"):
             return
         for row in range(self.table.rowCount()):
-            combo = self.table.cellWidget(row, 1)
+            combo = self.table.cellWidget(row, 3)
             if combo is None:
                 continue
             pos = combo.findText(text)
@@ -956,6 +1007,7 @@ class TestDetailDialog(QDialog):
             self._rebuild_cond_drawers([])
             self._rebuild_eval_drawers([])
             self._fill_result_desc_table([])
+            self._apply_result_desc_to_rows("")
             return
         refs = [s.ref_label() for s in picked if s.ref_label()]
         preview = "、".join(refs[:4])
@@ -970,6 +1022,7 @@ class TestDetailDialog(QDialog):
         self._rebuild_cond_drawers(picked)
         self._rebuild_eval_drawers(picked)
         self._fill_result_desc_table(picked)
+        self._apply_result_desc_to_rows(self._current_result_desc())
 
     def _collect_map_edits(self, editors, dest):
         for key, editor in list(editors.items()):
@@ -1261,9 +1314,52 @@ class TestDetailDialog(QDialog):
                 text = std.result_desc or ""
             editor.setPlainText(text)
             self.result_desc_table.setCellWidget(row, 1, editor)
+            editor.textChanged.connect(self._on_result_desc_edited)
             self.result_desc_table.setRowHeight(row, 56)
         rows = self.result_desc_table.rowCount()
         self.result_desc_table.setFixedHeight(min(56 * rows + 36, 220) if rows else 80)
+
+    def _on_result_desc_edited(self):
+        self._apply_result_desc_to_rows(self._current_result_desc())
+
+    def _current_result_desc(self):
+        """Joined text from the editable 结果描述 table (selection order)."""
+        self._collect_result_edits()
+        parts = []
+        if hasattr(self, "result_desc_table"):
+            for row in range(self.result_desc_table.rowCount()):
+                key_item = self.result_desc_table.item(row, 0)
+                key = key_item.data(Qt.UserRole) if key_item else None
+                widget = self.result_desc_table.cellWidget(row, 1)
+                text = ""
+                if widget is not None:
+                    try:
+                        text = widget.toPlainText().strip()
+                    except RuntimeError:
+                        text = ""
+                if not text and key is not None:
+                    text = (self._result_edits.get(key) or "").strip()
+                if text:
+                    parts.append(text)
+        if parts:
+            return "\n\n".join(parts)
+        for std in self.node_data.resolved_standards():
+            text = (std.result_desc or "").strip()
+            if text:
+                parts.append(text)
+        if parts:
+            return "\n\n".join(parts)
+        return _cell_text(getattr(self.node_data, "result_desc", None))
+
+    def _apply_result_desc_to_rows(self, text):
+        text = text or ""
+        if not hasattr(self, "table"):
+            return
+        for row in range(self.table.rowCount()):
+            widget = self.table.cellWidget(row, 2)
+            if widget is not None:
+                widget.setText(text)
+                widget.setCursorPosition(0)
 
     def _on_eq_item_changed(self, item):
         if item and item.column() == 0:
@@ -1335,9 +1431,16 @@ class TestDetailDialog(QDialog):
         if not selected:
             self.drawer_eq.set_summary("未选择")
             return
-        preview = "、".join(e.code or e.name for e in selected[:4])
+        labels = []
+        for e in selected:
+            parts = [p for p in (e.code, e.name) if p and str(p).strip()]
+            if e.model and str(e.model).strip():
+                parts.append(f"({e.model})")
+            labels.append(" ".join(parts) if parts else "/")
+        preview = "、".join((e.code or e.name) for e in selected[:4])
         extra = f" 等{len(selected)}台" if len(selected) > 4 else ""
-        self.drawer_eq.set_summary(f"已选 {len(selected)} 台：{preview}{extra}")
+        summary = f"已选 {len(selected)} 台：{preview}{extra}"
+        self.drawer_eq.set_summary(summary, tooltip="\n".join(labels))
 
     def _selected_equipments(self):
         picked = []
@@ -1353,15 +1456,41 @@ class TestDetailDialog(QDialog):
             ))
         return picked
 
-    def add_sample_row(self, sample_id="", result=TestResult.NA):
+    def add_sample_row(self, sample_id="", result=TestResult.NA, result_desc=None):
         if not isinstance(sample_id, str):
             sample_id = ""
         row = self.table.rowCount()
         self.table.insertRow(row)
+
+        del_wrap = QWidget()
+        del_lay = QHBoxLayout(del_wrap)
+        del_lay.setContentsMargins(0, 0, 0, 0)
+        del_lay.setAlignment(Qt.AlignCenter)
+        btn_del = QPushButton("✕")
+        btn_del.setObjectName("fieldRemoveButton")
+        btn_del.setFixedSize(20, 20)
+        btn_del.setCursor(Qt.PointingHandCursor)
+        btn_del.setFocusPolicy(Qt.NoFocus)
+        btn_del.setToolTip("删除此行")
+        btn_del.clicked.connect(self._remove_sample_row)
+        del_lay.addWidget(btn_del)
+        self.table.setCellWidget(row, 0, del_wrap)
+
         txt_id = QLineEdit(sample_id)
         txt_id.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         txt_id.setStyleSheet("padding: 1px 4px;")
-        self.table.setCellWidget(row, 0, txt_id)
+        self.table.setCellWidget(row, 1, txt_id)
+
+        txt_desc = QLineEdit(
+            result_desc if result_desc is not None else self._current_result_desc()
+        )
+        txt_desc.setReadOnly(True)
+        txt_desc.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        txt_desc.setStyleSheet("padding: 1px 4px;")
+        txt_desc.setPlaceholderText("选择标准后自动填入")
+        txt_desc.setCursorPosition(0)
+        self.table.setCellWidget(row, 2, txt_desc)
+
         combo_res = QComboBox()
         for r in TestResult:
             combo_res.addItem(r.value, userData=r)
@@ -1372,14 +1501,28 @@ class TestDetailDialog(QDialog):
             combo_res.setCurrentText(bulk)
         else:
             combo_res.setCurrentText(result.value)
-        self.table.setCellWidget(row, 1, combo_res)
+        self.table.setCellWidget(row, 3, combo_res)
         self._refresh_sample_summary()
         self._schedule_result_header_sync()
+
+    def _remove_sample_row(self):
+        btn = self.sender()
+        if btn is None:
+            return
+        for row in range(self.table.rowCount()):
+            wrap = self.table.cellWidget(row, 0)
+            if wrap is None:
+                continue
+            if wrap is btn or wrap.findChild(QPushButton) is btn:
+                self.table.removeRow(row)
+                self._refresh_sample_summary()
+                self._schedule_result_header_sync()
+                return
 
     def _existing_sample_ids(self):
         ids = []
         for row in range(self.table.rowCount()):
-            widget = self.table.cellWidget(row, 0)
+            widget = self.table.cellWidget(row, 1)
             if widget is None:
                 continue
             text = widget.text().strip()
@@ -1443,7 +1586,7 @@ class TestDetailDialog(QDialog):
         marker = f"{appno}-"
         changed = 0
         for row in range(self.table.rowCount()):
-            widget = self.table.cellWidget(row, 0)
+            widget = self.table.cellWidget(row, 1)
             if widget is None:
                 continue
             text = widget.text().strip()
@@ -1471,26 +1614,31 @@ class TestDetailDialog(QDialog):
         if self.node_data.start_date:
             self.date_start.setDate(QDate.fromString(self.node_data.start_date, "yyyy-MM-dd"))
         else:
-            self.date_start.setDate(QDate.currentDate())
+            self.date_start.setDate(default_project_qdate())
 
         if self.node_data.end_date:
             self.date_end.setDate(QDate.fromString(self.node_data.end_date, "yyyy-MM-dd"))
         else:
-            self.date_end.setDate(QDate.currentDate())
+            self.date_end.setDate(default_project_qdate())
 
-        if self.proj_start_date and self.proj_start_date.isValid():
-            self.date_start.setMinimumDate(self.proj_start_date)
-            self.date_end.setMinimumDate(self.proj_start_date)
-        if self.proj_end_date and self.proj_end_date.isValid():
-            self.date_start.setMaximumDate(self.proj_end_date)
-            self.date_end.setMaximumDate(self.proj_end_date)
+        lo = self._start_lower_bound()
+        _, hi = self._project_date_bounds()
+        self._apply_node_date_limits(lo, lo, hi)
+
+        # Clamp current value if it violates the predecessor constraint
+        if self.date_start.date() < lo:
+            self.date_start.setDate(lo)
 
         self._on_node_dates_changed()
         self._restore_standards()
         self._restore_equipments()
 
         for s in self.node_data.samples:
-            self.add_sample_row(s.sample_id, s.result)
+            self.add_sample_row(
+                s.sample_id,
+                s.result,
+                getattr(s, "result_desc", None) or getattr(self.node_data, "result_desc", None),
+            )
         self._refresh_sample_summary()
         self._refresh_data_table_list()
         self._sync_data_table_button()
@@ -1589,22 +1737,28 @@ class TestDetailDialog(QDialog):
             drawer.set_expanded(False)
             bar = QHBoxLayout()
             bar.addStretch()
-            btn_open = QPushButton("打开编辑")
-            btn_open.setToolTip("用本机 Excel / WPS / 系统默认程序打开")
-            btn_open.clicked.connect(lambda _=False, r=ref: self._open_data_table(r))
-            bar.addWidget(btn_open)
             btn_import = QPushButton("导入样品编号")
             btn_import.setToolTip("从当前样品表写入本表第 1 列（有内容则左插一列），从第 2 行起")
             btn_import.clicked.connect(
                 lambda _=False, r=ref: self._import_sample_ids_to_data_table(r)
             )
             bar.addWidget(btn_import)
+            btn_open = QPushButton("打开编辑")
+            btn_open.setToolTip("用本机 Excel / WPS / 系统默认程序打开")
+            btn_open.clicked.connect(lambda _=False, r=ref: self._open_data_table(r))
+            bar.addWidget(btn_open)
             btn_refresh = QPushButton("刷新")
             btn_refresh.setToolTip("从磁盘重新读取预览（外部改过文件后点这里）")
             btn_refresh.clicked.connect(
                 lambda _=False, r=ref: self._refresh_data_table_preview(r)
             )
             bar.addWidget(btn_refresh)
+            btn_delete = QPushButton("删除")
+            btn_delete.setToolTip("从列表移除并删除本地附件文件")
+            btn_delete.clicked.connect(
+                lambda _=False, r=ref: self._delete_data_table(r)
+            )
+            bar.addWidget(btn_delete)
             drawer.body_layout.addLayout(bar)
 
             preview = QTableWidget(0, 0)
@@ -1766,6 +1920,25 @@ class TestDetailDialog(QDialog):
         except DataTableError as exc:
             QMessageBox.warning(self, "无法打开", str(exc))
 
+    def _delete_data_table(self, ref: DataTableRef):
+        answer = QMessageBox.question(
+            self,
+            "删除数据表",
+            f"是否删除「{ref.title}」？\n本地附件文件将一并删除。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        root = self._project_root()
+        if root is not None:
+            delete_attachment(resolve_attachment_path(root, ref))
+        self._data_tables = [
+            r for r in self._data_tables if r.relative_path != ref.relative_path
+        ]
+        self._data_table_preview_cache.pop(ref.relative_path, None)
+        self._refresh_data_table_list()
+
     def _import_sample_ids_to_data_table(self, ref: DataTableRef):
         root = self._project_root()
         if root is None:
@@ -1867,26 +2040,64 @@ class TestDetailDialog(QDialog):
         self.eq_table.blockSignals(False)
         self._refresh_eq_summary()
 
+    @staticmethod
+    def _compute_prev_end(state, node_data):
+        """Return the end date of the node that precedes node_data in its Leg, or None."""
+        from src.ui.gantt_utils import parse_date as _parse_date
+        for leg in (state.legs or []):
+            nodes = leg.nodes or []
+            for idx, item in enumerate(nodes):
+                if item is node_data and idx > 0:
+                    prev = nodes[idx - 1]
+                    d = _parse_date(prev.end_date)
+                    return d if d.isValid() else None
+        return None
+
     def _project_date_bounds(self):
-        lo = self.proj_start_date if self.proj_start_date and self.proj_start_date.isValid() else QDate(1000, 1, 1)
-        hi = self.proj_end_date if self.proj_end_date and self.proj_end_date.isValid() else QDate(9999, 12, 31)
+        lo = QDate(1990, 1, 1)
+        hi = QDate(9999, 12, 31)
+        if self.proj_start_date and self.proj_start_date.isValid() and self.proj_start_date.year() >= 1990:
+            lo = self.proj_start_date
+        if self.proj_end_date and self.proj_end_date.isValid() and self.proj_end_date.year() >= 1990:
+            hi = self.proj_end_date
+        if hi < lo:
+            hi = QDate(9999, 12, 31)
         return lo, hi
 
+    def _apply_node_date_limits(self, start_lo, end_lo, hi):
+        if hi < start_lo:
+            hi = QDate(9999, 12, 31)
+        if hi < end_lo:
+            hi = QDate(9999, 12, 31)
+        self.date_start.setMinimumDate(start_lo)
+        self.date_start.setMaximumDate(hi)
+        self.date_end.setMinimumDate(end_lo)
+        self.date_end.setMaximumDate(hi)
+
+    def _start_lower_bound(self) -> QDate:
+        """Earliest allowed start date: max(project start, prev node end)."""
+        lo, _ = self._project_date_bounds()
+        if self._prev_node_end and self._prev_node_end.isValid() and self._prev_node_end.year() >= 1990:
+            return self._prev_node_end if self._prev_node_end > lo else lo
+        return lo
+
     def _on_node_dates_changed(self, *_args):
-        """Node start date must be on or before end date."""
+        """Node start date must be on or before end date, and not before the preceding node's end."""
         if getattr(self, "_updating_dates", False):
             return
         self._updating_dates = True
         try:
-            lo, hi = self._project_date_bounds()
-            self.date_start.setMinimumDate(lo)
-            self.date_start.setMaximumDate(hi)
-            self.date_end.setMinimumDate(lo)
-            self.date_end.setMaximumDate(hi)
+            lo = self._start_lower_bound()
+            _, hi = self._project_date_bounds()
+            self._apply_node_date_limits(lo, lo, hi)
 
             start = self.date_start.date()
             end = self.date_end.date()
             source = self.sender()
+
+            if start < lo:
+                start = lo
+                self.date_start.setDate(start)
 
             if source is self.date_start:
                 if start > end:
@@ -1895,26 +2106,32 @@ class TestDetailDialog(QDialog):
             elif source is self.date_end:
                 if end < start:
                     start = end
+                    if start < lo:
+                        start = lo
                     self.date_start.setDate(start)
             elif start > end:
                 end = start
                 self.date_end.setDate(end)
 
-            self.date_start.setMinimumDate(lo)
-            self.date_start.setMaximumDate(hi)
-            self.date_end.setMinimumDate(start)
-            self.date_end.setMaximumDate(hi)
+            self._apply_node_date_limits(lo, start, hi)
         finally:
             self._updating_dates = False
         self._refresh_eq_expiry()
 
-    def save_and_close(self):
-        if self.date_start.date() > self.date_end.date():
+    def _apply_schedule_dates(self) -> bool:
+        start = self.date_start.date()
+        end = self.date_end.date()
+        if start > end:
             QMessageBox.warning(self, "错误", "开始日期不能晚于结束日期！")
+            return False
+        self.node_data.start_date = start.toString("yyyy-MM-dd")
+        self.node_data.end_date = end.toString("yyyy-MM-dd")
+        return True
+
+    def save_and_close(self):
+        if not self._apply_schedule_dates():
             return
 
-        self.node_data.start_date = self.date_start.date().toString("yyyy-MM-dd")
-        self.node_data.end_date = self.date_end.date().toString("yyyy-MM-dd")
         self.node_data.apply_standards(self._selected_standards())
 
         picked = self._selected_equipments()
@@ -1928,11 +2145,20 @@ class TestDetailDialog(QDialog):
 
         samples = []
         for row in range(self.table.rowCount()):
-            txt_id = self.table.cellWidget(row, 0).text().strip()
+            id_widget = self.table.cellWidget(row, 1)
+            if id_widget is None:
+                continue
+            txt_id = id_widget.text().strip()
             if txt_id:
-                combo_res = self.table.cellWidget(row, 1)
+                desc_w = self.table.cellWidget(row, 2)
+                combo_res = self.table.cellWidget(row, 3)
                 res = combo_res.currentData()
-                samples.append(TestSample(sample_id=txt_id, result=res))
+                desc = desc_w.text().strip() if desc_w else ""
+                samples.append(TestSample(
+                    sample_id=txt_id,
+                    result=res,
+                    result_desc=desc or None,
+                ))
         self.node_data.samples = samples
         self.node_data.data_tables = list(self._data_tables)
         self.accept()
