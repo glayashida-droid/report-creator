@@ -10,6 +10,13 @@ class TestResult(str, Enum):
     FAIL = "不合格"
     NA = "N/A"
 
+class DataTableRef(BaseModel):
+    """Index entry for a data-table xlsx under 数据表附件/."""
+
+    title: str
+    relative_path: str
+
+
 class TestSample(BaseModel):
     sample_id: str
     result: TestResult = TestResult.NA
@@ -120,6 +127,7 @@ class TestNode(BaseModel):
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     samples: List[TestSample] = Field(default_factory=list)
+    data_tables: List[DataTableRef] = Field(default_factory=list)
 
     @staticmethod
     def _has_text(value) -> bool:

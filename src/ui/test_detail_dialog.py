@@ -7,12 +7,22 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QDateEdit, QGroupBox, QMessageBox,
     QTextEdit, QSizePolicy, QAbstractItemView, QScrollArea, QFrame, QWidget,
-    QStyledItemDelegate, QStyle, QStyleOptionViewItem, QCheckBox,
+    QStyledItemDelegate, QStyle, QStyleOptionViewItem, QCheckBox, QInputDialog,
+    QListWidget, QListWidgetItem, QDialogButtonBox,
 )
 from PySide6.QtCore import Qt, QDate, Signal, QTimer, QEvent, QPoint
 from PySide6.QtGui import QColor, QCursor, QPixmap
-from src.models.project_state import TestNode, TestSample, TestResult, TestEquipment, TestStandard
+from src.models.project_state import (
+    DataTableRef,
+    TestNode,
+    TestSample,
+    TestResult,
+    TestEquipment,
+    TestStandard,
+)
 from src.parsers.key_params import KeyParamReplaceError, apply_key_params, parse_key_params
+from src.io.data_tables import DataTableError, create_blank_workbook
+from src.io.test_photos import is_usable_test_name
 from src.ui.test_photos_panel import TestPhotosPanel
 
 _EQ_EXPIRED_ROLE = Qt.UserRole + 1
@@ -399,6 +409,10 @@ class TestDetailDialog(QDialog):
         self._eval_editors = {}
         self._eval_drawers = []
         self._result_edits = {}
+        self._data_tables = [
+            DataTableRef(title=r.title, relative_path=r.relative_path)
+            for r in (node_data.data_tables or [])
+        ]
 
         self.proj_start_date = None
         self.proj_end_date = None
@@ -656,6 +670,11 @@ class TestDetailDialog(QDialog):
         self.btn_gen_samples.setToolTip("按首字母+起始号+数量生成样品，已存在的编号会跳过")
         self.btn_gen_samples.clicked.connect(self._generate_samples)
         toolbar.addWidget(self.btn_gen_samples)
+
+        self.btn_add_data_table = QPushButton("添加数据表")
+        self.btn_add_data_table.setToolTip("上传 Excel / 自由编辑 / 模版")
+        self.btn_add_data_table.clicked.connect(self._on_add_data_table)
+        toolbar.addWidget(self.btn_add_data_table)
         toolbar.addStretch()
         sample_layout.addLayout(toolbar)
 
@@ -671,6 +690,12 @@ class TestDetailDialog(QDialog):
         self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         sample_layout.addWidget(self.table)
         self._setup_result_header()
+
+        sample_layout.addWidget(QLabel("数据表"))
+        self.data_table_list = QListWidget()
+        self.data_table_list.setMinimumHeight(72)
+        self.data_table_list.setMaximumHeight(140)
+        sample_layout.addWidget(self.data_table_list)
         layout.addWidget(self.drawer_sample)
 
         self.drawer_photos = DrawerSection("试验照片")
@@ -1451,6 +1476,83 @@ class TestDetailDialog(QDialog):
         for s in self.node_data.samples:
             self.add_sample_row(s.sample_id, s.result)
         self._refresh_sample_summary()
+        self._refresh_data_table_list()
+        self._sync_data_table_button()
+
+    def _project_root(self):
+        raw = ""
+        if self._project_state is not None:
+            raw = getattr(self._project_state, "project_path", "") or ""
+        return Path(raw) if raw else None
+
+    def _sync_data_table_button(self):
+        ok = is_usable_test_name(self.node_data.test_name) and self._project_root() is not None
+        self.btn_add_data_table.setEnabled(ok)
+        if not is_usable_test_name(self.node_data.test_name):
+            self.btn_add_data_table.setToolTip("请先选择试验名称")
+        elif self._project_root() is None:
+            self.btn_add_data_table.setToolTip("请先加载项目以确定本地镜像路径")
+        else:
+            self.btn_add_data_table.setToolTip("上传 Excel / 自由编辑 / 模版")
+
+    def _refresh_data_table_list(self):
+        self.data_table_list.clear()
+        for ref in self._data_tables:
+            self.data_table_list.addItem(QListWidgetItem(ref.title))
+
+    def _on_add_data_table(self):
+        if not is_usable_test_name(self.node_data.test_name):
+            QMessageBox.warning(self, "提示", "请先选择试验名称")
+            return
+        if self._project_root() is None:
+            QMessageBox.warning(self, "提示", "请先加载项目以确定本地镜像路径")
+            return
+
+        chooser = QDialog(self)
+        chooser.setWindowTitle("添加数据表")
+        layout = QVBoxLayout(chooser)
+        layout.addWidget(QLabel("请选择添加方式："))
+        btn_upload = QPushButton("1 · 上传现有 Excel")
+        btn_upload.setEnabled(False)
+        btn_upload.setToolTip("后续票实现")
+        btn_free = QPushButton("2 · 自由编辑")
+        btn_template = QPushButton("3 · 模版")
+        btn_template.setEnabled(False)
+        btn_template.setToolTip("后续票实现")
+        layout.addWidget(btn_upload)
+        layout.addWidget(btn_free)
+        layout.addWidget(btn_template)
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+        buttons.rejected.connect(chooser.reject)
+        layout.addWidget(buttons)
+
+        chosen = {"mode": None}
+
+        def pick_free():
+            chosen["mode"] = "free"
+            chooser.accept()
+
+        btn_free.clicked.connect(pick_free)
+        if chooser.exec() != QDialog.Accepted or chosen["mode"] != "free":
+            return
+        self._add_free_edit_data_table()
+
+    def _add_free_edit_data_table(self):
+        title, ok = QInputDialog.getText(self, "自由编辑", "数据表标题：")
+        if not ok:
+            return
+        title = (title or "").strip()
+        if not title:
+            QMessageBox.warning(self, "提示", "请输入数据表标题")
+            return
+        root = self._project_root()
+        try:
+            ref = create_blank_workbook(root, self.node_data.test_name, title)
+        except DataTableError as exc:
+            QMessageBox.warning(self, "提示", str(exc))
+            return
+        self._data_tables.append(ref)
+        self._refresh_data_table_list()
 
     def _find_std_row(self, want: TestStandard, used):
         want_key = want.ref_key()
@@ -1599,4 +1701,5 @@ class TestDetailDialog(QDialog):
                 res = combo_res.currentData()
                 samples.append(TestSample(sample_id=txt_id, result=res))
         self.node_data.samples = samples
+        self.node_data.data_tables = list(self._data_tables)
         self.accept()
