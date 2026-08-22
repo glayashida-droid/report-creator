@@ -887,10 +887,7 @@ class WordGenerator:
         self._add_para_before(doc, anchor, f"（3）检测方法：{method}", size=SIZE_BODY)
 
         self._add_para_before(doc, anchor, "（4）检测条件：", size=SIZE_BODY)
-        condition = (node.standard_desc or node.joined_standard_desc() or "").strip() or "/"
-        for block in re.split(r"\n+", condition):
-            if block.strip():
-                self._add_para_before(doc, anchor, block.strip(), size=SIZE_BODY)
+        self._insert_condition_blocks(doc, anchor, node)
         self._insert_condition_images(doc, anchor, node)
 
         qty = len([s for s in (node.samples or []) if s.sample_id])
@@ -952,6 +949,25 @@ class WordGenerator:
             for i, v in enumerate(vals):
                 self._set_cell_text(table.rows[idx].cells[i], v)
 
+    def _insert_condition_blocks(self, doc: Document, anchor: Paragraph, node: TestNode):
+        """检测条件：每条标准先写试验名称，再写缩进两格的条件正文。"""
+        stds = node.resolved_standards()
+        if not stds:
+            condition = (node.standard_desc or "").strip() or "/"
+            for block in re.split(r"\n+", condition):
+                if block.strip():
+                    self._add_para_before(doc, anchor, block.strip(), size=SIZE_BODY)
+            return
+        indent = "  "
+        for std in stds:
+            title = (std.field_title() or std.test_name or "").strip() or "/"
+            self._add_para_before(doc, anchor, title, size=SIZE_BODY)
+            body = (std.standard_desc or "").strip() or "/"
+            for block in re.split(r"\n+", body):
+                text = block.strip()
+                if text:
+                    self._add_para_before(doc, anchor, indent + text, size=SIZE_BODY)
+
     def _insert_condition_images(self, doc: Document, anchor: Paragraph, node: TestNode):
         blobs: List[bytes] = []
         for std in node.resolved_standards():
@@ -962,23 +978,52 @@ class WordGenerator:
             width = self._condition_image_width_in(blob)
             self._add_picture_bytes_before(doc, anchor, blob, width)
 
+    def _result_desc_texts(self, node: TestNode) -> List[str]:
+        """One 试验结果 text per result table, in selection order.
+
+        Multi-standard → one entry per standard's result_desc.
+        Single / legacy → sample or node fallback handled by the caller per row.
+        """
+        stds = node.resolved_standards()
+        if len(stds) > 1:
+            return [(s.result_desc or "").strip() or "/" for s in stds]
+        if len(stds) == 1:
+            text = (stds[0].result_desc or "").strip()
+            return [text] if text else [""]
+        return [""]
+
     def _insert_sample_result_table(self, doc: Document, anchor: Paragraph, node: TestNode):
+        """One 样品编号/试验结果/试验结论 table per selected standard; blank line between."""
         samples = [s for s in (node.samples or []) if s.sample_id]
         if not samples:
             self._add_para_before(doc, anchor, "无结果记录", size=SIZE_BODY)
             return
-        table = self._add_table_before(doc, anchor, len(samples) + 1, 3)
-        self._set_col_widths(table, _WIDTHS_SAMPLE_RESULT)
-        headers = ["样品编号", "试验结果", "试验结论"]
-        for i, h in enumerate(headers):
-            self._set_cell_text(table.rows[0].cells[i], h)
-        self._set_row_as_tbl_header(table.rows[0])
-        node_desc = getattr(node, "result_desc", None) or ""
-        for idx, sample in enumerate(samples, 1):
-            desc = getattr(sample, "result_desc", None) or node_desc or "/"
-            vals = [sample.sample_id, desc, sample.result.value]
-            for i, v in enumerate(vals):
-                self._set_cell_text(table.rows[idx].cells[i], v)
+        descs = self._result_desc_texts(node)
+        node_desc = (getattr(node, "result_desc", None) or "").strip()
+        multi = len(descs) > 1
+        for ti, table_desc in enumerate(descs):
+            if ti:
+                self._add_para_before(doc, anchor, "", size=SIZE_BODY)
+            table = self._add_table_before(doc, anchor, len(samples) + 1, 3)
+            self._set_col_widths(table, _WIDTHS_SAMPLE_RESULT)
+            headers = ["样品编号", "试验结果", "试验结论"]
+            for i, h in enumerate(headers):
+                self._set_cell_text(table.rows[0].cells[i], h)
+            self._set_row_as_tbl_header(table.rows[0])
+            for idx, sample in enumerate(samples, 1):
+                if multi:
+                    desc = table_desc
+                else:
+                    # 单表：样品级 > 标准级 > 节点级
+                    desc = (
+                        (getattr(sample, "result_desc", None) or "").strip()
+                        or table_desc
+                        or node_desc
+                        or "/"
+                    )
+                vals = [sample.sample_id, desc, sample.result.value]
+                for i, v in enumerate(vals):
+                    self._set_cell_text(table.rows[idx].cells[i], v)
 
     def _insert_data_tables(
         self, doc: Document, anchor: Paragraph, node: TestNode, project_path: Optional[str]

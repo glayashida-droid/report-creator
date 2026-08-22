@@ -94,7 +94,84 @@ def test_word_sample_table_includes_result_desc(tmp_path):
     )
     gen = WordGenerator(str(template))
     doc = Document()
-    gen._append_sample_result_table(doc, node)
+    anchor = doc.add_paragraph("ANCHOR")
+    gen._insert_sample_result_table(doc, anchor, node)
     table = doc.tables[0]
-    assert [c.text for c in table.rows[0].cells] == ["样品编号", "结果描述", "结果"]
+    assert [c.text for c in table.rows[0].cells] == ["样品编号", "试验结果", "试验结论"]
     assert [c.text for c in table.rows[1].cells] == ["A01", "样品级描述", "合格"]
+
+
+def test_word_multi_standard_emits_one_result_table_each(tmp_path):
+    from docx import Document
+    from docx.oxml.ns import qn
+
+    from src.models.project_state import TestStandard
+
+    template = tmp_path / "t.docx"
+    Document().save(template)
+    node = TestNode(
+        test_name="组合",
+        samples=[
+            TestSample(sample_id="TP-262686912", result=TestResult.PASS, result_desc="拼接文"),
+            TestSample(sample_id="TP-262686913", result=TestResult.PASS, result_desc="拼接文"),
+        ],
+    )
+    node.apply_standards(
+        [
+            TestStandard(
+                standard_id="S1",
+                chapter="1",
+                test_name="机械冲击试验",
+                result_desc="冲击描述",
+            ),
+            TestStandard(
+                standard_id="S2",
+                chapter="2",
+                test_name="湿热老化试验",
+                result_desc="湿热描述",
+            ),
+        ]
+    )
+    gen = WordGenerator(str(template))
+    doc = Document()
+    anchor = doc.add_paragraph("ANCHOR")
+    gen._insert_sample_result_table(doc, anchor, node)
+
+    assert len(doc.tables) == 2
+    headers = ["样品编号", "试验结果", "试验结论"]
+    assert [c.text for c in doc.tables[0].rows[0].cells] == headers
+    assert [c.text for c in doc.tables[1].rows[0].cells] == headers
+    assert [c.text for c in doc.tables[0].rows[1].cells] == [
+        "TP-262686912",
+        "冲击描述",
+        "合格",
+    ]
+    assert [c.text for c in doc.tables[0].rows[2].cells] == [
+        "TP-262686913",
+        "冲击描述",
+        "合格",
+    ]
+    assert [c.text for c in doc.tables[1].rows[1].cells] == [
+        "TP-262686912",
+        "湿热描述",
+        "合格",
+    ]
+    assert [c.text for c in doc.tables[1].rows[2].cells] == [
+        "TP-262686913",
+        "湿热描述",
+        "合格",
+    ]
+
+    # blank paragraph between the two tables
+    t0 = doc.tables[0]._tbl
+    t1 = doc.tables[1]._tbl
+    between = []
+    el = t0.getnext()
+    while el is not None and el is not t1:
+        between.append(el)
+        el = el.getnext()
+    assert between, "expected a blank paragraph between result tables"
+    texts = []
+    for el in between:
+        texts.extend(t.text or "" for t in el.findall(".//" + qn("w:t")))
+    assert "".join(texts).strip() == ""

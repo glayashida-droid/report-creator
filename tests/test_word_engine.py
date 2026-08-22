@@ -211,6 +211,44 @@ def test_condition_image_width_caps_small_pngs():
     assert abs(width2 - 5.0) < 0.05
 
 
+def test_condition_blocks_titled_and_indented(tmp_path):
+    from docx import Document
+
+    from src.models.project_state import TestStandard
+
+    template = tmp_path / "t.docx"
+    Document().save(template)
+    node = TestNode(test_name="组合")
+    node.apply_standards(
+        [
+            TestStandard(
+                standard_id="S1",
+                chapter="1",
+                test_name="机械冲击",
+                standard_desc="冲击条件第一段。\n冲击条件第二段。",
+            ),
+            TestStandard(
+                standard_id="S2",
+                chapter="2",
+                test_name="防尘实验",
+                standard_desc="防尘条件正文。",
+            ),
+        ]
+    )
+    gen = WordGenerator(str(template))
+    doc = Document()
+    anchor = doc.add_paragraph("ANCHOR")
+    gen._insert_condition_blocks(doc, anchor, node)
+    texts = [p.text for p in doc.paragraphs if p.text != "ANCHOR"]
+    assert texts == [
+        "机械冲击",
+        "  冲击条件第一段。",
+        "  冲击条件第二段。",
+        "防尘实验",
+        "  防尘条件正文。",
+    ]
+
+
 def test_prepare_embed_stream_downscales_to_330ppi():
     from PIL import Image
     import io
