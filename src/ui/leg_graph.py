@@ -98,7 +98,7 @@ class TestNodeWidget(QFrame):
 
         btn_layout.addWidget(self.btn_detail, stretch=1)
         btn_layout.addWidget(self.btn_delete)
-        grid.addLayout(btn_layout, 1, 0)
+        grid.addLayout(btn_layout, 1, 0, 1, 2)
         layout.addLayout(grid)
         self._refresh_complete_mark()
 
