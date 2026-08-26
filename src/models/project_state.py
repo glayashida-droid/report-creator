@@ -40,6 +40,7 @@ class TestSample(BaseModel):
 
 class TestEquipment(BaseModel):
     name: str = ""
+    name_en: str = ""
     code: str = ""  # report/UI number, e.g. TTE20236127-V066
     model: str = ""
     valid_date: str = ""  # 校准有效期 yyyy-MM-dd, captured at selection time
@@ -50,9 +51,13 @@ class TestStandard(BaseModel):
     standard_id: str = ""
     chapter: str = ""
     test_name: str = ""
+    test_item: str = ""  # library English 「test item」
     standard_desc: str = ""
+    standard_desc_en: str = ""
     result_desc: str = ""
+    result_desc_en: str = ""
     evaluation_req: str = ""
+    evaluation_req_en: str = ""
     images: List[bytes] = Field(default_factory=list)
     key_params: List[str] = Field(default_factory=list)
     key_params_defaults: List[str] = Field(default_factory=list)
@@ -120,8 +125,11 @@ class TestNode(BaseModel):
     standard_chapter: Optional[str] = None
     standard_test_name: Optional[str] = None
     standard_desc: Optional[str] = None
+    standard_desc_en: Optional[str] = None
     result_desc: Optional[str] = None
+    result_desc_en: Optional[str] = None
     evaluation_req: Optional[str] = None
+    evaluation_req_en: Optional[str] = None
     standards: List[TestStandard] = Field(default_factory=list)
     equipment_name: Optional[str] = None
     equipments: List[TestEquipment] = Field(default_factory=list)
@@ -145,8 +153,11 @@ class TestNode(BaseModel):
                 self.standard_chapter,
                 self.standard_test_name,
                 self.standard_desc,
+                self.standard_desc_en,
                 self.result_desc,
+                self.result_desc_en,
                 self.evaluation_req,
+                self.evaluation_req_en,
             )
         ):
             return [
@@ -155,8 +166,11 @@ class TestNode(BaseModel):
                     chapter=self.standard_chapter or "",
                     test_name=self.standard_test_name or "",
                     standard_desc=self.standard_desc or "",
+                    standard_desc_en=self.standard_desc_en or "",
                     result_desc=self.result_desc or "",
+                    result_desc_en=self.result_desc_en or "",
                     evaluation_req=self.evaluation_req or "",
+                    evaluation_req_en=self.evaluation_req_en or "",
                 )
             ]
         return []
@@ -167,8 +181,20 @@ class TestNode(BaseModel):
     def joined_standard_desc(self) -> str:
         return _join_blocks(s.standard_desc for s in self.resolved_standards())
 
+    def joined_standard_desc_en(self) -> str:
+        return _join_blocks(s.standard_desc_en for s in self.resolved_standards())
+
     def joined_evaluation_req(self) -> str:
         return _join_blocks(s.evaluation_req for s in self.resolved_standards())
+
+    def joined_evaluation_req_en(self) -> str:
+        return _join_blocks(s.evaluation_req_en for s in self.resolved_standards())
+
+    def joined_result_desc_en(self) -> str:
+        return _join_blocks(s.result_desc_en for s in self.resolved_standards())
+
+    def joined_test_item(self) -> str:
+        return "；".join(s.test_item for s in self.resolved_standards() if (s.test_item or "").strip())
 
     def apply_standards(self, picked: List[TestStandard]) -> None:
         """Persist selection order. Concatenate method/conditions/eval; never smash result_desc."""
@@ -178,18 +204,25 @@ class TestNode(BaseModel):
             self.standard_chapter = None
             self.standard_test_name = None
             self.standard_desc = None
+            self.standard_desc_en = None
             self.result_desc = None
+            self.result_desc_en = None
             self.evaluation_req = None
+            self.evaluation_req_en = None
             return
         self.standard_id = _join_blocks(s.standard_id for s in self.standards) or None
         self.standard_chapter = _join_blocks(s.chapter for s in self.standards) or None
         self.standard_test_name = _join_blocks(s.test_name for s in self.standards) or None
         self.standard_desc = self.joined_standard_desc() or None
+        self.standard_desc_en = self.joined_standard_desc_en() or None
         self.evaluation_req = self.joined_evaluation_req() or None
+        self.evaluation_req_en = self.joined_evaluation_req_en() or None
         if len(self.standards) == 1:
             self.result_desc = self.standards[0].result_desc or None
+            self.result_desc_en = self.standards[0].result_desc_en or None
         else:
             self.result_desc = None
+            self.result_desc_en = None
 
     def is_detail_complete(self) -> bool:
         """True when standard, key params, equipment, and sample results are filled."""
@@ -214,16 +247,24 @@ class ProjectState(BaseModel):
     project_id: str = ""
     source_path: str = ""
     project_path: str = ""
+    # 编辑语言：中文 | 英文（与导出语言独立）
+    edit_language: str = "中文"
     applicant_name: str = ""
     applicant_address: str = ""
+    applicant_name_en: str = ""
+    applicant_address_en: str = ""
     report_title_name: str = ""
     report_title_address: str = ""
+    report_title_name_en: str = ""
+    report_title_address_en: str = ""
     sample_name: str = ""
+    sample_name_en: str = ""
     sample_receive_date: str = ""
     test_start_date: str = ""
     test_end_date: str = ""
     # 申请单首页全部字段（含主机厂、生产商等）
     application_fields: Dict[str, str] = Field(default_factory=dict)
+    application_fields_en: Dict[str, str] = Field(default_factory=dict)
     # 用户从项目概况中移除的字段，不再写入报告
     excluded_overview_keys: List[str] = Field(default_factory=list)
     
@@ -307,8 +348,27 @@ class ProjectState(BaseModel):
         "报告抬头地址": "report_title_address",
         "样品名称": "sample_name",
     }
+    _OVERVIEW_ATTR_EN: ClassVar[Dict[str, str]] = {
+        "申请公司": "applicant_name_en",
+        "申请公司地址": "applicant_address_en",
+        "报告抬头公司": "report_title_name_en",
+        "报告抬头地址": "report_title_address_en",
+        "样品名称": "sample_name_en",
+    }
 
-    def overview_field_map(self) -> Dict[str, str]:
+    def _edit_lang(self) -> str:
+        lang = (self.edit_language or "中文").strip()
+        return "英文" if lang == "英文" else "中文"
+
+    def overview_field_map(self, language: Optional[str] = None) -> Dict[str, str]:
+        lang = (language or self._edit_lang()).strip()
+        if lang == "英文":
+            fields = dict(self.application_fields_en or {})
+            for key, attr in self._OVERVIEW_ATTR_EN.items():
+                val = (getattr(self, attr, None) or "").strip()
+                if val:
+                    fields[key] = val
+            return fields
         fields = dict(self.application_fields or {})
         for key, attr in self._OVERVIEW_ATTR.items():
             val = (getattr(self, attr, None) or "").strip()
@@ -316,21 +376,66 @@ class ProjectState(BaseModel):
                 fields[key] = val
         return fields
 
-    def iter_overview_fields(self):
-        """Visible homepage fields, 申请单号 first. Skips user-removed keys."""
+    def iter_overview_fields(self, language: Optional[str] = None):
+        """Visible homepage fields. Skips user-removed keys.
+
+        When language is omitted, uses edit_language. English mode yields a row when
+        the Chinese side has a value (EN may be empty).
+        """
         excluded = set(self.excluded_overview_keys or [])
-        fields = self.overview_field_map()
+        lang = (language or self._edit_lang()).strip()
+        if lang != "英文":
+            lang = "中文"
+        cn_fields = self.overview_field_map("中文")
+        show_fields = self.overview_field_map(lang)
+        keys: List[str] = []
         seen = set()
         for key in self._OVERVIEW_HEAD:
             seen.add(key)
+            keys.append(key)
+        for key in cn_fields.keys():
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
+        if lang == "英文":
+            for key in show_fields.keys():
+                if key not in seen:
+                    seen.add(key)
+                    keys.append(key)
+        for key in keys:
             if key in excluded:
                 continue
-            val = (fields.get(key) or "").strip()
-            if val:
+            cn_val = (cn_fields.get(key) or "").strip()
+            val = (show_fields.get(key) or "").strip()
+            if lang == "英文":
+                if cn_val or val:
+                    yield key, val
+            elif val:
                 yield key, val
-        for key, val in fields.items():
-            if key in seen or key in excluded:
-                continue
-            val = (val or "").strip()
-            if val:
-                yield key, val
+
+    def set_overview_value(self, key: str, value: str) -> None:
+        """Write one overview field into the side matching edit_language."""
+        key = (key or "").strip()
+        value = (value or "").strip()
+        if not key:
+            return
+        if self._edit_lang() == "英文":
+            attr = self._OVERVIEW_ATTR_EN.get(key)
+            if attr:
+                setattr(self, attr, value)
+            fields = dict(self.application_fields_en or {})
+            if value:
+                fields[key] = value
+            else:
+                fields.pop(key, None)
+            self.application_fields_en = fields
+            return
+        attr = self._OVERVIEW_ATTR.get(key)
+        if attr:
+            setattr(self, attr, value)
+        fields = dict(self.application_fields or {})
+        if value:
+            fields[key] = value
+        else:
+            fields.pop(key, None)
+        self.application_fields = fields

@@ -23,6 +23,7 @@ from src.models.project_state import (
 )
 from src.parsers.key_params import KeyParamReplaceError, apply_key_params, parse_key_params
 from src.parsers.db_loader import equipment_display_code, equipment_match_codes
+from src.language_copy import format_conclusion
 from src.io.data_tables import (
     DataTableError,
     PreviewSnapshot,
@@ -316,7 +317,7 @@ def _image_link_text(index, total):
 class DrawerSection(QFrame):
     """Collapsible drawer: header stays visible, body toggles."""
 
-    def __init__(self, title, parent=None, wrap_title=False):
+    def __init__(self, title, parent=None, wrap_title=False, primary=False):
         super().__init__(parent)
         self.setObjectName("drawerSection")
         self._title = title
@@ -342,7 +343,7 @@ class DrawerSection(QFrame):
             head.setAlignment(Qt.AlignTop)
         self.header_layout = head
         self.lbl_arrow = QLabel("▼")
-        self.lbl_arrow.setObjectName("drawerArrow")
+        self.lbl_arrow.setObjectName("drawerArrowPrimary" if primary else "drawerArrow")
         self.lbl_arrow.setFixedWidth(14)
         if wrap_title:
             self.lbl_title = QLabel(title)
@@ -350,7 +351,7 @@ class DrawerSection(QFrame):
             self.lbl_title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         else:
             self.lbl_title = ElidedLabel(title)
-        self.lbl_title.setObjectName("drawerTitle")
+        self.lbl_title.setObjectName("drawerTitlePrimary" if primary else "drawerTitle")
         self.lbl_summary = ElidedLabel("")
         self.lbl_summary.setObjectName("dimLabel")
         self.lbl_summary.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -445,18 +446,22 @@ class TestDetailDialog(QDialog):
         self._std_updating = False
         self._std_images = {}
         self._cond_edits = {}
+        self._cond_edits_en = {}
         self._cond_editors = {}
         self._cond_drawers = []
         self._key_param_edits = {}
         self._key_param_defaults = {}
         self._key_param_confirmed = {}
         self._key_param_library = {}
+        self._key_param_library_en = {}
         self._key_param_rows = {}
         self._key_param_updating = False
         self._eval_edits = {}
+        self._eval_edits_en = {}
         self._eval_editors = {}
         self._eval_drawers = []
         self._result_edits = {}
+        self._result_edits_en = {}
         self._data_tables = [
             DataTableRef(title=r.title, relative_path=r.relative_path)
             for r in (node_data.data_tables or [])
@@ -494,6 +499,27 @@ class TestDetailDialog(QDialog):
 
         self.init_ui()
         self.load_data()
+
+    def _edit_lang(self) -> str:
+        state = self._project_state
+        if state is not None and hasattr(state, "_edit_lang"):
+            return state._edit_lang()
+        return "中文"
+
+    def _is_edit_en(self) -> bool:
+        return self._edit_lang() == "英文"
+
+    def _active_cond_edits(self):
+        return self._cond_edits_en if self._is_edit_en() else self._cond_edits
+
+    def _active_eval_edits(self):
+        return self._eval_edits_en if self._is_edit_en() else self._eval_edits
+
+    def _active_result_edits(self):
+        return self._result_edits_en if self._is_edit_en() else self._result_edits
+
+    def _result_display(self, result: TestResult) -> str:
+        return format_conclusion(result, self._edit_lang())
 
     def _make_calendar_date_edit(self):
         date_edit = QDateEdit()
@@ -605,7 +631,7 @@ class TestDetailDialog(QDialog):
         self.date_end.dateChanged.connect(self._on_node_dates_changed)
         layout.addWidget(date_group)
 
-        self.drawer_std = DrawerSection("测试标准")
+        self.drawer_std = DrawerSection("测试标准", primary=True)
         std_layout = self.drawer_std.body_layout
         std_layout.addWidget(QLabel("可多选，点击行或勾选，顺序按勾选先后"))
 
@@ -661,7 +687,7 @@ class TestDetailDialog(QDialog):
         std_layout.addWidget(self.result_desc_table)
         layout.addWidget(self.drawer_std)
 
-        self.drawer_eq = DrawerSection("测试设备")
+        self.drawer_eq = DrawerSection("测试设备", primary=True)
         eq_layout = self.drawer_eq.body_layout
         eq_layout.addWidget(QLabel("可多选，点击行或勾选"))
 
@@ -694,13 +720,13 @@ class TestDetailDialog(QDialog):
         self._eq_expired_tip = FollowTip("已过期", self)
         layout.addWidget(self.drawer_eq)
 
-        self.drawer_sample = DrawerSection("样品与结果")
+        self.drawer_sample = DrawerSection("样品与结果", primary=True)
         sample_layout = self.drawer_sample.body_layout
         toolbar = QHBoxLayout()
         toolbar.setSpacing(6)
-        self.btn_add_sample = QPushButton("+ 添加样品行")
-        self.btn_add_sample.clicked.connect(lambda: self.add_sample_row())
-        toolbar.addWidget(self.btn_add_sample)
+        self.btn_import_from_prev = QPushButton("从前置试验导入")
+        self.btn_import_from_prev.clicked.connect(self._import_from_preceding_test)
+        toolbar.addWidget(self.btn_import_from_prev)
 
         toolbar.addWidget(QLabel("首字母"))
         self.txt_sample_prefix = QLineEdit()
@@ -724,16 +750,16 @@ class TestDetailDialog(QDialog):
         self.txt_sample_qty.setFixedWidth(40)
         toolbar.addWidget(self.txt_sample_qty)
 
-        self.btn_add_appno = QPushButton("添加单号")
-        self.btn_add_appno.setToolTip("在已有样品号前加上申请单号，已加过的不会重复加")
-        self.btn_add_appno.clicked.connect(self._prepend_application_no)
-        toolbar.addWidget(self.btn_add_appno)
-
         self.btn_gen_samples = QPushButton("生成编号列")
         self.btn_gen_samples.setObjectName("accentButton")
         self.btn_gen_samples.setToolTip("按首字母+起始号+数量生成样品，已存在的编号会跳过")
         self.btn_gen_samples.clicked.connect(self._generate_samples)
         toolbar.addWidget(self.btn_gen_samples)
+
+        self.btn_add_appno = QPushButton("添加单号")
+        self.btn_add_appno.setToolTip("在已有样品号前加上申请单号，已加过的不会重复加")
+        self.btn_add_appno.clicked.connect(self._prepend_application_no)
+        toolbar.addWidget(self.btn_add_appno)
 
         self.btn_add_data_table = QPushButton("添加数据表")
         self.btn_add_data_table.setToolTip("上传 Excel / 自由编辑 / 模版")
@@ -758,6 +784,7 @@ class TestDetailDialog(QDialog):
         self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         sample_layout.addWidget(self.table)
         self._setup_result_header()
+        self._sample_add_header_btn = self._install_sample_add_header_button()
 
         sample_layout.addWidget(QLabel("数据表"))
         self.data_table_host = QWidget()
@@ -767,7 +794,7 @@ class TestDetailDialog(QDialog):
         sample_layout.addWidget(self.data_table_host)
         layout.addWidget(self.drawer_sample)
 
-        self.drawer_photos = DrawerSection("试验照片")
+        self.drawer_photos = DrawerSection("试验照片", primary=True)
         project_root = None
         project_id = ""
         if self._project_state is not None:
@@ -805,6 +832,34 @@ class TestDetailDialog(QDialog):
         self._fill_standards()
         self._fill_equipments()
         self._schedule_result_header_sync()
+        self._refresh_import_from_prev_button()
+
+    def _install_sample_add_header_button(self):
+        header = self.table.horizontalHeader()
+        btn = QPushButton("↓", header.viewport())
+        btn.setObjectName("headerAddRowButton")
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setFocusPolicy(Qt.NoFocus)
+        btn.setToolTip("添加样品行")
+        btn.clicked.connect(lambda: self.add_sample_row())
+
+        def sync(*_args, b=btn):
+            self._sync_sample_add_header_button(b)
+
+        header.sectionResized.connect(sync)
+        header.geometriesChanged.connect(sync)
+        self.table.horizontalScrollBar().valueChanged.connect(sync)
+        QTimer.singleShot(0, sync)
+        return btn
+
+    def _sync_sample_add_header_button(self, btn):
+        header = self.table.horizontalHeader()
+        x = header.sectionViewportPosition(0)
+        w = header.sectionSize(0)
+        h = header.height()
+        size = min(18, max(w - 6, 12), max(h - 8, 12))
+        btn.setGeometry(x + max((w - size) // 2, 1), max((h - size) // 2, 1), size, size)
+        btn.raise_()
 
     def _setup_result_header(self):
         header = self.table.horizontalHeader()
@@ -814,7 +869,7 @@ class TestDetailDialog(QDialog):
         self.combo_bulk_result.setFocusPolicy(Qt.StrongFocus)
         self.combo_bulk_result.addItem("—")
         for r in TestResult:
-            self.combo_bulk_result.addItem(r.value)
+            self.combo_bulk_result.addItem(self._result_display(r), userData=r)
         self.combo_bulk_result.activated.connect(self._apply_bulk_result)
         header.sectionResized.connect(lambda *_: self._schedule_result_header_sync())
         header.geometriesChanged.connect(self._schedule_result_header_sync)
@@ -855,16 +910,22 @@ class TestDetailDialog(QDialog):
         self.combo_bulk_result.setVisible(visible)
         if visible:
             self.combo_bulk_result.raise_()
+        if hasattr(self, "_sample_add_header_btn"):
+            self._sync_sample_add_header_button(self._sample_add_header_btn)
 
     def _apply_bulk_result(self, index):
+        data = self.combo_bulk_result.itemData(index) if index >= 0 else None
         text = self.combo_bulk_result.itemText(index) if index >= 0 else self.combo_bulk_result.currentText()
-        if text in ("", "—"):
+        if text in ("", "—") and data is None:
             return
         for row in range(self.table.rowCount()):
             combo = self.table.cellWidget(row, 3)
             if combo is None:
                 continue
-            pos = combo.findText(text)
+            if data is not None:
+                pos = combo.findData(data)
+            else:
+                pos = combo.findText(text)
             if pos >= 0:
                 combo.setCurrentIndex(pos)
 
@@ -893,12 +954,15 @@ class TestDetailDialog(QDialog):
     def _fill_equipments(self):
         self.eq_table.blockSignals(True)
         self.eq_table.setRowCount(0)
+        use_en = self._is_edit_en()
         for eq in self.equipments:
             code = equipment_display_code(eq)
-            name = _cell_text(eq.get("设备名称"))
+            name_cn = _cell_text(eq.get("设备名称"))
+            name_en = _cell_text(eq.get("Equipment"))
+            name = name_en if use_en else name_cn
             model = _cell_text(eq.get("型号"))
             cal = _format_cal_date(eq.get("计划校准时间"))
-            if not (code or name):
+            if not (code or name_cn or name_en):
                 continue
             row = self.eq_table.rowCount()
             self.eq_table.insertRow(row)
@@ -979,12 +1043,21 @@ class TestDetailDialog(QDialog):
             desc = self._cond_edits.get(key)
             if desc is None:
                 desc = _cell_text(data.get("标准描述"))
+            desc_en = self._cond_edits_en.get(key)
+            if desc_en is None:
+                desc_en = _cell_text(data.get("condition"))
             eval_req = self._eval_edits.get(key)
             if eval_req is None:
                 eval_req = _cell_text(data.get("评价要求"))
+            eval_req_en = self._eval_edits_en.get(key)
+            if eval_req_en is None:
+                eval_req_en = _cell_text(data.get("Evaluation requirement"))
             result_desc = self._result_edits.get(key)
             if result_desc is None:
                 result_desc = _cell_text(data.get("结果描述"))
+            result_desc_en = self._result_edits_en.get(key)
+            if result_desc_en is None:
+                result_desc_en = _cell_text(data.get("result"))
             images = self._std_images.get(key)
             if images is None:
                 images = list(data.get("_images") or [])
@@ -992,9 +1065,13 @@ class TestDetailDialog(QDialog):
                 standard_id=_cell_text(data.get("标准号")),
                 chapter=_cell_text(data.get("章节号")),
                 test_name=_cell_text(data.get("试验名称")),
+                test_item=_cell_text(data.get("test item")),
                 standard_desc=desc,
+                standard_desc_en=desc_en,
                 result_desc=result_desc,
+                result_desc_en=result_desc_en,
                 evaluation_req=eval_req,
+                evaluation_req_en=eval_req_en,
                 images=list(images or []),
                 key_params=list(self._key_param_edits.get(key) or []),
                 key_params_defaults=list(self._key_param_defaults.get(key) or []),
@@ -1039,7 +1116,7 @@ class TestDetailDialog(QDialog):
     def _collect_cond_edits(self):
         # Do not prune by pick order: unchecked standards may be re-checked
         # in the same dialog session and should keep their edited text.
-        self._collect_map_edits(self._cond_editors, self._cond_edits)
+        self._collect_map_edits(self._cond_editors, self._active_cond_edits())
 
     def _collect_key_param_edits(self):
         allowed = set(self._std_pick_order)
@@ -1067,34 +1144,45 @@ class TestDetailDialog(QDialog):
 
     def _ensure_key_param_state(self, key, data):
         library = _cell_text(data.get("标准描述"))
+        library_en = _cell_text(data.get("condition"))
         self._key_param_library[key] = library
+        self._key_param_library_en[key] = library_en
         if key not in self._key_param_defaults:
             self._key_param_defaults[key] = parse_key_params(data.get("关键参数"))
         if key not in self._key_param_edits:
             self._key_param_edits[key] = list(self._key_param_defaults[key])
         if key not in self._key_param_confirmed:
             self._key_param_confirmed[key] = False
+        if key not in self._cond_edits and library:
+            self._cond_edits[key] = library
+        if key not in self._cond_edits_en and library_en:
+            self._cond_edits_en[key] = library_en
 
     def _forget_key_params(self, key):
         self._key_param_edits.pop(key, None)
         self._key_param_defaults.pop(key, None)
         self._key_param_confirmed.pop(key, None)
         self._key_param_library.pop(key, None)
+        self._key_param_library_en.pop(key, None)
         self._key_param_rows.pop(key, None)
         self._cond_edits.pop(key, None)
+        self._cond_edits_en.pop(key, None)
 
     def _forget_all_key_params(self):
         self._key_param_edits.clear()
         self._key_param_defaults.clear()
         self._key_param_confirmed.clear()
         self._key_param_library.clear()
+        self._key_param_library_en.clear()
         self._key_param_rows.clear()
         self._cond_edits.clear()
+        self._cond_edits_en.clear()
 
     def _collect_eval_edits(self):
-        self._collect_map_edits(self._eval_editors, self._eval_edits)
+        self._collect_map_edits(self._eval_editors, self._active_eval_edits())
 
     def _collect_result_edits(self):
+        dest = self._active_result_edits()
         for row in range(self.result_desc_table.rowCount()):
             key_item = self.result_desc_table.item(row, 0)
             key = key_item.data(Qt.UserRole) if key_item else None
@@ -1104,7 +1192,7 @@ class TestDetailDialog(QDialog):
             if widget is None:
                 continue
             try:
-                self._result_edits[key] = widget.toPlainText()
+                dest[key] = widget.toPlainText()
             except RuntimeError:
                 continue
 
@@ -1170,11 +1258,12 @@ class TestDetailDialog(QDialog):
     def _rebuild_cond_drawers(self, picked):
         self._collect_cond_edits()
         self._collect_key_param_edits()
+        active = self._active_cond_edits()
         self._cond_drawers, self._cond_editors = self._rebuild_field_drawers(
             self.cond_layout,
             picked,
-            self._cond_edits,
-            lambda s: s.standard_desc,
+            active,
+            lambda s: (s.standard_desc_en if self._is_edit_en() else s.standard_desc),
             "该标准的检测条件，可直接修改",
             image_getter=self._catalog_images,
         )
@@ -1249,6 +1338,7 @@ class TestDetailDialog(QDialog):
         ok = row.get("ok")
         editor = self._cond_editors.get(key)
         library = self._key_param_library.get(key, "")
+        library_en = self._key_param_library_en.get(key, "")
         if checked:
             values = []
             for edit in row.get("edits") or []:
@@ -1258,7 +1348,7 @@ class TestDetailDialog(QDialog):
                     values.append("")
             defaults = list(self._key_param_defaults.get(key) or [])
             try:
-                text = apply_key_params(library, defaults, values)
+                text_cn = apply_key_params(library, defaults, values) if library else ""
             except KeyParamReplaceError as exc:
                 QMessageBox.warning(self, "提示", str(exc))
                 self._key_param_updating = True
@@ -1271,17 +1361,30 @@ class TestDetailDialog(QDialog):
                     self._key_param_updating = False
                 self._key_param_confirmed[key] = False
                 return
+            if library_en:
+                try:
+                    text_en = apply_key_params(library_en, defaults, values)
+                except KeyParamReplaceError:
+                    text_en = library_en
+            else:
+                text_en = ""
+            if library:
+                self._cond_edits[key] = text_cn
+            if library_en:
+                self._cond_edits_en[key] = text_en
+            show = text_en if self._is_edit_en() else text_cn
             if editor is not None:
-                editor.setPlainText(text)
-            self._cond_edits[key] = text
+                editor.setPlainText(show)
             self._key_param_edits[key] = values
             self._key_param_confirmed[key] = True
             if ok is not None:
                 ok.setVisible(True)
             return
-        if editor is not None:
-            editor.setPlainText(library)
         self._cond_edits[key] = library
+        self._cond_edits_en[key] = library_en
+        restore = library_en if self._is_edit_en() else library
+        if editor is not None:
+            editor.setPlainText(restore)
         self._key_param_confirmed[key] = False
         if ok is not None:
             ok.setVisible(False)
@@ -1291,8 +1394,8 @@ class TestDetailDialog(QDialog):
         self._eval_drawers, self._eval_editors = self._rebuild_field_drawers(
             self.eval_layout,
             picked,
-            self._eval_edits,
-            lambda s: s.evaluation_req,
+            self._active_eval_edits(),
+            lambda s: (s.evaluation_req_en if self._is_edit_en() else s.evaluation_req),
             "该标准的评判要求，可直接修改",
         )
 
@@ -1301,6 +1404,7 @@ class TestDetailDialog(QDialog):
         self.result_desc_table.setRowCount(0)
         if not picked:
             return
+        active = self._active_result_edits()
         for std in picked:
             key = self._std_ref_key(std)
             row = self.result_desc_table.rowCount()
@@ -1312,9 +1416,11 @@ class TestDetailDialog(QDialog):
             editor = QTextEdit()
             editor.setFixedHeight(52)
             editor.setPlaceholderText("可直接修改")
-            text = self._result_edits.get(key)
+            text = active.get(key)
             if text is None:
-                text = std.result_desc or ""
+                text = (
+                    std.result_desc_en if self._is_edit_en() else std.result_desc
+                ) or ""
             editor.setPlainText(text)
             self.result_desc_table.setCellWidget(row, 1, editor)
             editor.textChanged.connect(self._on_result_desc_edited)
@@ -1328,6 +1434,7 @@ class TestDetailDialog(QDialog):
     def _current_result_desc(self):
         """Joined text from the editable 结果描述 table (selection order)."""
         self._collect_result_edits()
+        active = self._active_result_edits()
         parts = []
         if hasattr(self, "result_desc_table"):
             for row in range(self.result_desc_table.rowCount()):
@@ -1341,18 +1448,21 @@ class TestDetailDialog(QDialog):
                     except RuntimeError:
                         text = ""
                 if not text and key is not None:
-                    text = (self._result_edits.get(key) or "").strip()
+                    text = (active.get(key) or "").strip()
                 if text:
                     parts.append(text)
         if parts:
             return "\n\n".join(parts)
         for std in self.node_data.resolved_standards():
-            text = (std.result_desc or "").strip()
+            text = (
+                (std.result_desc_en if self._is_edit_en() else std.result_desc) or ""
+            ).strip()
             if text:
                 parts.append(text)
         if parts:
             return "\n\n".join(parts)
-        return _cell_text(getattr(self.node_data, "result_desc", None))
+        attr = "result_desc_en" if self._is_edit_en() else "result_desc"
+        return _cell_text(getattr(self.node_data, attr, None))
 
     def _apply_result_desc_to_rows(self, text):
         text = text or ""
@@ -1436,11 +1546,15 @@ class TestDetailDialog(QDialog):
             return
         labels = []
         for e in selected:
-            parts = [p for p in (e.code, e.name) if p and str(p).strip()]
+            disp_name = e.name_en if self._is_edit_en() else e.name
+            parts = [p for p in (e.code, disp_name) if p and str(p).strip()]
             if e.model and str(e.model).strip():
                 parts.append(f"({e.model})")
             labels.append(" ".join(parts) if parts else "/")
-        preview = "、".join((e.code or e.name) for e in selected[:4])
+        preview = "、".join(
+            (e.code or (e.name_en if self._is_edit_en() else e.name) or "/")
+            for e in selected[:4]
+        )
         extra = f" 等{len(selected)}台" if len(selected) > 4 else ""
         summary = f"已选 {len(selected)} 台：{preview}{extra}"
         self.drawer_eq.set_summary(summary, tooltip="\n".join(labels))
@@ -1456,6 +1570,7 @@ class TestDetailDialog(QDialog):
             cal_item = self.eq_table.item(row, 4)
             picked.append(TestEquipment(
                 name=_cell_text(data.get("设备名称")),
+                name_en=_cell_text(data.get("Equipment")),
                 code=(code_item.text().strip() if code_item else "")
                 or equipment_display_code(data),
                 model=_cell_text(data.get("型号")),
@@ -1501,14 +1616,14 @@ class TestDetailDialog(QDialog):
 
         combo_res = QComboBox()
         for r in TestResult:
-            combo_res.addItem(r.value, userData=r)
-        bulk = ""
+            combo_res.addItem(self._result_display(r), userData=r)
+        bulk_data = None
         if hasattr(self, "combo_bulk_result"):
-            bulk = self.combo_bulk_result.currentText()
-        if bulk in {r.value for r in TestResult}:
-            combo_res.setCurrentText(bulk)
+            bulk_data = self.combo_bulk_result.currentData()
+        if isinstance(bulk_data, TestResult):
+            combo_res.setCurrentIndex(combo_res.findData(bulk_data))
         else:
-            combo_res.setCurrentText(result.value)
+            combo_res.setCurrentIndex(combo_res.findData(result))
         self.table.setCellWidget(row, 3, combo_res)
         self._refresh_sample_summary()
         self._schedule_result_header_sync()
@@ -1537,6 +1652,58 @@ class TestDetailDialog(QDialog):
             if text:
                 ids.append(text)
         return ids
+
+    def _preceding_node_in_leg(self):
+        state = self._project_state
+        if state is None:
+            return None
+        leg = find_leg_for_node(state, self.node_data)
+        if leg is None:
+            return None
+        idx = node_index_in_leg(leg, self.node_data)
+        if idx <= 0:
+            return None
+        return leg.nodes[idx - 1]
+
+    def _refresh_import_from_prev_button(self):
+        if not hasattr(self, "btn_import_from_prev"):
+            return
+        prev = self._preceding_node_in_leg()
+        self.btn_import_from_prev.setEnabled(prev is not None)
+        if prev is not None:
+            name = (prev.test_name or "").strip() or "前置试验"
+            self.btn_import_from_prev.setToolTip(
+                f"从「{name}」复制样品编号（已存在的编号与测试结果不会改动）"
+            )
+        else:
+            self.btn_import_from_prev.setToolTip("当前是本 Leg 第一条试验，没有可导入的前置试验")
+
+    def _import_from_preceding_test(self):
+        prev = self._preceding_node_in_leg()
+        if prev is None:
+            QMessageBox.information(self, "提示", "当前是本 Leg 第一条试验，没有可导入的前置试验。")
+            return
+
+        ids = []
+        for sample in prev.samples or []:
+            sid = (sample.sample_id or "").strip()
+            if sid:
+                ids.append(sid)
+        if not ids:
+            name = (prev.test_name or "").strip() or "前置试验"
+            QMessageBox.information(self, "提示", f"前置试验「{name}」没有样品编号可导入。")
+            return
+
+        existing = set(self._existing_sample_ids())
+        added = 0
+        for sid in ids:
+            if sid in existing:
+                continue
+            self.add_sample_row(sid)
+            existing.add(sid)
+            added += 1
+        if added == 0:
+            QMessageBox.information(self, "提示", "前置试验的样品编号已全部存在，未重复导入。")
 
     def _application_no(self):
         state = self._project_state
@@ -2020,10 +2187,16 @@ class TestDetailDialog(QDialog):
             key = want.ref_key()
             if want.standard_desc:
                 self._cond_edits[key] = want.standard_desc
+            if want.standard_desc_en:
+                self._cond_edits_en[key] = want.standard_desc_en
             if want.evaluation_req:
                 self._eval_edits[key] = want.evaluation_req
+            if want.evaluation_req_en:
+                self._eval_edits_en[key] = want.evaluation_req_en
             if want.result_desc:
                 self._result_edits[key] = want.result_desc
+            if want.result_desc_en:
+                self._result_edits_en[key] = want.result_desc_en
             if want.images:
                 self._std_images[key] = list(want.images)
             defaults = list(want.key_params_defaults or want.key_params or [])

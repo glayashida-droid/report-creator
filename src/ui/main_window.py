@@ -16,6 +16,7 @@ from PySide6.QtCore import Qt, QDate, QThread, Signal
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from src.models.project_state import ProjectState
+from src.application_ingest import apply_application_data
 from application_parser import parse_application, prepare_excel_bytes
 from src.parsers.pdf_parser import QuotationParser
 from src.io.project_mirror import incremental_copy, list_saved_projects, local_project_dir
@@ -104,7 +105,23 @@ class MainWindow(QMainWindow):
         self.txt_project_path.setPlaceholderText(
             "粘贴项目文件夹路径 / 链接，或点击「选择目录…」"
         )
+        self.txt_project_path.setMaximumWidth(280)
         self.txt_project_path.returnPressed.connect(self.load_from_pasted_path)
+
+        self.btn_edit_zh = QPushButton("中文")
+        self.btn_edit_zh.setObjectName("poolToggle")
+        self.btn_edit_zh.setCheckable(True)
+        self.btn_edit_zh.setChecked(True)
+        self.btn_edit_zh.setFixedWidth(48)
+        self.btn_edit_en = QPushButton("英文")
+        self.btn_edit_en.setObjectName("poolToggle")
+        self.btn_edit_en.setCheckable(True)
+        self.btn_edit_en.setFixedWidth(48)
+        self.edit_lang_group = QButtonGroup(self)
+        self.edit_lang_group.setExclusive(True)
+        self.edit_lang_group.addButton(self.btn_edit_zh, 0)
+        self.edit_lang_group.addButton(self.btn_edit_en, 1)
+        self.edit_lang_group.idClicked.connect(self._on_edit_language_changed)
 
         btn_load = QPushButton("加载项目")
         btn_load.setFixedWidth(88)
@@ -121,6 +138,8 @@ class MainWindow(QMainWindow):
 
         row.addWidget(QLabel("路径:"))
         row.addWidget(self.txt_project_path, stretch=1)
+        row.addWidget(self.btn_edit_zh)
+        row.addWidget(self.btn_edit_en)
         row.addWidget(btn_load)
         row.addWidget(btn_browse)
         row.addWidget(btn_reload_info)
@@ -409,28 +428,47 @@ class MainWindow(QMainWindow):
             self.info_form.removeRow(0)
 
     def _add_info_row(self, label: str, value: str):
-        val = (value or "").strip()
-        if not val:
-            return
         key_lbl = QLabel(f"{label}:")
         key_lbl.setObjectName("dimLabel")
-        key_lbl.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        key_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         row_w = QWidget()
         row_l = QHBoxLayout(row_w)
         row_l.setContentsMargins(0, 0, 0, 0)
         row_l.setSpacing(4)
-        value_lbl = QLabel(val)
-        value_lbl.setWordWrap(True)
-        value_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        edit = QLineEdit(value or "")
+        edit.setPlaceholderText("（空）" if self.state._edit_lang() == "英文" else "")
+        edit.editingFinished.connect(
+            lambda k=label, w=edit: self._on_overview_field_edited(k, w)
+        )
         btn = QPushButton("✕")
         btn.setObjectName("fieldRemoveButton")
         btn.setFixedSize(20, 20)
         btn.setToolTip("移除此字段，生成报告时不再写入")
         btn.clicked.connect(lambda _checked=False, k=label: self._exclude_overview_field(k))
-        row_l.addWidget(value_lbl, stretch=1)
-        row_l.addWidget(btn, 0, Qt.AlignTop)
+        row_l.addWidget(edit, stretch=1)
+        row_l.addWidget(btn, 0, Qt.AlignVCenter)
         self.info_form.addRow(key_lbl, row_w)
+
+    def _on_overview_field_edited(self, key: str, edit: QLineEdit):
+        self.state.set_overview_value(key, edit.text())
+        self._mark_dirty()
+
+    def _on_edit_language_changed(self, _id: int = 0):
+        lang = "英文" if self.btn_edit_en.isChecked() else "中文"
+        if self.state.edit_language == lang:
+            return
+        self.state.edit_language = lang
+        self.refresh_overview_ui()
+
+    def _sync_edit_language_buttons(self):
+        lang = self.state._edit_lang()
+        self.btn_edit_zh.blockSignals(True)
+        self.btn_edit_en.blockSignals(True)
+        self.btn_edit_zh.setChecked(lang != "英文")
+        self.btn_edit_en.setChecked(lang == "英文")
+        self.btn_edit_zh.blockSignals(False)
+        self.btn_edit_en.blockSignals(False)
 
     def _exclude_overview_field(self, key: str):
         excluded = list(self.state.excluded_overview_keys or [])
@@ -441,10 +479,12 @@ class MainWindow(QMainWindow):
         self.refresh_overview_ui()
 
     def refresh_overview_ui(self):
+        self._sync_edit_language_buttons()
         self._clear_info_form()
         rows = list(self.state.iter_overview_fields())
+        has_fields = bool(self.state.application_fields or self.state.application_fields_en)
         if not rows:
-            hint = QLabel("未加载" if not self.state.application_fields else "暂无字段（已全部移除）")
+            hint = QLabel("未加载" if not has_fields else "暂无字段（已全部移除）")
             hint.setObjectName("dimLabel")
             self.info_form.addRow(hint)
         else:
@@ -531,20 +571,7 @@ class MainWindow(QMainWindow):
             raw = app_excel.read_bytes()
             clean, name = prepare_excel_bytes(raw, app_excel.name)
             data = parse_application(clean, name)
-
-            self.state.applicant_name = data.applicant_name_cn or data.applicant_name
-            self.state.applicant_address = data.applicant_address_cn or data.applicant_address
-            self.state.report_title_name = data.report_title_name_cn or data.report_title_name_en
-            self.state.report_title_address = (
-                data.report_title_address_cn or data.report_title_address_en
-            )
-            self.state.sample_name = data.sample_info.get("样品名称", "")
-
-            fields = {}
-            for k, v in (data.sample_info or {}).items():
-                if v is not None and str(v).strip():
-                    fields[k] = str(v).strip()
-            self.state.application_fields = fields
+            apply_application_data(self.state, data)
             self.refresh_overview_ui()
             return True
         except Exception as e:
@@ -943,16 +970,14 @@ class MainWindow(QMainWindow):
             )
             if not ok:
                 return
-            if lang != "中文":
-                QMessageBox.information(
-                    self,
-                    "模板未就绪",
-                    f"「{lang}」模板尚未接入，当前仅支持中文报告。",
-                )
-                return
 
-            template_path = Path("templates/template_zh.docx")
-            if not template_path.exists():
+            template_by_lang = {
+                "中文": Path("templates/template_zh.docx"),
+                "英文": Path("templates/template_en.docx"),
+                "中英文": Path("templates/template_ze.docx"),
+            }
+            template_path = template_by_lang.get(lang, Path("templates/template_zh.docx"))
+            if not template_path.exists() and lang == "中文":
                 template_path = Path("templates/template_raw.docx")
             if not template_path.exists():
                 QMessageBox.warning(self, "错误", f"找不到模板文件: {template_path}")

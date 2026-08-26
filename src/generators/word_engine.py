@@ -19,6 +19,7 @@ from openpyxl.utils.cell import range_boundaries
 
 from src.io.data_tables import read_preview_snapshot, resolve_attachment_path
 from src.io.test_photos import TEMPLATE_ALBUMS, list_albums, list_photos
+from src.language_copy import field_label, format_conclusion, language_text, photo_caption, raw_label
 from src.models.project_state import ProjectState, TestNode, TestResult, TestSample
 
 # Fixed section-(1) text kept in the Chinese template contract
@@ -70,6 +71,7 @@ _COVER_SKIP = {
 class WordGenerator:
     def __init__(self, template_path: str):
         self.template_path = template_path
+        self._report_language = "中文"
 
     def generate(
         self,
@@ -79,10 +81,13 @@ class WordGenerator:
         leg_filter: str = None,
         report_language: str = "中文",
     ):
+        self._report_language = (report_language or "中文").strip() or "中文"
         doc = Document(self.template_path)
-        placeholders = self._build_placeholders(state, report_language=report_language)
+        placeholders = self._build_placeholders(state, report_language=self._report_language)
         self._replace_everywhere(doc, placeholders)
         self._tighten_cover_info_table(doc)
+        if self._report_language == "中英文":
+            self._fill_ze_cover_english(doc, state)
 
         nodes = [node for _, node in state.iter_nodes_for_export(leg_filter)]
 
@@ -103,15 +108,82 @@ class WordGenerator:
 
         doc.save(output_path)
 
+    def _lang(self) -> str:
+        return self._report_language or "中文"
+
+    def _side_lang(self) -> str:
+        """Language side for overview field values (中英文 uses Chinese rows + separate EN fill)."""
+        lang = self._lang()
+        if lang == "英文":
+            return "英文"
+        return "中文"
+
+    def _L(self, zh: str, en: str) -> str:
+        """Fixed section/table labels (raw concat for 中英文)."""
+        return raw_label(zh, en, self._lang())
+
+    def _or_slash(self, text: str) -> str:
+        """Chinese/bilingual keep '/' placeholder; English stays empty when missing."""
+        text = (text or "").strip()
+        if text:
+            return text
+        return "" if self._lang() == "英文" else "/"
+
+    def _fill_ze_cover_english(self, doc: Document, state: ProjectState):
+        """Write Customer / Address value cells on template_ze cover (no placeholders)."""
+        en_name = (state.applicant_name_en or "").strip() or (
+            (state.application_fields_en or {}).get("申请公司") or ""
+        ).strip()
+        en_addr = (state.applicant_address_en or "").strip() or (
+            (state.application_fields_en or {}).get("申请公司地址") or ""
+        ).strip()
+        title_en = (state.report_title_name_en or "").strip()
+        title_addr_en = (state.report_title_address_en or "").strip()
+        # Prefer report-title EN when present (same spirit as CN cover priority)
+        if title_en:
+            en_name = title_en
+        if title_addr_en:
+            en_addr = title_addr_en
+        for table in doc.tables:
+            if len(table.rows) < 4 or len(table.columns) < 2:
+                continue
+            c0 = (table.rows[1].cells[0].text or "").strip()
+            c2 = (table.rows[3].cells[0].text or "").strip()
+            if "Customer" in c0 and "Address" in c2:
+                self._set_cell_text(table.rows[1].cells[1], en_name)
+                self._set_cell_text(table.rows[3].cells[1], en_addr)
+                break
+
     # ------------------------------------------------------------------ placeholders
 
     def _build_placeholders(self, state: ProjectState, report_language: str = "中文") -> Dict[str, str]:
-        visible = dict(state.iter_overview_fields())
+        lang = (report_language or "中文").strip() or "中文"
+        # 中英文 cover: CN placeholders for 委托单位/地址; EN filled separately
+        side = "英文" if lang == "英文" else "中文"
+        visible = dict(state.iter_overview_fields(side))
         report_no = self.default_report_no(state, report_language)
+        name_fallback = state.applicant_name_en if side == "英文" else state.applicant_name
+        addr_fallback = state.applicant_address_en if side == "英文" else state.applicant_address
+        sample_fallback = state.sample_name_en if side == "英文" else state.sample_name
+        # Report-title preference for cover name/address when set
+        if side == "中文":
+            title_name = (state.report_title_name or "").strip()
+            title_addr = (state.report_title_address or "").strip()
+            if title_name:
+                name_fallback = title_name
+            if title_addr:
+                addr_fallback = title_addr
+        else:
+            title_name = (state.report_title_name_en or "").strip()
+            title_addr = (state.report_title_address_en or "").strip()
+            if title_name:
+                name_fallback = title_name
+            if title_addr:
+                addr_fallback = title_addr
         placeholders = {
-            "{{委托方名称}}": visible.get("申请公司", "") or state.applicant_name or "",
-            "{{委托方地址}}": visible.get("申请公司地址", "") or state.applicant_address or "",
-            "{{样品名称}}": visible.get("样品名称", "") or state.sample_name or "",
+            "{{委托方名称}}": visible.get("申请公司", "") or name_fallback or "",
+            "{{委托方地址}}": visible.get("申请公司地址", "") or addr_fallback or "",
+            "{{样品名称}}": visible.get("样品名称", "") or sample_fallback or "",
             "{{样品接收日期}}": self._fmt_date(state.sample_receive_date),
             "{{检测开始日期}}": self._fmt_date(state.test_start_date),
             "{{检测结束日期}}": self._fmt_date(state.test_end_date),
@@ -705,21 +777,27 @@ class WordGenerator:
     def _insert_sample_info_table(
         self, doc: Document, anchor: Paragraph, state: ProjectState, nodes: List[TestNode]
     ):
+        lang = self._lang()
+        side = self._side_lang()
         rows_data: List[Tuple[str, str]] = []
-        for key, val in state.iter_overview_fields():
+        for key, val in state.iter_overview_fields(side):
             if key in _COVER_SKIP:
                 continue
-            rows_data.append((key, val))
+            label = field_label(key, lang)
+            if lang == "英文" and not label:
+                rows_data.append(("", val))
+                continue
+            rows_data.append((label or key, val))
 
-        qty = (state.overview_field_map().get("送样数量") or "").strip()
+        qty = (state.overview_field_map(side).get("送样数量") or "").strip()
         if qty and not qty.lower().endswith("pcs"):
             qty = f"{qty}pcs"
         if qty:
-            rows_data.append(("客户送样数量", qty))
+            rows_data.append((field_label("客户送样数量", lang) or "客户送样数量", qty))
 
         recv = self._fmt_date(state.sample_receive_date)
         if recv:
-            rows_data.append(("样品接收日期", recv))
+            rows_data.append((field_label("样品接收日期", lang) or "样品接收日期", recv))
 
         period = self._fmt_period(state.test_start_date, state.test_end_date)
         if not period and nodes:
@@ -729,7 +807,7 @@ class WordGenerator:
                 min(starts) if starts else None, max(ends) if ends else None
             )
         if period:
-            rows_data.append(("样品检测日期", period))
+            rows_data.append((field_label("样品检测日期", lang) or "样品检测日期", period))
 
         table = self._add_table_before(
             doc, anchor, max(len(rows_data), 1), 2, bordered=False
@@ -747,18 +825,48 @@ class WordGenerator:
                 align=WD_ALIGN_PARAGRAPH.LEFT,
             )
 
-        note = self._add_para_before(
-            doc, anchor, "以上测试之样品及信息是由申请者提供并确认", size=SIZE_CAPTION
+        note_zh = "以上测试之样品及信息是由申请者提供并确认"
+        note_en = (
+            "The above sample(s) and information are provided and confirmed by the applicant"
         )
-        note.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        # 检测项目/依据/结果、签发、日期、No.、公司信息：固定写在模板图2区块，不在此动态生成
+        if lang == "中英文":
+            self._add_para_before(doc, anchor, note_zh, size=SIZE_CAPTION).alignment = (
+                WD_ALIGN_PARAGRAPH.LEFT
+            )
+            self._add_para_before(doc, anchor, note_en, size=SIZE_CAPTION).alignment = (
+                WD_ALIGN_PARAGRAPH.LEFT
+            )
+        else:
+            note_p = self._add_para_before(
+                doc, anchor, note_en if lang == "英文" else note_zh, size=SIZE_CAPTION
+            )
+            note_p.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
     def _insert_sample_list_table(
         self, doc: Document, anchor: Paragraph, state: ProjectState, nodes: List[TestNode]
     ):
-        fields = state.overview_field_map()
-        sample_name = fields.get("样品名称") or state.sample_name or "/"
-        part_no = fields.get("零件号") or "/"
+        lang = self._lang()
+        side = self._side_lang()
+        fields = state.overview_field_map(side)
+        if lang == "英文":
+            sample_name = fields.get("样品名称") or state.sample_name_en or "/"
+            part_no = fields.get("零件号") or "/"
+        else:
+            sample_name = fields.get("样品名称") or state.sample_name or "/"
+            part_no = fields.get("零件号") or "/"
+            if lang == "中英文":
+                sample_name = language_text(
+                    sample_name if sample_name != "/" else (state.sample_name or ""),
+                    (state.application_fields_en or {}).get("样品名称")
+                    or state.sample_name_en
+                    or "",
+                    "中英文",
+                ) or "/"
+                part_no = language_text(
+                    part_no if part_no != "/" else "",
+                    (state.application_fields_en or {}).get("零件号") or "",
+                    "中英文",
+                ) or "/"
         qty = (fields.get("送样数量") or "").strip() or str(
             max((len(n.samples) for n in nodes), default=0) or ""
         )
@@ -770,7 +878,13 @@ class WordGenerator:
 
         table = self._add_table_before(doc, anchor, 2, 5)
         self._set_col_widths(table, _WIDTHS_SAMPLE_LIST)
-        headers = ["序号", "样品名称", "零件号", "送样数量", "样品编号"]
+        headers = [
+            self._L("序号", "No."),
+            self._L("样品名称", "Sample Name"),
+            self._L("零件号", "Part No."),
+            self._L("送样数量", "Quantity of Samples"),
+            self._L("样品编号", "Sample No."),
+        ]
         for i, h in enumerate(headers):
             self._set_cell_text(table.rows[0].cells[i], h)
         values = ["1", sample_name, part_no, qty, id_text]
@@ -780,7 +894,13 @@ class WordGenerator:
     def _insert_summary_table(self, doc: Document, anchor: Paragraph, nodes: List[TestNode]):
         table = self._add_table_before(doc, anchor, max(len(nodes), 0) + 1, 5)
         self._set_col_widths(table, _WIDTHS_SUMMARY)
-        headers = ["序号", "检测项目", "检测方法", "样品编号", "结论"]
+        headers = [
+            self._L("序号", "No."),
+            self._L("检测项目", "Test Item"),
+            self._L("检测方法", "Test Method"),
+            self._L("样品编号", "Sample No."),
+            self._L("结论", "Conclusion"),
+        ]
         for i, h in enumerate(headers):
             self._set_cell_text(table.rows[0].cells[i], h)
         for idx, node in enumerate(nodes, 1):
@@ -788,13 +908,18 @@ class WordGenerator:
             conclusion = self._node_conclusion(node)
             vals = [
                 str(idx),
-                node.test_name or "/",
+                self._test_item_label(node) or "/",
                 self._format_method(node) or "/",
                 self._format_id_range(ids) if ids else "/",
                 conclusion,
             ]
             for i, v in enumerate(vals):
                 self._set_cell_text(table.rows[idx].cells[i], v)
+
+    def _test_item_label(self, node: TestNode) -> str:
+        zh = (node.test_name or "").strip()
+        en = (node.joined_test_item() or "").strip()
+        return language_text(zh, en, self._lang())
 
     @staticmethod
     def _collect_sample_ids(nodes: Iterable[TestNode]) -> List[str]:
@@ -842,18 +967,19 @@ class WordGenerator:
             return "；".join(parts)
         return (node.joined_test_method() or "").replace(" / ", "-")
 
-    @staticmethod
-    def _node_conclusion(node: TestNode) -> str:
+    def _node_conclusion(self, node: TestNode) -> str:
         results = [s.result for s in (node.samples or []) if s.sample_id]
         if not results:
-            return "N/A"
+            return format_conclusion(TestResult.NA, self._lang())
         if any(r == TestResult.FAIL for r in results):
-            return "不合格"
+            return format_conclusion(TestResult.FAIL, self._lang())
         if all(r == TestResult.PASS for r in results):
-            return "合格"
+            return format_conclusion(TestResult.PASS, self._lang())
         if all(r == TestResult.NA for r in results):
-            return "N/A"
-        return "不合格" if any(r == TestResult.FAIL for r in results) else "合格"
+            return format_conclusion(TestResult.NA, self._lang())
+        if any(r == TestResult.FAIL for r in results):
+            return format_conclusion(TestResult.FAIL, self._lang())
+        return format_conclusion(TestResult.PASS, self._lang())
 
     # ------------------------------------------------------------------ test details
 
@@ -873,61 +999,112 @@ class WordGenerator:
     ):
         # Each test item starts on a new page (matches CTI golden layout)
         self._add_page_break_before(doc, anchor)
+        item = self._test_item_label(node) or "/"
         self._add_para_before(
-            doc, anchor, f"{index}. 检测项目：{node.test_name or '/'}", size=SIZE_BODY
+            doc,
+            anchor,
+            f"{index}. {self._L('检测项目', 'Test Item')}：{item}",
+            size=SIZE_BODY,
         )
         self._add_para_before(
-            doc, anchor, f"（1）检测环境条件：{ENV_CONDITION_TEXT}", size=SIZE_BODY
+            doc,
+            anchor,
+            f"（1）{self._L('检测环境条件', 'Test environment')}：{ENV_CONDITION_TEXT}",
+            size=SIZE_BODY,
         )
 
-        self._add_para_before(doc, anchor, "（2）检测设备：", size=SIZE_BODY)
+        self._add_para_before(
+            doc, anchor, f"（2）{self._L('检测设备', 'Test equipment')}：", size=SIZE_BODY
+        )
         self._insert_equipment_table(doc, anchor, node)
 
         method = self._format_method(node) or "/"
-        self._add_para_before(doc, anchor, f"（3）检测方法：{method}", size=SIZE_BODY)
+        self._add_para_before(
+            doc,
+            anchor,
+            f"（3）{self._L('检测方法', 'Test method')}：{method}",
+            size=SIZE_BODY,
+        )
 
-        self._add_para_before(doc, anchor, "（4）检测条件：", size=SIZE_BODY)
+        self._add_para_before(
+            doc, anchor, f"（4）{self._L('检测条件', 'Test condition')}：", size=SIZE_BODY
+        )
         self._insert_condition_blocks(doc, anchor, node)
         self._insert_condition_images(doc, anchor, node)
 
         qty = len([s for s in (node.samples or []) if s.sample_id])
-        self._add_para_before(doc, anchor, f"（5）检测数量：{qty}pcs", size=SIZE_BODY)
+        self._add_para_before(
+            doc,
+            anchor,
+            f"（5）{self._L('检测数量', 'Quantity')}：{qty}pcs",
+            size=SIZE_BODY,
+        )
 
-        self._add_para_before(doc, anchor, "（6）评判要求：", size=SIZE_BODY)
-        eval_req = (node.evaluation_req or node.joined_evaluation_req() or "").strip() or "/"
-        for block in re.split(r"\n+", eval_req):
-            if block.strip():
-                self._add_para_before(doc, anchor, block.strip(), size=SIZE_BODY)
+        self._add_para_before(
+            doc,
+            anchor,
+            f"（6）{self._L('评判要求', 'Evaluation requirement')}：",
+            size=SIZE_BODY,
+        )
+        eval_req = self._evaluation_text(node)
+        if eval_req:
+            for block in re.split(r"\n+", eval_req):
+                if block.strip():
+                    self._add_para_before(doc, anchor, block.strip(), size=SIZE_BODY)
 
-        self._add_para_before(doc, anchor, "（7）检测结果：", size=SIZE_BODY)
+        self._add_para_before(
+            doc, anchor, f"（7）{self._L('检测结果', 'Test result')}：", size=SIZE_BODY
+        )
         self._insert_sample_result_table(doc, anchor, node)
         self._insert_data_tables(doc, anchor, node, project_path)
 
         conclusion = self._node_conclusion(node)
-        self._add_para_before(doc, anchor, f"（8）结论：{conclusion}", size=SIZE_BODY)
+        self._add_para_before(
+            doc,
+            anchor,
+            f"（8）{self._L('结论', 'Conclusion')}：{conclusion}",
+            size=SIZE_BODY,
+        )
 
         # Photos section on its own page
         self._add_page_break_before(doc, anchor)
         self._add_para_before(
             doc,
             anchor,
-            "检测照片",
+            self._L("检测照片", "Test photos"),
             size=SIZE_PHOTO_TITLE,
             align=WD_ALIGN_PARAGRAPH.CENTER,
         )
         if project_path and node.test_name:
             self._insert_photos(doc, anchor, Path(project_path), node.test_name)
 
+    def _evaluation_text(self, node: TestNode) -> str:
+        lang = self._lang()
+        if lang == "英文":
+            return (node.evaluation_req_en or node.joined_evaluation_req_en() or "").strip()
+        if lang == "中英文":
+            zh = (node.evaluation_req or node.joined_evaluation_req() or "").strip()
+            en = (node.evaluation_req_en or node.joined_evaluation_req_en() or "").strip()
+            return language_text(zh, en, "中英文") or "/"
+        return (node.evaluation_req or node.joined_evaluation_req() or "").strip() or "/"
+
     def _insert_equipment_table(self, doc: Document, anchor: Paragraph, node: TestNode):
         items = list(node.equipments or [])
+        headers = [
+            self._L("序号", "No."),
+            self._L("名称", "Name"),
+            self._L("型号", "Model"),
+            self._L("设备编号", "Equipment No."),
+            self._L("校准有效期", "Calibration due date"),
+        ]
         if not items and node.equipment_name:
             table = self._add_table_before(doc, anchor, 2, 5)
             self._set_col_widths(table, _WIDTHS_EQUIPMENT)
-            headers = ["序号", "名称", "型号", "设备编号", "校准有效期"]
             for i, h in enumerate(headers):
                 self._set_cell_text(table.rows[0].cells[i], h)
             self._set_cell_text(table.rows[1].cells[0], "1")
-            self._set_cell_text(table.rows[1].cells[1], node.equipment_name)
+            name = node.equipment_name if self._lang() != "英文" else ""
+            self._set_cell_text(table.rows[1].cells[1], name or "/")
             for i in range(2, 5):
                 self._set_cell_text(table.rows[1].cells[i], "/")
             return
@@ -937,11 +1114,14 @@ class WordGenerator:
 
         table = self._add_table_before(doc, anchor, len(items) + 1, 5)
         self._set_col_widths(table, _WIDTHS_EQUIPMENT)
-        headers = ["序号", "名称", "型号", "设备编号", "校准有效期"]
         for i, h in enumerate(headers):
             self._set_cell_text(table.rows[0].cells[i], h)
         for idx, eq in enumerate(items, 1):
-            name = (eq.name or "/").replace("\n", "")
+            name = language_text(
+                (eq.name or "").replace("\n", ""),
+                (getattr(eq, "name_en", None) or "").replace("\n", ""),
+                self._lang(),
+            ) or "/"
             model = eq.model or "/"
             code = eq.code or "/"
             cal = (getattr(eq, "valid_date", None) or "").strip() or "/"
@@ -952,21 +1132,33 @@ class WordGenerator:
     def _insert_condition_blocks(self, doc: Document, anchor: Paragraph, node: TestNode):
         """检测条件：每条标准先写试验名称，再写缩进两格的条件正文。"""
         stds = node.resolved_standards()
-        if not stds:
-            condition = (node.standard_desc or "").strip() or "/"
-            for block in re.split(r"\n+", condition):
-                if block.strip():
-                    self._add_para_before(doc, anchor, block.strip(), size=SIZE_BODY)
-            return
+        lang = self._lang()
         indent = "  "
+
+        def emit_body(zh: str, en: str):
+            zh = (zh or "").strip()
+            en = (en or "").strip()
+            if lang == "英文":
+                texts = [en] if en else [""]
+            elif lang == "中英文":
+                texts = [t for t in (zh, en) if t] or ["/"]
+            else:
+                texts = [zh] if zh else ["/"]
+            for body in texts:
+                if not body and lang == "英文":
+                    continue
+                for block in re.split(r"\n+", body):
+                    text = block.strip()
+                    if text:
+                        self._add_para_before(doc, anchor, indent + text, size=SIZE_BODY)
+
+        if not stds:
+            emit_body(node.standard_desc or "", node.standard_desc_en or "")
+            return
         for std in stds:
             title = (std.field_title() or std.test_name or "").strip() or "/"
             self._add_para_before(doc, anchor, title, size=SIZE_BODY)
-            body = (std.standard_desc or "").strip() or "/"
-            for block in re.split(r"\n+", body):
-                text = block.strip()
-                if text:
-                    self._add_para_before(doc, anchor, indent + text, size=SIZE_BODY)
+            emit_body(std.standard_desc or "", std.standard_desc_en or "")
 
     def _insert_condition_images(self, doc: Document, anchor: Paragraph, node: TestNode):
         blobs: List[bytes] = []
@@ -984,11 +1176,22 @@ class WordGenerator:
         Multi-standard → one entry per standard's result_desc.
         Single / legacy → sample or node fallback handled by the caller per row.
         """
+        lang = self._lang()
         stds = node.resolved_standards()
+
+        def side_text(std) -> str:
+            zh = (std.result_desc or "").strip()
+            en = (std.result_desc_en or "").strip()
+            if lang == "英文":
+                return en
+            if lang == "中英文":
+                return language_text(zh, en, "中英文")
+            return zh
+
         if len(stds) > 1:
-            return [(s.result_desc or "").strip() or "/" for s in stds]
+            return [side_text(s) or ("/" if lang != "英文" else "") for s in stds]
         if len(stds) == 1:
-            text = (stds[0].result_desc or "").strip()
+            text = side_text(stds[0])
             return [text] if text else [""]
         return [""]
 
@@ -996,17 +1199,28 @@ class WordGenerator:
         """One 样品编号/试验结果/试验结论 table per selected standard; blank line between."""
         samples = [s for s in (node.samples or []) if s.sample_id]
         if not samples:
-            self._add_para_before(doc, anchor, "无结果记录", size=SIZE_BODY)
+            self._add_para_before(
+                doc, anchor, self._L("无结果记录", "No result recorded"), size=SIZE_BODY
+            )
             return
         descs = self._result_desc_texts(node)
-        node_desc = (getattr(node, "result_desc", None) or "").strip()
+        lang = self._lang()
+        node_desc = language_text(
+            (getattr(node, "result_desc", None) or "").strip(),
+            (getattr(node, "result_desc_en", None) or "").strip(),
+            lang,
+        )
         multi = len(descs) > 1
+        headers = [
+            self._L("样品编号", "Sample No."),
+            self._L("试验结果", "Test result"),
+            self._L("试验结论", "Conclusion"),
+        ]
         for ti, table_desc in enumerate(descs):
             if ti:
                 self._add_para_before(doc, anchor, "", size=SIZE_BODY)
             table = self._add_table_before(doc, anchor, len(samples) + 1, 3)
             self._set_col_widths(table, _WIDTHS_SAMPLE_RESULT)
-            headers = ["样品编号", "试验结果", "试验结论"]
             for i, h in enumerate(headers):
                 self._set_cell_text(table.rows[0].cells[i], h)
             self._set_row_as_tbl_header(table.rows[0])
@@ -1014,14 +1228,16 @@ class WordGenerator:
                 if multi:
                     desc = table_desc
                 else:
-                    # 单表：样品级 > 标准级 > 节点级
-                    desc = (
-                        (getattr(sample, "result_desc", None) or "").strip()
-                        or table_desc
-                        or node_desc
-                        or "/"
-                    )
-                vals = [sample.sample_id, desc, sample.result.value]
+                    sample_zh = (getattr(sample, "result_desc", None) or "").strip()
+                    if lang == "英文":
+                        desc = table_desc or node_desc or ""
+                    else:
+                        desc = sample_zh or table_desc or node_desc or "/"
+                vals = [
+                    sample.sample_id,
+                    desc,
+                    format_conclusion(sample.result, lang),
+                ]
                 for i, v in enumerate(vals):
                     self._set_cell_text(table.rows[idx].cells[i], v)
 
@@ -1032,7 +1248,11 @@ class WordGenerator:
         if not refs or not project_path:
             return
         self._add_para_before(
-            doc, anchor, "试验数据", size=SIZE_BODY, align=WD_ALIGN_PARAGRAPH.CENTER
+            doc,
+            anchor,
+            self._L("试验数据", "Test data"),
+            size=SIZE_BODY,
+            align=WD_ALIGN_PARAGRAPH.CENTER,
         )
         root = Path(project_path)
         for ref in refs:
@@ -1072,6 +1292,7 @@ class WordGenerator:
         albums = list_albums(project_root, test_name)
         if not albums:
             return
+        lang = self._lang()
         for album in albums:
             photos = list_photos(project_root, test_name, album)
             if not photos:
@@ -1080,16 +1301,23 @@ class WordGenerator:
             if is_data:
                 for path in photos:
                     self._add_picture_file_before(doc, anchor, path, DATA_PHOTO_WIDTH_IN)
-                    cap = self._add_para_before(doc, anchor, path.stem, size=SIZE_CAPTION)
+                    cap_text = photo_caption(album, lang, file_stem=path.stem)
+                    cap = self._add_para_before(doc, anchor, cap_text, size=SIZE_CAPTION)
                     cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
             else:
-                self._insert_photo_pairs(doc, anchor, photos, PHOTO_WIDTH_IN)
+                self._insert_photo_pairs(doc, anchor, photos, PHOTO_WIDTH_IN, album=album)
 
     def _insert_photo_pairs(
-        self, doc: Document, anchor: Paragraph, photos: Sequence[Path], width_in: float
+        self,
+        doc: Document,
+        anchor: Paragraph,
+        photos: Sequence[Path],
+        width_in: float,
+        album: str = "",
     ):
         pairs = list(photos)
         half = _CONTENT_WIDTH_DXA // 2
+        lang = self._lang()
         for i in range(0, len(pairs), 2):
             chunk = pairs[i : i + 2]
             table = self._add_table_before(doc, anchor, 1, 2, bordered=False)
@@ -1109,7 +1337,8 @@ class WordGenerator:
                     err = p.add_run(f"[无法插入图片: {path.name}]")
                     self._style_run(err, size=SIZE_CAPTION)
                     print(f"Failed to add image {path}: {exc}")
-                cap = cell.add_paragraph(path.stem)
+                cap_text = photo_caption(album, lang, file_stem=path.stem)
+                cap = cell.add_paragraph(cap_text)
                 cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 self._apply_tight_spacing(cap)
                 if cap.runs:
