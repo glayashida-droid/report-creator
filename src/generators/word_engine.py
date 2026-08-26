@@ -19,7 +19,14 @@ from openpyxl.utils.cell import range_boundaries
 
 from src.io.data_tables import read_preview_snapshot, resolve_attachment_path
 from src.io.test_photos import TEMPLATE_ALBUMS, list_albums, list_photos
-from src.language_copy import field_label, format_conclusion, language_text, photo_caption, raw_label
+from src.language_copy import (
+    field_label,
+    format_conclusion,
+    has_chinese,
+    language_text,
+    photo_caption,
+    raw_label,
+)
 from src.models.project_state import ProjectState, TestNode, TestResult, TestSample
 
 # Fixed section-(1) text kept in the Chinese template contract
@@ -92,7 +99,7 @@ class WordGenerator:
         nodes = [node for _, node in state.iter_nodes_for_export(leg_filter)]
 
         self._replace_marker_with_table(
-            doc, "{{样品信息表}}", lambda d, p: self._insert_sample_info_table(d, p, state, nodes)
+            doc, "{{样品信息表}}", lambda d, p: self._insert_sample_info_table(d, p, state)
         )
         self._replace_marker_with_table(
             doc, "{{样品清单表}}", lambda d, p: self._insert_sample_list_table(d, p, state, nodes)
@@ -139,19 +146,27 @@ class WordGenerator:
         ).strip()
         title_en = (state.report_title_name_en or "").strip()
         title_addr_en = (state.report_title_address_en or "").strip()
-        # Prefer report-title EN when present (same spirit as CN cover priority)
-        if title_en:
+        # Prefer report-title EN when present and actually English (no Han)
+        if title_en and not has_chinese(title_en):
             en_name = title_en
-        if title_addr_en:
+        if title_addr_en and not has_chinese(title_addr_en):
             en_addr = title_addr_en
+        if has_chinese(en_name):
+            en_name = ""
+        if has_chinese(en_addr):
+            en_addr = ""
         for table in doc.tables:
             if len(table.rows) < 4 or len(table.columns) < 2:
                 continue
             c0 = (table.rows[1].cells[0].text or "").strip()
             c2 = (table.rows[3].cells[0].text or "").strip()
             if "Customer" in c0 and "Address" in c2:
-                self._set_cell_text(table.rows[1].cells[1], en_name)
-                self._set_cell_text(table.rows[3].cells[1], en_addr)
+                self._set_cell_text(
+                    table.rows[1].cells[1], en_name, align=WD_ALIGN_PARAGRAPH.LEFT
+                )
+                self._set_cell_text(
+                    table.rows[3].cells[1], en_addr, align=WD_ALIGN_PARAGRAPH.LEFT
+                )
                 break
 
     # ------------------------------------------------------------------ placeholders
@@ -775,7 +790,7 @@ class WordGenerator:
             break
 
     def _insert_sample_info_table(
-        self, doc: Document, anchor: Paragraph, state: ProjectState, nodes: List[TestNode]
+        self, doc: Document, anchor: Paragraph, state: ProjectState
     ):
         lang = self._lang()
         side = self._side_lang()
@@ -800,12 +815,6 @@ class WordGenerator:
             rows_data.append((field_label("样品接收日期", lang) or "样品接收日期", recv))
 
         period = self._fmt_period(state.test_start_date, state.test_end_date)
-        if not period and nodes:
-            starts = [n.start_date for n in nodes if n.start_date]
-            ends = [n.end_date for n in nodes if n.end_date]
-            period = self._fmt_period(
-                min(starts) if starts else None, max(ends) if ends else None
-            )
         if period:
             rows_data.append((field_label("样品检测日期", lang) or "样品检测日期", period))
 

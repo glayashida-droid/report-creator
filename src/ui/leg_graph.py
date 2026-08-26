@@ -101,11 +101,20 @@ class TestNodeWidget(QFrame):
         grid.addLayout(btn_layout, 1, 0, 1, 2)
         layout.addLayout(grid)
         self._refresh_complete_mark()
+        self._sync_detail_button()
 
     def _refresh_complete_mark(self):
         self.lbl_complete.setVisible(self.node_data.is_detail_complete())
 
+    def _sync_detail_button(self):
+        ok = is_usable_test_name(self._committed_name)
+        self.btn_detail.setEnabled(ok)
+        self.btn_detail.setToolTip("" if ok else "请先选择或输入试验名称")
+
     def show_detail(self):
+        if not is_usable_test_name(self._committed_name):
+            QMessageBox.warning(self, "提示", "请先选择或输入试验名称")
+            return
         if not self.db_loader:
             QMessageBox.warning(self, "提示", "标准库尚未就绪，无法编辑明细")
             return
@@ -138,6 +147,7 @@ class TestNodeWidget(QFrame):
         self.combo.blockSignals(False)
         self.node_data.test_name = self._committed_name
         self._refresh_complete_mark()
+        self._sync_detail_button()
         self.node_updated.emit()
 
     def _prompt_custom_name(self):
@@ -194,10 +204,12 @@ class TestNodeWidget(QFrame):
                 self.combo.blockSignals(False)
                 self.node_data.test_name = old
                 self._refresh_complete_mark()
+                self._sync_detail_button()
                 self.node_updated.emit()
                 return
         self._committed_name = name
         self._refresh_complete_mark()
+        self._sync_detail_button()
         self.node_updated.emit()
 
     def on_test_changed(self, text):
@@ -356,9 +368,9 @@ class LegGraphArea(QWidget):
         self.btn_gantt_zoom_in = QPushButton("+")
         _style_zoom_button(self.btn_gantt_zoom_in)
         self.btn_gantt_zoom_in.clicked.connect(lambda: self.zoom_gantt(1))
-        self.btn_save = QPushButton("保存项目")
+        self.btn_save = QPushButton("保存明细")
         _style_toolbar_button(self.btn_save, "legToolbarAccentButton")
-        self.btn_load_state = QPushButton("加载项目")
+        self.btn_load_state = QPushButton("加载明细")
         _style_toolbar_button(self.btn_load_state)
         self.btn_save_template = QPushButton("存为模板")
         _style_toolbar_button(self.btn_save_template)

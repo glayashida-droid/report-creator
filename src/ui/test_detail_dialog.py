@@ -870,6 +870,7 @@ class TestDetailDialog(QDialog):
         self.combo_bulk_result.addItem("—")
         for r in TestResult:
             self.combo_bulk_result.addItem(self._result_display(r), userData=r)
+        self._expand_result_combo_popup(self.combo_bulk_result)
         self.combo_bulk_result.activated.connect(self._apply_bulk_result)
         header.sectionResized.connect(lambda *_: self._schedule_result_header_sync())
         header.geometriesChanged.connect(self._schedule_result_header_sync)
@@ -880,6 +881,14 @@ class TestDetailDialog(QDialog):
             lambda *_: self._schedule_result_header_sync()
         )
         self.drawer_sample.header.clicked.connect(self._schedule_result_header_sync)
+
+    def _expand_result_combo_popup(self, combo):
+        """Keep Pass/Fail/N/A (and the bulk '—') all visible without scrolling."""
+        count = combo.count()
+        combo.setMaxVisibleItems(max(count, 4))
+        view = combo.view()
+        if view is not None:
+            view.setMinimumHeight(22 * count)
 
     def _schedule_result_header_sync(self):
         if getattr(self, "_header_sync_pending", False):
@@ -1617,6 +1626,7 @@ class TestDetailDialog(QDialog):
         combo_res = QComboBox()
         for r in TestResult:
             combo_res.addItem(self._result_display(r), userData=r)
+        self._expand_result_combo_popup(combo_res)
         bulk_data = None
         if hasattr(self, "combo_bulk_result"):
             bulk_data = self.combo_bulk_result.currentData()
@@ -1809,11 +1819,8 @@ class TestDetailDialog(QDialog):
         self._restore_equipments()
 
         for s in self.node_data.samples:
-            self.add_sample_row(
-                s.sample_id,
-                s.result,
-                getattr(s, "result_desc", None) or getattr(self.node_data, "result_desc", None),
-            )
+            self.add_sample_row(s.sample_id, s.result)
+        self._apply_result_desc_to_rows(self._current_result_desc())
         self._refresh_sample_summary()
         self._refresh_data_table_list()
         self._sync_data_table_button()

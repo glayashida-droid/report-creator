@@ -45,6 +45,41 @@ def test_added_nodes_get_db_loader():
     assert area.leg_widgets[0].node_widgets[0].db_loader is area.db_loader
 
 
+def test_detail_button_disabled_until_test_name():
+    _app()
+    state = ProjectState(
+        project_id="P1",
+        legs=[TestLeg(leg_id="L1", leg_name="Leg 1", nodes=[TestNode(test_name="")])],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    nw = area.leg_widgets[0].node_widgets[0]
+    assert not nw.btn_detail.isEnabled()
+    assert nw.btn_detail.toolTip() == "请先选择或输入试验名称"
+
+    nw._commit_test_name("机械冲击")
+    assert nw.btn_detail.isEnabled()
+    assert nw.btn_detail.toolTip() == ""
+
+
+def test_detail_button_enabled_for_loaded_test_name():
+    _app()
+    state = ProjectState(
+        project_id="P1",
+        legs=[TestLeg(leg_id="L1", leg_name="Leg 1", nodes=[TestNode(test_name="随机振动")])],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    assert area.leg_widgets[0].node_widgets[0].btn_detail.isEnabled()
+
+
+def test_toolbar_save_load_use_detail_labels():
+    _app()
+    area = LegGraphArea(ProjectState(project_id="P1"))
+    assert area.btn_save.text() == "保存明细"
+    assert area.btn_load_state.text() == "加载明细"
+
+
 def test_combo_includes_custom_and_keeps_typed_name():
     _app()
     combo = QComboBox()

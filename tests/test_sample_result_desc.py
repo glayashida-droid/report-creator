@@ -1,10 +1,10 @@
 import sys
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QLineEdit
+from PySide6.QtWidgets import QApplication, QLineEdit, QWidget
 
 from src.generators.word_engine import WordGenerator
-from src.models.project_state import TestNode, TestResult, TestSample
+from src.models.project_state import ProjectState, TestLeg, TestNode, TestResult, TestSample, TestStandard
 from src.ui.test_detail_dialog import TestDetailDialog
 
 
@@ -74,6 +74,75 @@ def test_save_persists_sample_result_desc():
     dlg.save_and_close()
     assert len(dlg.node_data.samples) == 1
     assert dlg.node_data.samples[0].result_desc == desc
+
+
+def test_import_from_preceding_test_copies_ids_only():
+    _app()
+    desc_current = "本试验结果描述"
+    desc_prev = "前置试验结果描述"
+    standards = [
+        {
+            "标准号": "STD-3",
+            "章节号": "3.3",
+            "试验名称": "温湿度",
+            "结果描述": desc_current,
+        }
+    ]
+    prev_node = TestNode(
+        test_name="高温",
+        samples=[
+            TestSample(sample_id="A01", result=TestResult.PASS, result_desc=desc_prev),
+            TestSample(sample_id="A02", result=TestResult.FAIL, result_desc=desc_prev),
+        ],
+    )
+    current_node = TestNode(test_name="温湿度", samples=[])
+    state = ProjectState(
+        project_id="P1",
+        legs=[TestLeg(leg_id="L1", leg_name="Leg 1", nodes=[prev_node, current_node])],
+    )
+
+    class _Host(QWidget):
+        def __init__(self):
+            super().__init__()
+            self.state = state
+
+    host = _Host()
+    dlg = TestDetailDialog(current_node, standards, [], host)
+    _check_first_standard(dlg)
+    assert dlg.btn_import_from_prev.isEnabled()
+
+    dlg.add_sample_row("A01", TestResult.NA)
+    dlg._import_from_preceding_test()
+
+    assert dlg.table.rowCount() == 2
+    id_widgets = [dlg.table.cellWidget(row, 1) for row in range(2)]
+    assert [w.text() for w in id_widgets] == ["A01", "A02"]
+
+    desc_widgets = [dlg.table.cellWidget(row, 2) for row in range(2)]
+    assert all(w.text() == desc_current for w in desc_widgets)
+
+    result_widgets = [dlg.table.cellWidget(row, 3) for row in range(2)]
+    assert result_widgets[0].currentText() == TestResult.NA.value
+    assert result_widgets[1].currentText() == TestResult.NA.value
+
+
+def test_import_from_prev_disabled_for_first_node_in_leg():
+    _app()
+    node = TestNode(test_name="高温")
+    state = ProjectState(
+        project_id="P1",
+        legs=[TestLeg(leg_id="L1", leg_name="Leg 1", nodes=[node])],
+    )
+
+    class _Host(QWidget):
+        def __init__(self):
+            super().__init__()
+            self.state = state
+
+    host = _Host()
+    dlg = TestDetailDialog(node, [], [], host)
+    assert not dlg.btn_import_from_prev.isEnabled()
+    dlg.close()
 
 
 def test_word_sample_table_includes_result_desc(tmp_path):
@@ -175,3 +244,61 @@ def test_word_multi_standard_emits_one_result_table_each(tmp_path):
     for el in between:
         texts.extend(t.text or "" for t in el.findall(".//" + qn("w:t")))
     assert "".join(texts).strip() == ""
+
+
+def _english_host(node):
+    state = ProjectState(
+        project_id="P1",
+        edit_language="英文",
+        legs=[TestLeg(leg_id="L1", leg_name="Leg 1", nodes=[node])],
+    )
+
+    class _Host(QWidget):
+        def __init__(self):
+            super().__init__()
+            self.state = state
+
+    return _Host()
+
+
+def test_sample_result_desc_follows_edit_language():
+    _app()
+    desc_zh = "试验后模块保持完整性。"
+    desc_en = "The module remained intact after the test."
+    standards = [
+        {
+            "标准号": "STD-1",
+            "章节号": "1.1",
+            "试验名称": "机械冲击试验",
+            "结果描述": desc_zh,
+            "result": desc_en,
+        }
+    ]
+    node = TestNode(
+        test_name="机械冲击",
+        samples=[TestSample(sample_id="A01", result=TestResult.PASS, result_desc=desc_zh)],
+        standards=[
+            TestStandard(
+                standard_id="STD-1",
+                chapter="1.1",
+                test_name="机械冲击试验",
+                result_desc=desc_zh,
+                result_desc_en=desc_en,
+            )
+        ],
+    )
+    host = _english_host(node)
+    dlg = TestDetailDialog(node, standards, [], host)
+    desc_w = dlg.table.cellWidget(0, 2)
+    assert desc_w is not None
+    assert desc_w.text() == desc_en
+    dlg.close()
+
+
+def test_bulk_result_combo_includes_na_without_scroll():
+    _app()
+    dlg = TestDetailDialog(TestNode(test_name="高温"), [], [])
+    texts = [dlg.combo_bulk_result.itemText(i) for i in range(dlg.combo_bulk_result.count())]
+    assert texts == ["—", "合格", "不合格", "N/A"]
+    assert dlg.combo_bulk_result.maxVisibleItems() >= 4
+    dlg.close()

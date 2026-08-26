@@ -34,6 +34,7 @@ from src.ui.load_state_dialog import LoadStateDialog
 from src.ui.leg_template_dialog import ImportTemplateDialog
 from src.ui.candidate_pool import CandidatePoolList
 from src.ui.theme import polish_date_edit_calendar
+from src.language_copy import field_label
 
 
 class MirrorWorker(QThread):
@@ -58,7 +59,7 @@ class MirrorWorker(QThread):
             self.failed.emit(self._generation, str(e))
 
 
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.2"
 # Calendar popup floor. Dates before this are treated as "no end date"
 # because QDateEdit may clamp the blank sentinel to 1752-09-14.
 _EARLIEST_REAL_YEAR = 1990
@@ -103,9 +104,8 @@ class MainWindow(QMainWindow):
         row.setSpacing(6)
         self.txt_project_path = QLineEdit()
         self.txt_project_path.setPlaceholderText(
-            "粘贴项目文件夹路径 / 链接，或点击「选择目录…」"
+            "粘贴项目文件夹路径 / 链接，或点击「选择项目」"
         )
-        self.txt_project_path.setMaximumWidth(280)
         self.txt_project_path.returnPressed.connect(self.load_from_pasted_path)
 
         self.btn_edit_zh = QPushButton("中文")
@@ -123,26 +123,33 @@ class MainWindow(QMainWindow):
         self.edit_lang_group.addButton(self.btn_edit_en, 1)
         self.edit_lang_group.idClicked.connect(self._on_edit_language_changed)
 
-        btn_load = QPushButton("加载项目")
-        btn_load.setFixedWidth(88)
+        # Same objectName/style as 中文/英文 so heights match exactly
+        btn_load = QPushButton("从路径加载项目")
+        btn_load.setObjectName("poolToggle")
+        btn_load.setFixedWidth(128)
         btn_load.clicked.connect(self.load_from_pasted_path)
 
-        btn_browse = QPushButton("选择目录…")
-        btn_browse.setObjectName("accentButton")
-        btn_browse.setFixedWidth(100)
+        btn_browse = QPushButton("选择项目")
+        btn_browse.setObjectName("poolToggle")
+        btn_browse.setProperty("accent", True)
+        btn_browse.setFixedWidth(80)
         btn_browse.clicked.connect(self.browse_project_folder)
+        # Refresh style so [accent="true"] selector applies
+        btn_browse.style().unpolish(btn_browse)
+        btn_browse.style().polish(btn_browse)
 
         btn_reload_info = QPushButton("重载申请单")
+        btn_reload_info.setObjectName("poolToggle")
         btn_reload_info.setFixedWidth(96)
         btn_reload_info.clicked.connect(self.restore_excluded_overview_fields)
 
         row.addWidget(QLabel("路径:"))
         row.addWidget(self.txt_project_path, stretch=1)
-        row.addWidget(self.btn_edit_zh)
-        row.addWidget(self.btn_edit_en)
         row.addWidget(btn_load)
         row.addWidget(btn_browse)
         row.addWidget(btn_reload_info)
+        row.addWidget(self.btn_edit_zh)
+        row.addWidget(self.btn_edit_en)
         top_outer.addLayout(row)
 
         meta_row = QHBoxLayout()
@@ -169,8 +176,8 @@ class MainWindow(QMainWindow):
         info_group = QGroupBox("项目信息")
         info_group.setObjectName("overviewGroup")
         info_layout = QVBoxLayout(info_group)
-        info_layout.setContentsMargins(10, 18, 10, 10)
-        info_layout.setSpacing(8)
+        info_layout.setContentsMargins(10, 16, 10, 8)
+        info_layout.setSpacing(6)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -183,7 +190,7 @@ class MainWindow(QMainWindow):
         self.info_form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.info_form.setFormAlignment(Qt.AlignTop)
         self.info_form.setHorizontalSpacing(12)
-        self.info_form.setVerticalSpacing(4)
+        self.info_form.setVerticalSpacing(2)
         self._info_placeholder = QLabel("未加载")
         self._info_placeholder.setObjectName("dimLabel")
         self.info_form.addRow(self._info_placeholder)
@@ -197,35 +204,41 @@ class MainWindow(QMainWindow):
         date_layout.setContentsMargins(0, 4, 0, 0)
         date_layout.setSpacing(8)
 
-        def make_date_column(label_text):
+        def make_date_column(label_key, *, empty_label: bool = False):
             col = QVBoxLayout()
             col.setSpacing(2)
             col.setContentsMargins(0, 0, 0, 0)
-            lbl = QLabel(label_text)
+            if empty_label:
+                lbl = QLabel("")
+            else:
+                lbl = QLabel(field_label(label_key, "中文") or label_key)
             lbl.setObjectName("dimLabel")
             date_edit = QDateEdit()
             date_edit.setCalendarPopup(True)
-            date_edit.setDisplayFormat("yyyy-MM-dd")
+            # Match report / 申请单 sample-info date writing (YYYY.MM.DD)
+            date_edit.setDisplayFormat("yyyy.MM.dd")
             date_edit.lineEdit().setReadOnly(True)
             self._configure_optional_date(date_edit)
             col.addWidget(lbl)
             col.addWidget(date_edit)
-            return col, date_edit
+            return col, date_edit, lbl
 
-        col1, self.date_receive = make_date_column("接收日期")
-        col2, self.date_start = make_date_column("检测开始")
-        col3, self.date_end = make_date_column("检测结束")
+        col1, self.date_receive, self.lbl_date_receive = make_date_column("样品接收日期")
+        col2, self.date_start, self.lbl_date_start = make_date_column("检测开始")
+        col3, self.date_end, self.lbl_date_end = make_date_column(
+            "检测结束", empty_label=True
+        )
 
         duration_col = QVBoxLayout()
         duration_col.setSpacing(2)
         duration_col.setContentsMargins(0, 0, 0, 0)
-        duration_lbl = QLabel("检测天数")
-        duration_lbl.setObjectName("dimLabel")
+        self.lbl_date_duration = QLabel(field_label("检测天数", "中文") or "检测天数")
+        self.lbl_date_duration.setObjectName("dimLabel")
         self.txt_duration = QLineEdit()
         self.txt_duration.setReadOnly(True)
         self.txt_duration.setFocusPolicy(Qt.NoFocus)
         self.txt_duration.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        duration_col.addWidget(duration_lbl)
+        duration_col.addWidget(self.lbl_date_duration)
         duration_col.addWidget(self.txt_duration)
 
         date_layout.addLayout(col1, stretch=1)
@@ -396,18 +409,23 @@ class MainWindow(QMainWindow):
         chosen = QFileDialog.getExistingDirectory(self, "选择项目文件夹", start)
         if not chosen:
             return
-        self.txt_project_path.setText(chosen)
+        self._set_path_text(chosen)
         self.load_project_folder(Path(chosen))
+
+    def _set_path_text(self, text: str):
+        """Set path line edit and keep the start of long paths visible."""
+        self.txt_project_path.setText(text or "")
+        self.txt_project_path.setCursorPosition(0)
 
     def load_from_pasted_path(self):
         path = self._normalize_path_input(self.txt_project_path.text())
         if path is None or not path.is_dir():
             QMessageBox.warning(
                 self, "路径无效",
-                "请粘贴有效的项目文件夹路径，或使用「选择目录…」。",
+                "请粘贴有效的项目文件夹路径，或使用「选择项目」。",
             )
             return
-        self.txt_project_path.setText(str(path))
+        self._set_path_text(str(path))
         self.load_project_folder(path)
 
     def restore_excluded_overview_fields(self):
@@ -427,8 +445,10 @@ class MainWindow(QMainWindow):
         while self.info_form.rowCount():
             self.info_form.removeRow(0)
 
-    def _add_info_row(self, label: str, value: str):
-        key_lbl = QLabel(f"{label}:")
+    def _add_info_row(self, key: str, value: str, *, display_label: Optional[str] = None):
+        # Internal key stays Chinese; left text follows edit_language (same FIELD_LABELS as export).
+        caption = (display_label if display_label is not None else key) or key
+        key_lbl = QLabel(f"{caption}:")
         key_lbl.setObjectName("dimLabel")
         key_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
@@ -437,18 +457,29 @@ class MainWindow(QMainWindow):
         row_l.setContentsMargins(0, 0, 0, 0)
         row_l.setSpacing(4)
         edit = QLineEdit(value or "")
+        edit.setCursorPosition(0)  # show start of long values, not the tail
         edit.setPlaceholderText("（空）" if self.state._edit_lang() == "英文" else "")
         edit.editingFinished.connect(
-            lambda k=label, w=edit: self._on_overview_field_edited(k, w)
+            lambda k=key, w=edit: self._on_overview_field_edited(k, w)
         )
         btn = QPushButton("✕")
         btn.setObjectName("fieldRemoveButton")
         btn.setFixedSize(20, 20)
         btn.setToolTip("移除此字段，生成报告时不再写入")
-        btn.clicked.connect(lambda _checked=False, k=label: self._exclude_overview_field(k))
+        btn.clicked.connect(lambda _checked=False, k=key: self._exclude_overview_field(k))
         row_l.addWidget(edit, stretch=1)
         row_l.addWidget(btn, 0, Qt.AlignVCenter)
         self.info_form.addRow(key_lbl, row_w)
+
+    def _sync_date_bar_labels(self):
+        lang = self.state._edit_lang()
+        self.lbl_date_receive.setText(
+            field_label("样品接收日期", lang) or "样品接收日期"
+        )
+        self.lbl_date_start.setText(field_label("检测开始", lang) or "样品检测日期")
+        # End-date column header is intentionally blank (no "End" / "检测结束")
+        self.lbl_date_end.setText(field_label("检测结束", lang))
+        self.lbl_date_duration.setText(field_label("检测天数", lang) or "检测天数")
 
     def _on_overview_field_edited(self, key: str, edit: QLineEdit):
         self.state.set_overview_value(key, edit.text())
@@ -480,16 +511,19 @@ class MainWindow(QMainWindow):
 
     def refresh_overview_ui(self):
         self._sync_edit_language_buttons()
+        self._sync_date_bar_labels()
         self._clear_info_form()
         rows = list(self.state.iter_overview_fields())
         has_fields = bool(self.state.application_fields or self.state.application_fields_en)
+        lang = self.state._edit_lang()
         if not rows:
             hint = QLabel("未加载" if not has_fields else "暂无字段（已全部移除）")
             hint.setObjectName("dimLabel")
             self.info_form.addRow(hint)
         else:
             for k, v in rows:
-                self._add_info_row(k, v)
+                caption = field_label(k, lang) or k
+                self._add_info_row(k, v, display_label=caption)
 
         self.lbl_project_id.setText(f"项目号: {self.state.project_id or '—'}")
         self.lbl_project_id.setObjectName("dimLabel")
@@ -863,7 +897,7 @@ class MainWindow(QMainWindow):
         self._project_path = saved.local_path
         self._source_path = Path(loaded.source_path) if loaded.source_path else saved.local_path
         self._mirror_ready = True
-        self.txt_project_path.setText(loaded.source_path or str(saved.local_path))
+        self._set_path_text(loaded.source_path or str(saved.local_path))
         self._set_mirror_status("本地镜像完成", "ok")
         self._apply_state_to_ui()
         self._is_dirty = False
@@ -955,6 +989,17 @@ class MainWindow(QMainWindow):
             return
         if not self._mirror_ready or self._local_path is None or not self._local_path.is_dir():
             QMessageBox.warning(self, "提示", "本地镜像尚未完成，请稍候")
+            return
+
+        self._sync_dates_to_state()
+        if not self.state.sample_receive_date:
+            QMessageBox.warning(self, "无法导出", "样品接收日期未记录")
+            return
+        if not self.state.test_start_date:
+            QMessageBox.warning(self, "无法导出", "开始时间未记录")
+            return
+        if not self.state.test_end_date:
+            QMessageBox.warning(self, "无法导出", "结束时间未记录")
             return
 
         try:

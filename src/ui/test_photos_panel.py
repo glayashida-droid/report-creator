@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.ui.theme import BG_INPUT, CYAN
+from src.ui.window_focus import force_window_foreground
 
 from src.io.test_photos import (
     PhotoError,
@@ -284,6 +285,12 @@ class RenamePhotosDialog(QDialog):
         buttons.addWidget(ok)
         buttons.addWidget(cancel)
         layout.addLayout(buttons)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # After Finder/Explorer drag-drop the dialog can appear without becoming
+        # the OS foreground window (taskbar/Dock flash only). Steal focus once shown.
+        QTimer.singleShot(0, lambda: force_window_foreground(self))
 
     def _accept(self):
         try:
@@ -609,7 +616,9 @@ class PhotoAlbumRow(QFrame):
         event.setDropAction(Qt.CopyAction)
         event.accept()
         if paths:
-            self._import_paths(paths)
+            # Defer until the file-manager finishes the drop gesture, otherwise
+            # the rename dialog often cannot take foreground focus.
+            QTimer.singleShot(0, lambda: self._import_paths(paths))
 
 
 class TestPhotosPanel(QWidget):

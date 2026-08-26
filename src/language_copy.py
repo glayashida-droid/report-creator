@@ -106,9 +106,9 @@ def raw_label(zh: str, en: str, language: str) -> str:
 
 
 def english_from_application(cn_value: str, en_value: str = "") -> str:
-    """Prefer explicit EN; else a CN value with no Han characters may serve as EN."""
+    """Prefer explicit EN (must be Han-free); else a CN value with no Han may serve as EN."""
     en = (en_value or "").strip()
-    if en:
+    if en and not has_chinese(en):
         return en
     cn = (cn_value or "").strip()
     if cn and not has_chinese(cn):
@@ -117,22 +117,45 @@ def english_from_application(cn_value: str, en_value: str = "") -> str:
 
 
 # Known overview / sample-info labels → (zh, en)
+# Phrasing matches 申请单英文行 / report sample-info table (same seam for edit UI + export).
 FIELD_LABELS = {
+    "申请单号": ("申请单号", "Application No."),
+    "申请公司": ("申请公司", "Applicant Name"),
+    "申请公司地址": ("申请公司地址", "Applicant Address"),
+    "报告抬头公司": ("报告抬头公司", "Company shown on report"),
+    "报告抬头地址": ("报告抬头地址", "Address shown on report"),
     "样品名称": ("样品名称", "Sample Name"),
     "零件号": ("零件号", "Part No."),
     "样品状态": ("样品状态", "Sample State"),
     "样品特性": ("样品特性", "Sample Characteristics"),
-    "材料牌号": ("材料牌号", "Material"),
+    "颜色": ("颜色", "Color"),
+    "材料编号": ("材料编号", "Material Code"),
+    "材质": ("材质", "Material"),
+    "材料牌号": ("材料牌号", "Material Trademark"),
+    "生产日期": ("生产日期", "Production Date"),
+    "样品批号": ("样品批号", "Sample Batch"),
     "车型": ("车型", "Model"),
     "车型项目": ("车型项目", "Project Code"),
+    "项目代码": ("项目代码", "Project Code"),
+    "车型代码": ("车型代码", "Project Code"),
     "项目阶段": ("项目阶段", "Project Phase"),
     "送样数量": ("送样数量", "Quantity of Samples"),
     "客户送样数量": ("客户送样数量", "Quantity of Samples"),
     "主机厂": ("主机厂", "OEM"),
+    "买家": ("买家", "Buyer"),
     "生产商": ("生产商", "Manufacturer"),
-    "申请单号": ("申请单号", "Application No."),
+    "生产单位": ("生产单位", "Manufacturer"),
+    "供应商": ("供应商", "Supplier"),
+    "实验目的": ("实验目的", "Test Purpose"),
+    "试验类型": ("试验类型", "Test Type"),
+    "检测类型": ("检测类型", "Test Type"),
     "样品接收日期": ("样品接收日期", "Sample Received Date"),
     "样品检测日期": ("样品检测日期", "Testing Period"),
+    # Overview date-bar: start column uses report period label; end/days stay distinct
+    "检测开始": ("样品检测日期", "Testing Period"),
+    # End-date column header left blank in the overview date bar
+    "检测结束": ("", ""),
+    "检测天数": ("检测天数", "Testing Days"),
 }
 
 

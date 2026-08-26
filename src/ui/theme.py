@@ -92,6 +92,15 @@ QGroupBox#overviewGroup {{
     margin-top: 14px;
 }}
 
+QGroupBox#overviewGroup QLineEdit,
+QGroupBox#overviewGroup QDateEdit,
+QGroupBox#overviewGroup QAbstractSpinBox {{
+    padding: 2px 8px;
+    min-height: 18px;
+    max-height: 26px;
+    border-radius: 6px;
+}}
+
 QFrame#drawerSection {{
     background-color: {BG_PANEL};
     border: 1px solid {CYAN_DIM};
@@ -111,6 +120,12 @@ QFrame#drawerHeader:hover {{
 QLabel#drawerTitle, QLabel#drawerArrow {{
     color: {CYAN};
     font-weight: 600;
+    background: transparent;
+}}
+
+QLabel#drawerTitlePrimary, QLabel#drawerArrowPrimary {{
+    color: {MAGENTA};
+    font-weight: 700;
     background: transparent;
 }}
 
@@ -554,6 +569,26 @@ QPushButton#headerClearButton:hover {{
     border: none;
 }}
 
+QPushButton#headerAddRowButton {{
+    background-color: transparent;
+    color: {CYAN};
+    border: none;
+    border-radius: 4px;
+    padding: 0px;
+    min-height: 14px;
+    max-height: 20px;
+    min-width: 14px;
+    max-width: 20px;
+    font-size: 13px;
+    font-weight: 700;
+}}
+
+QPushButton#headerAddRowButton:hover {{
+    color: {BG};
+    background-color: {CYAN};
+    border: none;
+}}
+
 QPushButton#poolToggle {{
     padding: 4px 8px;
     min-height: 20px;
@@ -565,6 +600,15 @@ QPushButton#poolToggle:checked {{
     background-color: rgba(0, 255, 255, 0.16);
     border: 1px solid {CYAN};
     color: {CYAN};
+}}
+
+QPushButton#poolToggle[accent="true"] {{
+    border: 1px solid {MAGENTA};
+}}
+
+QPushButton#poolToggle[accent="true"]:hover {{
+    color: {MAGENTA};
+    border: 1px solid {MAGENTA};
 }}
 
 /* ---- Lists / scroll areas ---- */
@@ -745,6 +789,12 @@ QComboBox#bulkResultCombo {{
     padding: 0px 6px;
     min-height: 18px;
     font-size: 12px;
+    combobox-popup: 1;
+}}
+
+QComboBox QAbstractItemView::item {{
+    min-height: 20px;
+    padding: 2px 6px;
 }}
 
 QTableWidget {{

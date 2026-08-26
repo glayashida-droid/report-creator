@@ -160,6 +160,11 @@ def is_same_as_payer_value(value: str) -> bool:
     return bool(_SAME_AS_PAYER_RE.search((value or "").strip()))
 
 
+def _prefer_english_side(side: str) -> bool:
+    s = (side or "cn").strip().lower()
+    return s in ("en", "英文", "english")
+
+
 def resolve_same_as_applicant(
     value: str,
     *,
@@ -168,12 +173,21 @@ def resolve_same_as_applicant(
     applicant_name_en: str,
     applicant_address_cn: str,
     applicant_address_en: str,
+    side: str = "cn",
 ) -> str:
-    """占位「同申请公司」→ 回填申请公司名/地址。"""
+    """占位「同申请公司」→ 回填申请公司名/地址。
+
+    ``side="en"`` 只取英文侧（缺英留空，不回退中文）。
+    """
     if not is_same_as_applicant_value(value):
         return value
+    prefer_en = _prefer_english_side(side)
     if field == "name":
+        if prefer_en:
+            return (applicant_name_en or "").strip()
         return applicant_name_cn or applicant_name_en
+    if prefer_en:
+        return (applicant_address_en or "").strip()
     return applicant_address_cn or applicant_address_en
 
 
@@ -185,12 +199,18 @@ def resolve_same_as_payer(
     payer_name_en: str,
     payer_address_cn: str,
     payer_address_en: str,
+    side: str = "cn",
 ) -> str:
     """占位「同付款公司」→ 回填付款公司名/地址（不是申请公司）。"""
     if not is_same_as_payer_value(value):
         return value
+    prefer_en = _prefer_english_side(side)
     if field == "name":
+        if prefer_en:
+            return (payer_name_en or "").strip()
         return payer_name_cn or payer_name_en
+    if prefer_en:
+        return (payer_address_en or "").strip()
     return payer_address_cn or payer_address_en
 
 
@@ -206,6 +226,7 @@ def resolve_report_title_reference(
     payer_name_en: str,
     payer_address_cn: str,
     payer_address_en: str,
+    side: str = "cn",
 ) -> str:
     """报告抬头占位解析：同申请公司→申请公司；同付款公司→付款公司。"""
     value = resolve_same_as_applicant(
@@ -215,6 +236,7 @@ def resolve_report_title_reference(
         applicant_name_en=applicant_name_en,
         applicant_address_cn=applicant_address_cn,
         applicant_address_en=applicant_address_en,
+        side=side,
     )
     return resolve_same_as_payer(
         value,
@@ -223,6 +245,7 @@ def resolve_report_title_reference(
         payer_name_en=payer_name_en,
         payer_address_cn=payer_address_cn,
         payer_address_en=payer_address_en,
+        side=side,
     )
 
 

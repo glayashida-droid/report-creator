@@ -228,11 +228,12 @@ def parse_application_sheet1(sheet) -> Tuple[str, str, str, str, str, str, str, 
     if is_same_as_applicant_value(name_cn):
         name_cn = name_en if not is_same_as_applicant_value(name_en) else ""
     if is_same_as_applicant_value(name_en):
-        name_en = name_cn if name_cn else ""
+        # EN side must not fall back to Chinese
+        name_en = ""
     if is_same_as_applicant_value(address_cn):
         address_cn = address_en if not is_same_as_applicant_value(address_en) else ""
     if is_same_as_applicant_value(address_en):
-        address_en = address_cn if address_cn else ""
+        address_en = ""
 
     payer_name_cn = resolve_same_as_applicant(
         payer_name_cn,
@@ -241,6 +242,7 @@ def parse_application_sheet1(sheet) -> Tuple[str, str, str, str, str, str, str, 
         applicant_name_en=name_en,
         applicant_address_cn=address_cn,
         applicant_address_en=address_en,
+        side="cn",
     )
     payer_name_en = resolve_same_as_applicant(
         payer_name_en,
@@ -249,6 +251,7 @@ def parse_application_sheet1(sheet) -> Tuple[str, str, str, str, str, str, str, 
         applicant_name_en=name_en,
         applicant_address_cn=address_cn,
         applicant_address_en=address_en,
+        side="en",
     )
     payer_address_cn = resolve_same_as_applicant(
         payer_address_cn,
@@ -257,6 +260,7 @@ def parse_application_sheet1(sheet) -> Tuple[str, str, str, str, str, str, str, 
         applicant_name_en=name_en,
         applicant_address_cn=address_cn,
         applicant_address_en=address_en,
+        side="cn",
     )
     payer_address_en = resolve_same_as_applicant(
         payer_address_en,
@@ -265,6 +269,7 @@ def parse_application_sheet1(sheet) -> Tuple[str, str, str, str, str, str, str, 
         applicant_name_en=name_en,
         applicant_address_cn=address_cn,
         applicant_address_en=address_en,
+        side="en",
     )
 
     report_title_name_cn = resolve_report_title_reference(
@@ -278,6 +283,7 @@ def parse_application_sheet1(sheet) -> Tuple[str, str, str, str, str, str, str, 
         payer_name_en=payer_name_en,
         payer_address_cn=payer_address_cn,
         payer_address_en=payer_address_en,
+        side="cn",
     )
     report_title_name_en = resolve_report_title_reference(
         report_title_name_en,
@@ -290,6 +296,7 @@ def parse_application_sheet1(sheet) -> Tuple[str, str, str, str, str, str, str, 
         payer_name_en=payer_name_en,
         payer_address_cn=payer_address_cn,
         payer_address_en=payer_address_en,
+        side="en",
     )
     report_title_address_cn = resolve_report_title_reference(
         report_title_address_cn,
@@ -302,6 +309,7 @@ def parse_application_sheet1(sheet) -> Tuple[str, str, str, str, str, str, str, 
         payer_name_en=payer_name_en,
         payer_address_cn=payer_address_cn,
         payer_address_en=payer_address_en,
+        side="cn",
     )
     report_title_address_en = resolve_report_title_reference(
         report_title_address_en,
@@ -314,6 +322,7 @@ def parse_application_sheet1(sheet) -> Tuple[str, str, str, str, str, str, str, 
         payer_name_en=payer_name_en,
         payer_address_cn=payer_address_cn,
         payer_address_en=payer_address_en,
+        side="en",
     )
 
     return (
