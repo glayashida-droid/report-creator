@@ -14,6 +14,8 @@ from src.io.data_tables import (
     open_attachment,
     read_preview_snapshot,
     resolve_open_argv,
+    retarget_node_data_tables,
+    rewrite_test_dir_in_relative_path,
     upload_existing_xlsx,
 )
 from src.models.project_state import DataTableRef, ProjectState, TestLeg, TestNode
@@ -195,7 +197,6 @@ def test_import_sample_ids_inserts_col_when_col1_has_content():
         wb = Workbook()
         ws = wb.active
         ws["A1"] = "结果"
-        ws["A2"] = "Pass"
         ws["B1"] = "备注"
         wb.save(path)
         wb.close()
@@ -205,8 +206,31 @@ def test_import_sample_ids_inserts_col_when_col1_has_content():
         assert ws["A2"].value == "S1"
         assert ws["A3"].value == "S2"
         assert ws["B1"].value == "结果"
-        assert ws["B2"].value == "Pass"
         assert ws["C1"].value == "备注"
+        wb.close()
+
+
+def test_import_sample_ids_starts_below_multi_row_header():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "two_header.xlsx"
+        wb = Workbook()
+        ws = wb.active
+        ws.merge_cells("B1:D1")
+        ws["B1"] = "试验后 after test"
+        ws["B2"] = "桥路电阻"
+        ws["C2"] = "短路电阻"
+        ws["D2"] = "绝缘电阻"
+        wb.save(path)
+        wb.close()
+        import_sample_ids(path, ["A01", "A02", "A03"])
+        wb = load_workbook(path)
+        ws = wb.active
+        assert ws["A2"].value in (None, "")
+        assert ws["A3"].value == "A01"
+        assert ws["A4"].value == "A02"
+        assert ws["A5"].value == "A03"
+        assert ws["B1"].value == "试验后 after test"
+        assert ws["B2"].value == "桥路电阻"
         wb.close()
 
 
@@ -330,6 +354,35 @@ def test_delete_attachment_removes_file_missing_is_noop():
         delete_attachment(path)  # missing → no error
 
 
+def test_rewrite_test_dir_in_relative_path():
+    assert (
+        rewrite_test_dir_in_relative_path(
+            "3.测试组/湿热循环/数据表附件/工况.xlsx", "湿热循环", "前湿热循环"
+        )
+        == "3.测试组/前湿热循环/数据表附件/工况.xlsx"
+    )
+    assert (
+        rewrite_test_dir_in_relative_path(
+            "3.测试组/其他/数据表附件/a.xlsx", "湿热循环", "前湿热循环"
+        )
+        == "3.测试组/其他/数据表附件/a.xlsx"
+    )
+
+
+def test_retarget_node_data_tables():
+    node = TestNode(
+        test_name="前湿热循环",
+        data_tables=[
+            DataTableRef(
+                title="工况.xlsx",
+                relative_path="3.测试组/湿热循环/数据表附件/工况.xlsx",
+            )
+        ],
+    )
+    retarget_node_data_tables(node, "湿热循环", "前湿热循环")
+    assert node.data_tables[0].relative_path == "3.测试组/前湿热循环/数据表附件/工况.xlsx"
+
+
 if __name__ == "__main__":
     test_create_blank_workbook_writes_xlsx_and_returns_ref()
     test_create_blank_rejects_unusable_test_name()
@@ -342,6 +395,7 @@ if __name__ == "__main__":
     test_preview_refresh_rereads_disk_changes()
     test_import_sample_ids_empty_col1_writes_from_row2()
     test_import_sample_ids_inserts_col_when_col1_has_content()
+    test_import_sample_ids_starts_below_multi_row_header()
     test_import_sample_ids_missing_file_raises()
     test_resolve_open_argv_prefers_excel_then_wps_then_default()
     test_open_attachment_uses_injected_runner_and_raises_on_failure()
@@ -349,4 +403,5 @@ if __name__ == "__main__":
     test_copy_from_template_copies_and_titles_from_filename()
     test_list_templates_returns_xlsx_sorted_by_name()
     test_delete_attachment_removes_file_missing_is_noop()
+    test_retarget_node_data_tables()
     print("test_data_tables: ok")

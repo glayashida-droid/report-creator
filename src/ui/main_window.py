@@ -9,13 +9,14 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QGroupBox, QSplitter, QComboBox, QMessageBox,
     QDateEdit, QFileDialog, QFormLayout, QScrollArea, QSizePolicy, QFrame,
-    QInputDialog, QButtonGroup,
+    QInputDialog, QButtonGroup, QToolButton,
 )
-from PySide6.QtCore import Qt, QDate, QThread, Signal
+from PySide6.QtCore import Qt, QDate, QThread, Signal, QEvent, QObject, QSize
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from src.models.project_state import ProjectState
+from src.ui.test_photos_panel import warn_duplicate_test_names
 from src.application_ingest import apply_application_data
 from application_parser import parse_application, prepare_excel_bytes
 from src.parsers.pdf_parser import QuotationParser
@@ -33,8 +34,39 @@ from src.ui.leg_graph import LegGraphArea
 from src.ui.load_state_dialog import LoadStateDialog
 from src.ui.leg_template_dialog import ImportTemplateDialog
 from src.ui.candidate_pool import CandidatePoolList
-from src.ui.theme import polish_date_edit_calendar
+from src.ui.theme import polish_date_edit_calendar, refresh_icon, set_calendar_selectable_range
 from src.language_copy import field_label
+
+
+class _GroupTitleButtonHost(QObject):
+    """Keep a small tool button parked just right of a QGroupBox title."""
+
+    def __init__(self, group: QGroupBox, button: QToolButton, parent=None):
+        super().__init__(parent)
+        self._group = group
+        self._button = button
+        group.installEventFilter(self)
+        self.reposition()
+
+    def eventFilter(self, watched, event):
+        if watched is self._group and event.type() in (
+            QEvent.Resize,
+            QEvent.Show,
+            QEvent.LayoutRequest,
+        ):
+            self.reposition()
+        return False
+
+    def reposition(self):
+        group = self._group
+        btn = self._button
+        btn.adjustSize()
+        fm = group.fontMetrics()
+        # Match QGroupBox::title QSS: left 12px, horizontal padding 8px
+        x = 12 + 8 + fm.horizontalAdvance(group.title()) + 2
+        y = max(0, (14 - btn.height()) // 2 + 1)
+        btn.move(x, y)
+        btn.raise_()
 
 
 class MirrorWorker(QThread):
@@ -59,7 +91,7 @@ class MirrorWorker(QThread):
             self.failed.emit(self._generation, str(e))
 
 
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.3"
 # Calendar popup floor. Dates before this are treated as "no end date"
 # because QDateEdit may clamp the blank sentinel to 1752-09-14.
 _EARLIEST_REAL_YEAR = 1990
@@ -102,28 +134,23 @@ class MainWindow(QMainWindow):
 
         row = QHBoxLayout()
         row.setSpacing(6)
+        row.setAlignment(Qt.AlignVCenter)
         self.txt_project_path = QLineEdit()
+        self.txt_project_path.setObjectName("projectPathInput")
         self.txt_project_path.setPlaceholderText(
             "粘贴项目文件夹路径 / 链接，或点击「选择项目」"
         )
         self.txt_project_path.returnPressed.connect(self.load_from_pasted_path)
 
-        self.btn_edit_zh = QPushButton("中文")
-        self.btn_edit_zh.setObjectName("poolToggle")
-        self.btn_edit_zh.setCheckable(True)
-        self.btn_edit_zh.setChecked(True)
-        self.btn_edit_zh.setFixedWidth(48)
-        self.btn_edit_en = QPushButton("英文")
-        self.btn_edit_en.setObjectName("poolToggle")
-        self.btn_edit_en.setCheckable(True)
-        self.btn_edit_en.setFixedWidth(48)
-        self.edit_lang_group = QButtonGroup(self)
-        self.edit_lang_group.setExclusive(True)
-        self.edit_lang_group.addButton(self.btn_edit_zh, 0)
-        self.edit_lang_group.addButton(self.btn_edit_en, 1)
-        self.edit_lang_group.idClicked.connect(self._on_edit_language_changed)
+        self.btn_edit_lang = QPushButton("中/英")
+        self.btn_edit_lang.setObjectName("poolToggle")
+        self.btn_edit_lang.setCheckable(True)
+        self.btn_edit_lang.setChecked(True)
+        self.btn_edit_lang.setFixedWidth(52)
+        self.btn_edit_lang.setToolTip("点击切换编辑语言")
+        self.btn_edit_lang.clicked.connect(self._toggle_edit_language)
 
-        # Same objectName/style as 中文/英文 so heights match exactly
+        # Same objectName/style as language toggle so heights match exactly
         btn_load = QPushButton("从路径加载项目")
         btn_load.setObjectName("poolToggle")
         btn_load.setFixedWidth(128)
@@ -138,18 +165,11 @@ class MainWindow(QMainWindow):
         btn_browse.style().unpolish(btn_browse)
         btn_browse.style().polish(btn_browse)
 
-        btn_reload_info = QPushButton("重载申请单")
-        btn_reload_info.setObjectName("poolToggle")
-        btn_reload_info.setFixedWidth(96)
-        btn_reload_info.clicked.connect(self.restore_excluded_overview_fields)
-
         row.addWidget(QLabel("路径:"))
         row.addWidget(self.txt_project_path, stretch=1)
         row.addWidget(btn_load)
         row.addWidget(btn_browse)
-        row.addWidget(btn_reload_info)
-        row.addWidget(self.btn_edit_zh)
-        row.addWidget(self.btn_edit_en)
+        row.addWidget(self.btn_edit_lang)
         top_outer.addLayout(row)
 
         meta_row = QHBoxLayout()
@@ -158,9 +178,21 @@ class MainWindow(QMainWindow):
         self.lbl_project_id.setObjectName("dimLabel")
         self.lbl_mirror_status = QLabel("")
         self.lbl_mirror_status.setObjectName("dimLabel")
+        self.btn_open_local = QPushButton("打开")
+        self.btn_open_local.setObjectName("mirrorOpenLink")
+        self.btn_open_local.setFlat(True)
+        self.btn_open_local.setCursor(Qt.PointingHandCursor)
+        self.btn_open_local.setVisible(False)
+        self.btn_open_local.setToolTip("在访达中打开本地镜像文件夹")
+        self.btn_open_local.clicked.connect(self._open_local_project_folder)
+        mirror_row = QHBoxLayout()
+        mirror_row.setContentsMargins(0, 0, 0, 0)
+        mirror_row.setSpacing(4)
+        mirror_row.addWidget(self.lbl_mirror_status)
+        mirror_row.addWidget(self.btn_open_local)
         meta_row.addWidget(self.lbl_project_id)
         meta_row.addStretch()
-        meta_row.addWidget(self.lbl_mirror_status)
+        meta_row.addLayout(mirror_row)
         top_outer.addLayout(meta_row)
 
         main_layout.addWidget(top_panel)
@@ -175,9 +207,24 @@ class MainWindow(QMainWindow):
         # 2.1 Project overview — all homepage fields
         info_group = QGroupBox("项目信息")
         info_group.setObjectName("overviewGroup")
+        self._info_group = info_group
         info_layout = QVBoxLayout(info_group)
         info_layout.setContentsMargins(10, 16, 10, 8)
         info_layout.setSpacing(6)
+
+        self.btn_reload_info = QToolButton(info_group)
+        self.btn_reload_info.setObjectName("overviewReload")
+        self.btn_reload_info.setIcon(refresh_icon(size=12))
+        self.btn_reload_info.setIconSize(QSize(12, 12))
+        self.btn_reload_info.setText("Reload")
+        self.btn_reload_info.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn_reload_info.setAutoRaise(True)
+        self.btn_reload_info.setFixedHeight(16)
+        self.btn_reload_info.adjustSize()
+        self.btn_reload_info.setCursor(Qt.PointingHandCursor)
+        self.btn_reload_info.setToolTip("重载申请单")
+        self.btn_reload_info.clicked.connect(self.restore_excluded_overview_fields)
+        self._info_reload_host = _GroupTitleButtonHost(info_group, self.btn_reload_info, self)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -204,15 +251,13 @@ class MainWindow(QMainWindow):
         date_layout.setContentsMargins(0, 4, 0, 0)
         date_layout.setSpacing(8)
 
-        def make_date_column(label_key, *, empty_label: bool = False):
+        def make_date_column(label_key):
             col = QVBoxLayout()
             col.setSpacing(2)
             col.setContentsMargins(0, 0, 0, 0)
-            if empty_label:
-                lbl = QLabel("")
-            else:
-                lbl = QLabel(field_label(label_key, "中文") or label_key)
+            lbl = QLabel(field_label(label_key, "中文") or label_key)
             lbl.setObjectName("dimLabel")
+            lbl.setAlignment(Qt.AlignHCenter)
             date_edit = QDateEdit()
             date_edit.setCalendarPopup(True)
             # Match report / 申请单 sample-info date writing (YYYY.MM.DD)
@@ -225,32 +270,36 @@ class MainWindow(QMainWindow):
 
         col1, self.date_receive, self.lbl_date_receive = make_date_column("样品接收日期")
         col2, self.date_start, self.lbl_date_start = make_date_column("检测开始")
-        col3, self.date_end, self.lbl_date_end = make_date_column(
-            "检测结束", empty_label=True
-        )
+        col3, self.date_end, self.lbl_date_end = make_date_column("检测结束")
 
         duration_col = QVBoxLayout()
         duration_col.setSpacing(2)
         duration_col.setContentsMargins(0, 0, 0, 0)
-        self.lbl_date_duration = QLabel(field_label("检测天数", "中文") or "检测天数")
+        self.lbl_date_duration = QLabel(field_label("检测天数", "中文") or "天数")
         self.lbl_date_duration.setObjectName("dimLabel")
+        self.lbl_date_duration.setAlignment(Qt.AlignHCenter)
         self.txt_duration = QLineEdit()
+        self.txt_duration.setObjectName("durationDays")
         self.txt_duration.setReadOnly(True)
         self.txt_duration.setFocusPolicy(Qt.NoFocus)
-        self.txt_duration.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.txt_duration.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
+        # Fixed narrow box: don't share stretch with date columns (avoids clip / long empty bar)
+        self.txt_duration.setFixedWidth(56)
+        self.txt_duration.setFixedHeight(self.date_receive.sizeHint().height())
         duration_col.addWidget(self.lbl_date_duration)
         duration_col.addWidget(self.txt_duration)
 
         date_layout.addLayout(col1, stretch=1)
         date_layout.addLayout(col2, stretch=1)
         date_layout.addLayout(col3, stretch=1)
-        date_layout.addLayout(duration_col, stretch=1)
+        date_layout.addLayout(duration_col, stretch=0)
         info_layout.addWidget(date_bar)
 
         self._updating_dates = False
         self.date_receive.dateChanged.connect(self._on_dates_changed)
         self.date_start.dateChanged.connect(self._on_dates_changed)
         self.date_end.dateChanged.connect(self._on_dates_changed)
+        self._install_calendar_bounds_on_show()
         self._on_dates_changed()
 
         left_layout.addWidget(info_group, stretch=2)
@@ -476,30 +525,28 @@ class MainWindow(QMainWindow):
         self.lbl_date_receive.setText(
             field_label("样品接收日期", lang) or "样品接收日期"
         )
-        self.lbl_date_start.setText(field_label("检测开始", lang) or "样品检测日期")
-        # End-date column header is intentionally blank (no "End" / "检测结束")
-        self.lbl_date_end.setText(field_label("检测结束", lang))
-        self.lbl_date_duration.setText(field_label("检测天数", lang) or "检测天数")
+        self.lbl_date_start.setText(field_label("检测开始", lang) or "试验开始")
+        self.lbl_date_end.setText(field_label("检测结束", lang) or "试验结束")
+        self.lbl_date_duration.setText(field_label("检测天数", lang) or "天数")
 
     def _on_overview_field_edited(self, key: str, edit: QLineEdit):
         self.state.set_overview_value(key, edit.text())
         self._mark_dirty()
 
-    def _on_edit_language_changed(self, _id: int = 0):
-        lang = "英文" if self.btn_edit_en.isChecked() else "中文"
-        if self.state.edit_language == lang:
-            return
-        self.state.edit_language = lang
+    def _toggle_edit_language(self):
+        # Keep poolToggle:checked styling; Qt would otherwise uncheck on click.
+        self.btn_edit_lang.setChecked(True)
+        next_lang = "英文" if self.state._edit_lang() != "英文" else "中文"
+        self.state.edit_language = next_lang
         self.refresh_overview_ui()
 
     def _sync_edit_language_buttons(self):
         lang = self.state._edit_lang()
-        self.btn_edit_zh.blockSignals(True)
-        self.btn_edit_en.blockSignals(True)
-        self.btn_edit_zh.setChecked(lang != "英文")
-        self.btn_edit_en.setChecked(lang == "英文")
-        self.btn_edit_zh.blockSignals(False)
-        self.btn_edit_en.blockSignals(False)
+        self.btn_edit_lang.blockSignals(True)
+        self.btn_edit_lang.setText("中/英")
+        self.btn_edit_lang.setToolTip(f"当前：{lang}（点击切换）")
+        self.btn_edit_lang.setChecked(True)
+        self.btn_edit_lang.blockSignals(False)
 
     def _exclude_overview_field(self, key: str):
         excluded = list(self.state.excluded_overview_keys or [])
@@ -633,6 +680,27 @@ class MainWindow(QMainWindow):
         self.lbl_project_id.setText(f"项目号: {self.state.project_id}")
         self._on_export_mode_changed()
 
+    def _install_calendar_bounds_on_show(self):
+        """Re-apply selectable range whenever a calendar popup opens."""
+        from PySide6.QtCore import QEvent, QObject
+
+        class _BoundsFilter(QObject):
+            def __init__(self, window):
+                super().__init__(window)
+                self._window = window
+
+            def eventFilter(self, obj, event):
+                if event.type() == QEvent.Show:
+                    self._window._refresh_date_calendar_bounds()
+                return False
+
+        filt = _BoundsFilter(self)
+        self._calendar_bounds_filter = filt
+        for date_edit in (self.date_receive, self.date_start, self.date_end):
+            calendar = date_edit.calendarWidget()
+            if calendar is not None:
+                calendar.installEventFilter(filt)
+
     # ---------- dates ----------
 
     @staticmethod
@@ -643,8 +711,12 @@ class MainWindow(QMainWindow):
         date_edit.setDate(date_edit.minimumDate())
         calendar = date_edit.calendarWidget()
         if calendar is not None:
-            calendar.setMinimumDate(QDate(_EARLIEST_REAL_YEAR, 1, 1))
-            calendar.setMaximumDate(QDate(9999, 12, 31))
+            # Wide hard range; per-field floors applied later with signals blocked.
+            set_calendar_selectable_range(
+                date_edit,
+                QDate(_EARLIEST_REAL_YEAR, 1, 1),
+                QDate(9999, 12, 31),
+            )
         polish_date_edit_calendar(date_edit, blank_opens_at_default_year=True)
 
     def _clear_date(self, date_edit: QDateEdit):
@@ -656,6 +728,26 @@ class MainWindow(QMainWindow):
         if _is_blank_project_date(value):
             return None
         return value
+
+    def _refresh_date_calendar_bounds(self):
+        """Simple floors: start/end ≥ receive; end ≥ start. Receive unconstrained."""
+        floor = QDate(_EARLIEST_REAL_YEAR, 1, 1)
+        ceiling = QDate(9999, 12, 31)
+        recv = self._date_or_none(self.date_receive)
+        start = self._date_or_none(self.date_start)
+
+        set_calendar_selectable_range(self.date_receive, floor, ceiling)
+
+        start_min = recv if recv is not None else floor
+        set_calendar_selectable_range(self.date_start, start_min, ceiling)
+
+        if start is not None:
+            end_min = start
+        elif recv is not None:
+            end_min = recv
+        else:
+            end_min = floor
+        set_calendar_selectable_range(self.date_end, end_min, ceiling)
 
     def _sync_dates_to_state(self):
         recv = self._date_or_none(self.date_receive)
@@ -683,7 +775,7 @@ class MainWindow(QMainWindow):
         self._on_dates_changed()
 
     def _on_dates_changed(self, *_args):
-        """receive ≤ start ≤ end, but blank fields stay blank."""
+        """Refresh calendar floors; no cross-field auto-rewrite while editing."""
         if getattr(self, "_updating_dates", False):
             return
         self._updating_dates = True
@@ -693,42 +785,7 @@ class MainWindow(QMainWindow):
             end = self._date_or_none(self.date_end)
             source = self.sender()
 
-            if source is self.date_receive and recv is not None:
-                if start is not None and recv > start:
-                    start = recv
-                    self.date_start.setDate(start)
-                if end is not None and start is not None and start > end:
-                    end = start
-                    self.date_end.setDate(end)
-                elif end is not None and recv > end:
-                    end = recv
-                    self.date_end.setDate(end)
-            elif source is self.date_start and start is not None:
-                if recv is not None and start < recv:
-                    start = recv
-                    self.date_start.setDate(start)
-                if end is not None and start > end:
-                    end = start
-                    self.date_end.setDate(end)
-            elif source is self.date_end and end is not None:
-                if recv is not None and end < recv:
-                    end = recv
-                    self.date_end.setDate(end)
-                if start is not None and end < start:
-                    start = end
-                    if recv is not None and start < recv:
-                        start = recv
-                        end = recv
-                        self.date_end.setDate(end)
-                    self.date_start.setDate(start)
-            else:
-                if recv is not None and start is not None and start < recv:
-                    start = recv
-                    self.date_start.setDate(start)
-                if start is not None and end is not None and end < start:
-                    end = start
-                    self.date_end.setDate(end)
-
+            self._refresh_date_calendar_bounds()
             self._sync_dates_to_state()
             self._update_duration_display(start, end)
             if source in (self.date_receive, self.date_start, self.date_end):
@@ -738,11 +795,21 @@ class MainWindow(QMainWindow):
         finally:
             self._updating_dates = False
 
+    def _project_dates_in_order(self) -> bool:
+        """receive ≤ start ≤ end (same day allowed). Missing dates are not ordered."""
+        recv = self._date_or_none(self.date_receive)
+        start = self._date_or_none(self.date_start)
+        end = self._date_or_none(self.date_end)
+        if recv is None or start is None or end is None:
+            return False
+        return recv <= start <= end
+
     def _update_duration_display(self, start, end):
         if start is None or end is None:
             self.txt_duration.setText("")
             return
-        self.txt_duration.setText(str(start.daysTo(end)))
+        # Inclusive test days: 19–20 counts as 2.
+        self.txt_duration.setText(str(start.daysTo(end) + 1))
 
     # ---------- export target UI ----------
 
@@ -796,6 +863,19 @@ class MainWindow(QMainWindow):
         self.lbl_mirror_status.setObjectName(names.get(kind, "dimLabel"))
         self.lbl_mirror_status.style().unpolish(self.lbl_mirror_status)
         self.lbl_mirror_status.style().polish(self.lbl_mirror_status)
+        ready = (
+            kind == "ok"
+            and self._local_path is not None
+            and self._local_path.is_dir()
+        )
+        self.btn_open_local.setVisible(ready)
+
+    def _open_local_project_folder(self):
+        path = self._local_path
+        if path is None or not path.is_dir():
+            QMessageBox.warning(self, "提示", "本地镜像尚未就绪")
+            return
+        subprocess.run(["open", str(path)])
 
     def _drop_abandoned(self, worker):
         try:
@@ -866,6 +946,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "请先加载项目")
             return
         self._sync_dates_to_state()
+        if self.state.duplicate_test_names():
+            warn_duplicate_test_names(self)
+            return
         if self._local_path is None:
             self._local_path = local_project_dir(self.state.project_id)
         self._local_path.mkdir(parents=True, exist_ok=True)
@@ -1000,6 +1083,13 @@ class MainWindow(QMainWindow):
             return
         if not self.state.test_end_date:
             QMessageBox.warning(self, "无法导出", "结束时间未记录")
+            return
+        if not self._project_dates_in_order():
+            QMessageBox.warning(
+                self,
+                "无法导出",
+                "日期顺序无效：样品接收日期 ≤ 试验开始 ≤ 试验结束（允许同一天）",
+            )
             return
 
         try:

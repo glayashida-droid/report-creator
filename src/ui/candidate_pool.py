@@ -1,10 +1,80 @@
 """Variable-width wrapping chips for the left-panel candidate pool."""
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt
-from PySide6.QtWidgets import QLabel, QLayout, QScrollArea, QSizePolicy, QWidget
+from typing import Optional
+
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, QMimeData, QTimer
+from PySide6.QtGui import QDrag
+from PySide6.QtWidgets import QApplication, QLabel, QLayout, QScrollArea, QSizePolicy, QWidget
 
 CHIP_H = 26
 CHIP_PAD = 20
+CANDIDATE_TEST_MIME = "application/x-reach-candidate-test"
+
+_pool_drag_depth = 0
+
+
+def begin_pool_drag() -> None:
+    global _pool_drag_depth
+    _pool_drag_depth += 1
+
+
+def end_pool_drag() -> None:
+    global _pool_drag_depth
+    _pool_drag_depth = max(0, _pool_drag_depth - 1)
+
+
+def pool_drag_active() -> bool:
+    return _pool_drag_depth > 0
+
+
+def candidate_test_from_mime(mime: QMimeData) -> str:
+    raw = mime.data(CANDIDATE_TEST_MIME)
+    if raw:
+        return bytes(raw).decode("utf-8").strip()
+    return (mime.text() or "").strip()
+
+
+class PoolChip(QLabel):
+    """Draggable chip; full name is kept in toolTip even when elided."""
+
+    def __init__(self, full_name: str, parent=None):
+        super().__init__(full_name, parent)
+        self.setObjectName("poolChip")
+        self.setToolTip(full_name)
+        self.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self.setFixedHeight(CHIP_H)
+        self.setCursor(Qt.OpenHandCursor)
+        self._drag_start: Optional[QPoint] = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_start = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not (event.buttons() & Qt.LeftButton) or self._drag_start is None:
+            super().mouseMoveEvent(event)
+            return
+        if (
+            event.position().toPoint() - self._drag_start
+        ).manhattanLength() < QApplication.startDragDistance():
+            return
+        name = (self.toolTip() or self.text() or "").strip()
+        if not name:
+            return
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(CANDIDATE_TEST_MIME, name.encode("utf-8"))
+        mime.setText(name)
+        drag.setMimeData(mime)
+        begin_pool_drag()
+        try:
+            drag.exec(Qt.CopyAction)
+        finally:
+            # Defer until after any dropEvent singleShot handlers so inserts stay guarded.
+            QTimer.singleShot(0, end_pool_drag)
+        self._drag_start = None
 
 
 def chip_display_width(text, font_metrics, viewport_width, padding=CHIP_PAD):
@@ -122,12 +192,7 @@ class CandidatePoolList(QScrollArea):
     def set_items(self, items):
         self.clear()
         for text in items or []:
-            chip = QLabel(text)
-            chip.setObjectName("poolChip")
-            chip.setToolTip(text)
-            chip.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-            chip.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-            chip.setFixedHeight(CHIP_H)
+            chip = PoolChip(text)
             self._flow.addWidget(chip)
             self._chips.append(chip)
         self.fit_grid()

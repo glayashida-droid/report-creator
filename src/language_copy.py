@@ -86,6 +86,8 @@ def language_text(cn: str, en: str, language: str) -> str:
         return en
     if lang == "中英文":
         if cn and en:
+            if cn == en:
+                return cn
             return f"{cn} / {en}"
         return cn or en
     return cn
@@ -151,11 +153,10 @@ FIELD_LABELS = {
     "检测类型": ("检测类型", "Test Type"),
     "样品接收日期": ("样品接收日期", "Sample Received Date"),
     "样品检测日期": ("样品检测日期", "Testing Period"),
-    # Overview date-bar: start column uses report period label; end/days stay distinct
-    "检测开始": ("样品检测日期", "Testing Period"),
-    # End-date column header left blank in the overview date bar
-    "检测结束": ("", ""),
-    "检测天数": ("检测天数", "Testing Days"),
+    # Overview date-bar only; report sample-info still uses 样品检测日期 / Testing Period
+    "检测开始": ("试验开始", "Test Start"),
+    "检测结束": ("试验结束", "Test End"),
+    "检测天数": ("天数", "Days"),
 }
 
 

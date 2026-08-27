@@ -4,7 +4,7 @@ from PySide6.QtCore import QDate, QPoint
 from PySide6.QtWidgets import QApplication, QComboBox
 
 from src.models.project_state import ProjectState, TestLeg, TestNode
-from src.ui.leg_graph import CUSTOM_TEST, PLACEHOLDER_TEST, LegGraphArea, fill_test_combo
+from src.ui.leg_graph import CUSTOM_TEST, PLACEHOLDER_TEST, LegGraphArea, fill_test_combo, insert_index_for_y
 from src.ui.gantt_chart import LEG_BAR_HEIGHT, DragMode, GanttChartWidget
 from src.ui.gantt_utils import leg_range, node_range
 
@@ -206,6 +206,220 @@ def test_gantt_scheduled_row_miss_does_not_create():
     empty_y = chart._view.row_top(empty_row) + 8
     _, mode_empty = chart.timeline._hit_test_bar(QPoint(40, empty_y))
     assert mode_empty == DragMode.CREATE
+
+
+def test_insert_index_for_y_before_and_after_nodes():
+    _app()
+    state = ProjectState(
+        project_id="P1",
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[
+                    TestNode(test_name="试验1"),
+                    TestNode(test_name="试验2"),
+                    TestNode(test_name="试验3"),
+                ],
+            )
+        ],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    leg = area.leg_widgets[0]
+    leg.resize(260, 420)
+    leg.show()
+    QApplication.processEvents()
+    nodes = leg.node_widgets
+    top0 = nodes[0].mapTo(leg, QPoint(0, 0)).y()
+    mid0 = top0 + nodes[0].height() // 2
+    top2 = nodes[2].mapTo(leg, QPoint(0, 0)).y()
+    mid2 = top2 + nodes[2].height() // 2
+    bottom2 = top2 + nodes[2].height()
+    assert insert_index_for_y(leg, nodes, mid0 - 1) == 0
+    assert insert_index_for_y(leg, nodes, mid0 + 1) == 1
+    assert insert_index_for_y(leg, nodes, mid2 - 1) == 2
+    assert insert_index_for_y(leg, nodes, bottom2 + 4) == 3
+
+
+def test_insert_node_at_middle_and_end():
+    _app()
+    state = ProjectState(
+        project_id="P1",
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[TestNode(test_name="试验1"), TestNode(test_name="试验2")],
+            )
+        ],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    leg = area.leg_widgets[0]
+    leg.insert_node_at(1, "振动")
+    assert [n.test_name for n in leg.leg_data.nodes] == ["试验1", "振动", "试验2"]
+    leg.insert_node_at(3, "湿热循环")
+    assert [n.test_name for n in leg.leg_data.nodes] == ["试验1", "振动", "试验2", "湿热循环"]
+    assert leg.node_widgets[1].btn_detail.isEnabled()
+
+
+def test_pool_drop_insert_keeps_sibling_committed_names(tmp_path):
+    _app()
+    root = tmp_path / "proj"
+    (root / "3.测试组" / "振动").mkdir(parents=True)
+    (root / "3.测试组" / "湿热循环").mkdir(parents=True)
+    state = ProjectState(
+        project_id="P1",
+        project_path=str(root),
+        candidate_pool=["振动", "机械冲击", "湿热循环"],
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[
+                    TestNode(test_name="振动"),
+                    TestNode(test_name="湿热循环"),
+                ],
+            )
+        ],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    leg = area.leg_widgets[0]
+    # Simulate combo drift that used to trigger rename → 振动 during drop.
+    sibling = leg.node_widgets[1]
+    sibling.combo.blockSignals(True)
+    sibling.combo.setEditText("振动")
+    sibling.combo.blockSignals(False)
+    sibling.node_data.test_name = "振动"
+    leg._insert_from_pool_drop(2, "湿热循环")
+    QApplication.processEvents()
+    assert [n.test_name for n in leg.leg_data.nodes] == ["振动", "湿热循环", "湿热循环"]
+    assert sibling._committed_name == "湿热循环"
+    assert sibling.node_data.test_name == "湿热循环"
+    assert (root / "3.测试组" / "湿热循环").is_dir()
+    assert (root / "3.测试组" / "振动").is_dir()
+
+
+def test_node_combo_rejects_drops_so_leg_owns_before_after():
+    """Editable combo must not accept chip drops (would append into the name)."""
+    _app()
+    state = ProjectState(
+        project_id="P1",
+        candidate_pool=["湿热循环盐雾腐蚀"],
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[TestNode(test_name="湿热循环盐雾腐蚀")],
+            )
+        ],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    combo = area.leg_widgets[0].node_widgets[0].combo
+    assert not combo.acceptDrops()
+    assert combo.lineEdit() is not None
+    assert not combo.lineEdit().acceptDrops()
+
+
+def test_commit_allows_temp_duplicate_name_without_dialog(tmp_path):
+    """Rename to an existing folder name: commit UI name, skip disk move, no popup."""
+    _app()
+    root = tmp_path / "proj"
+    (root / "3.测试组" / "湿热循环" / "试验前").mkdir(parents=True)
+    (root / "3.测试组" / "振动").mkdir(parents=True)
+    state = ProjectState(
+        project_id="P1",
+        project_path=str(root),
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[TestNode(test_name="湿热循环")],
+            )
+        ],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    nw = area.leg_widgets[0].node_widgets[0]
+    nw._commit_test_name("振动")
+    assert nw._committed_name == "振动"
+    assert nw.node_data.test_name == "振动"
+    assert (root / "3.测试组" / "湿热循环" / "试验前").is_dir()
+    assert (root / "3.测试组" / "振动").is_dir()
+    assert state.duplicate_test_names() == []  # only one node named 振动 in this fixture
+
+
+def test_commit_skips_rename_when_sibling_still_uses_old_name(tmp_path):
+    _app()
+    root = tmp_path / "proj"
+    (root / "3.测试组" / "湿热循环" / "试验前").mkdir(parents=True)
+    state = ProjectState(
+        project_id="P1",
+        project_path=str(root),
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[
+                    TestNode(test_name="湿热循环"),
+                    TestNode(test_name="湿热循环"),
+                ],
+            )
+        ],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    nw = area.leg_widgets[0].node_widgets[0]
+    nw._commit_test_name("盐雾腐蚀")
+    assert nw._committed_name == "盐雾腐蚀"
+    assert area.leg_widgets[0].node_widgets[1]._committed_name == "湿热循环"
+    assert (root / "3.测试组" / "湿热循环" / "试验前").is_dir()
+    assert not (root / "3.测试组" / "盐雾腐蚀").exists()
+
+
+def test_commit_rename_retargets_data_table_paths(tmp_path):
+    _app()
+    from src.models.project_state import DataTableRef
+
+    root = tmp_path / "proj"
+    attach = root / "3.测试组" / "湿热循环" / "数据表附件"
+    attach.mkdir(parents=True)
+    xlsx = attach / "工况.xlsx"
+    xlsx.write_bytes(b"PK")
+    state = ProjectState(
+        project_id="P1",
+        project_path=str(root),
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[
+                    TestNode(
+                        test_name="湿热循环",
+                        data_tables=[
+                            DataTableRef(
+                                title="工况.xlsx",
+                                relative_path="3.测试组/湿热循环/数据表附件/工况.xlsx",
+                            )
+                        ],
+                    )
+                ],
+            )
+        ],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    nw = area.leg_widgets[0].node_widgets[0]
+    nw._commit_test_name("前湿热循环")
+    assert nw._committed_name == "前湿热循环"
+    assert (root / "3.测试组" / "前湿热循环" / "数据表附件" / "工况.xlsx").is_file()
+    assert not (root / "3.测试组" / "湿热循环").exists()
+    assert nw.node_data.data_tables[0].relative_path == (
+        "3.测试组/前湿热循环/数据表附件/工况.xlsx"
+    )
 
 
 def test_gantt_axis_extends_past_last_bar():

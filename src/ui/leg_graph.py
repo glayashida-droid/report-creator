@@ -1,18 +1,40 @@
 import sys
 from pathlib import Path
+from typing import Optional
 
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton,
+from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton,
                                QLabel, QScrollArea, QComboBox, QFrame, QSizePolicy, QMessageBox,
                                QInputDialog, QStackedWidget)
-from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtCore import Qt, Signal, QTimer, QPoint
+from PySide6.QtGui import QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent, QResizeEvent
 
 from src.models.project_state import TestLeg, TestNode
 from src.parsers.db_loader import DuplicateStandardError, duplicate_standard_message
+from src.ui.candidate_pool import CANDIDATE_TEST_MIME, candidate_test_from_mime, pool_drag_active
 from src.ui.test_detail_dialog import TestDetailDialog
-from src.io.test_photos import CUSTOM_TEST_NAME, PhotoError, is_usable_test_name, rename_test_dir
+from src.io.test_photos import (
+    CUSTOM_TEST_NAME,
+    PhotoError,
+    is_usable_test_name,
+    rename_test_dir,
+    test_dir,
+)
+from src.io.data_tables import retarget_node_data_tables
 
 PLACEHOLDER_TEST = "请选择试验..."
 CUSTOM_TEST = CUSTOM_TEST_NAME
+
+
+def insert_index_for_y(leg_widget, node_widgets, y: int) -> int:
+    """Return list index to insert before, based on Y in leg_widget coordinates."""
+    if not node_widgets:
+        return 0
+    for i, node_widget in enumerate(node_widgets):
+        top = node_widget.mapTo(leg_widget, QPoint(0, 0)).y()
+        center = top + node_widget.height() // 2
+        if y < center:
+            return i
+    return len(node_widgets)
 
 
 def fill_test_combo(combo: QComboBox, pool: list, current_test: str = ""):
@@ -45,6 +67,7 @@ class TestNodeWidget(QFrame):
         self.candidate_pool = candidate_pool
         self.db_loader = db_loader
         self._committed_name = self._normalized_test_name(node_data.test_name)
+        self._initializing = True
         self.setObjectName("testNodeCard")
         self.setFrameShape(QFrame.StyledPanel)
         self.setFrameShadow(QFrame.Plain)
@@ -67,7 +90,12 @@ class TestNodeWidget(QFrame):
         self.combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.combo.setEditable(True)
         self.combo.setInsertPolicy(QComboBox.NoInsert)
-        self.combo.lineEdit().setPlaceholderText(PLACEHOLDER_TEST)
+        # Pool chips also carry text/plain; if the line edit accepts drops, Qt
+        # appends into the name and LegWidget never gets a before/after insert.
+        self.combo.setAcceptDrops(False)
+        le = self.combo.lineEdit()
+        le.setAcceptDrops(False)
+        le.setPlaceholderText(PLACEHOLDER_TEST)
         fill_test_combo(self.combo, self.candidate_pool, self.node_data.test_name)
         self.combo.currentTextChanged.connect(self.on_test_changed)
         self.combo.lineEdit().editingFinished.connect(self.on_test_edit_finished)
@@ -102,6 +130,7 @@ class TestNodeWidget(QFrame):
         layout.addLayout(grid)
         self._refresh_complete_mark()
         self._sync_detail_button()
+        self._initializing = False
 
     def _refresh_complete_mark(self):
         self.lbl_complete.setVisible(self.node_data.is_detail_complete())
@@ -185,6 +214,56 @@ class TestNodeWidget(QFrame):
             widget = widget.parent()
         return None
 
+    def resync_from_committed(self) -> None:
+        """Restore combo text to the last committed name without touching disk."""
+        if self._normalized_test_name(self.combo.currentText()) == self._committed_name:
+            self.node_data.test_name = self._committed_name
+            return
+        self.combo.blockSignals(True)
+        fill_test_combo(self.combo, self.candidate_pool, self._committed_name)
+        self.combo.blockSignals(False)
+        self.node_data.test_name = self._committed_name
+        self._refresh_complete_mark()
+        self._sync_detail_button()
+
+    def _rollback_test_name(self, old: str) -> None:
+        self._committed_name = old
+        self.resync_from_committed()
+        self.node_updated.emit()
+
+    def _warn_rename_failed(self, message: str, old: str) -> None:
+        def show() -> None:
+            QMessageBox.warning(self, "无法改名", message)
+            self._rollback_test_name(old)
+
+        # Never nest a modal inside drag.exec(); defer until the event loop is free.
+        QTimer.singleShot(0, show)
+
+    def _other_nodes_use_name(self, name: str) -> bool:
+        needle = (name or "").strip()
+        if not needle:
+            return False
+        state = self._project_state()
+        if state is None:
+            return False
+        for leg in state.legs or []:
+            for node in leg.nodes or []:
+                if node is self.node_data:
+                    continue
+                if (node.test_name or "").strip() == needle:
+                    return True
+        return False
+
+    def _should_rename_folder(self, old: str, new: str) -> bool:
+        """Only move disk folders when this node uniquely owns the old name."""
+        if not is_usable_test_name(old) or not is_usable_test_name(new):
+            return False
+        if old == new:
+            return False
+        if self._other_nodes_use_name(old):
+            return False
+        return True
+
     def _commit_test_name(self, name):
         old = self._committed_name
         self.node_data.test_name = name
@@ -194,25 +273,36 @@ class TestNodeWidget(QFrame):
             return
         state = self._project_state()
         root = Path(state.project_path) if state and getattr(state, "project_path", "") else None
-        if root is not None and root.is_dir() and is_usable_test_name(old):
-            try:
-                rename_test_dir(root, old, name)
-            except PhotoError as exc:
-                QMessageBox.warning(self, "无法改名", str(exc))
-                self.combo.blockSignals(True)
-                fill_test_combo(self.combo, self.candidate_pool, old)
-                self.combo.blockSignals(False)
-                self.node_data.test_name = old
-                self._refresh_complete_mark()
-                self._sync_detail_button()
-                self.node_updated.emit()
-                return
+        retarget_paths = False
+        if (
+            root is not None
+            and root.is_dir()
+            and self._should_rename_folder(old, name)
+        ):
+            dest = test_dir(root, name)
+            if dest.exists():
+                # Temporary duplicate names are allowed while editing; skip move.
+                pass
+            else:
+                try:
+                    rename_test_dir(root, old, name)
+                except PhotoError as exc:
+                    self._warn_rename_failed(str(exc), old)
+                    return
+                retarget_paths = True
+        elif not self._other_nodes_use_name(old):
+            # No shared owner of the old name: keep index paths aligned with the new name.
+            retarget_paths = True
+        if retarget_paths:
+            retarget_node_data_tables(self.node_data, old, name)
         self._committed_name = name
         self._refresh_complete_mark()
         self._sync_detail_button()
         self.node_updated.emit()
 
     def on_test_changed(self, text):
+        if self._initializing or pool_drag_active():
+            return
         name = self._normalized_test_name(text)
         if self.node_data.test_name == name:
             return
@@ -221,7 +311,14 @@ class TestNodeWidget(QFrame):
         self.node_updated.emit()
 
     def on_test_edit_finished(self):
+        if self._initializing or pool_drag_active():
+            return
         name = self._normalized_test_name(self.combo.currentText())
+        if name == self._committed_name:
+            # Combo may have drifted visually; snap display without a rename.
+            if self.combo.currentText().strip() != name:
+                self.resync_from_committed()
+            return
         if self.combo.currentText() != name:
             self.combo.blockSignals(True)
             self.combo.setEditText(name)
@@ -245,6 +342,12 @@ class LegWidget(QFrame):
         self.setFrameShadow(QFrame.Plain)
         self.setMinimumWidth(220)
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
+        self.setAcceptDrops(True)
+        self._drop_index: Optional[int] = None
+        self._drop_indicator = QFrame(self)
+        self._drop_indicator.setObjectName("legDropIndicator")
+        self._drop_indicator.setFixedHeight(2)
+        self._drop_indicator.hide()
 
         self.init_ui()
 
@@ -278,19 +381,117 @@ class LegWidget(QFrame):
         self.btn_add_node = QPushButton("+ 添加试验")
         self.btn_add_node.clicked.connect(self.on_add_node)
         self.layout.addWidget(self.btn_add_node)
+
+    def _accepts_candidate_drop(self, mime) -> bool:
+        return mime.hasFormat(CANDIDATE_TEST_MIME) and bool(candidate_test_from_mime(mime))
+
+    def _set_drop_active(self, active: bool) -> None:
+        if self.property("dropActive") == active:
+            return
+        self.setProperty("dropActive", active)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def _insert_index_at(self, pos: QPoint) -> int:
+        return insert_index_for_y(self, self.node_widgets, pos.y())
+
+    def _indicator_y_for_index(self, index: int) -> int:
+        gap = 3
+        if not self.node_widgets:
+            if self.btn_add_node is not None:
+                return max(self.btn_add_node.mapTo(self, QPoint(0, 0)).y() - 12, 36)
+            return 36
+        if index <= 0:
+            node = self.node_widgets[0]
+            return node.mapTo(self, QPoint(0, 0)).y() - gap
+        if index >= len(self.node_widgets):
+            node = self.node_widgets[-1]
+            return node.mapTo(self, QPoint(0, node.height())).y() + gap
+        node = self.node_widgets[index]
+        return node.mapTo(self, QPoint(0, 0)).y() - gap
+
+    def _show_drop_indicator(self, index: int) -> None:
+        self._drop_index = index
+        margin = self.layout.contentsMargins().left()
+        y = self._indicator_y_for_index(index)
+        self._drop_indicator.setGeometry(margin, y, max(self.width() - margin * 2, 40), 2)
+        self._drop_indicator.show()
+        self._drop_indicator.raise_()
+
+    def _hide_drop_indicator(self) -> None:
+        self._drop_index = None
+        self._drop_indicator.hide()
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if self._accepts_candidate_drop(event.mimeData()):
+            event.setDropAction(Qt.CopyAction)
+            event.accept()
+            self._set_drop_active(True)
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+        if not self._accepts_candidate_drop(event.mimeData()):
+            event.ignore()
+            return
+        index = self._insert_index_at(event.position().toPoint())
+        self._show_drop_indicator(index)
+        event.setDropAction(Qt.CopyAction)
+        event.accept()
+
+    def dragLeaveEvent(self, event: QDragLeaveEvent) -> None:
+        self._hide_drop_indicator()
+        self._set_drop_active(False)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        self._hide_drop_indicator()
+        self._set_drop_active(False)
+        if not self._accepts_candidate_drop(event.mimeData()):
+            event.ignore()
+            return
+        name = candidate_test_from_mime(event.mimeData())
+        index = self._insert_index_at(event.position().toPoint())
+        event.setDropAction(Qt.CopyAction)
+        event.accept()
+        # Defer insert until drag.exec() returns — avoids nested modal loops / frozen OK buttons.
+        QTimer.singleShot(0, lambda n=name, i=index: self._insert_from_pool_drop(i, n))
+
+    def _insert_from_pool_drop(self, index: int, test_name: str) -> None:
+        """Drop-in only adds a node; never renames sibling folders."""
+        for nw in self.node_widgets:
+            nw.resync_from_committed()
+        focused = QApplication.focusWidget()
+        if focused is not None:
+            focused.clearFocus()
+        self.insert_node_at(index, test_name)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if self._drop_index is not None:
+            self._show_drop_indicator(self._drop_index)
         
-    def add_node_widget(self, node_data: TestNode):
+    def add_node_widget(self, node_data: TestNode, index: Optional[int] = None):
         nw = TestNodeWidget(node_data, self.candidate_pool, db_loader=self.db_loader)
         nw.node_updated.connect(self.leg_updated)
         nw.node_deleted.connect(self.on_node_deleted)
-        self.node_widgets.append(nw)
-        self.nodes_layout.addWidget(nw)
+        if index is None:
+            self.node_widgets.append(nw)
+            self.nodes_layout.addWidget(nw)
+        else:
+            self.node_widgets.insert(index, nw)
+            self.nodes_layout.insertWidget(index, nw)
+
+    def insert_node_at(self, index: int, test_name: str = "") -> None:
+        # Assign name at creation — no rename_test_dir path.
+        new_node = TestNode(test_name=(test_name or "").strip())
+        index = max(0, min(index, len(self.leg_data.nodes)))
+        self.leg_data.nodes.insert(index, new_node)
+        self.add_node_widget(new_node, index)
+        self.leg_updated.emit()
         
     def on_add_node(self):
-        new_node = TestNode(test_name="")
-        self.leg_data.nodes.append(new_node)
-        self.add_node_widget(new_node)
-        self.leg_updated.emit()
+        self.insert_node_at(len(self.leg_data.nodes))
         
     def on_node_deleted(self, nw: TestNodeWidget):
         self.node_widgets.remove(nw)

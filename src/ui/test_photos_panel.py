@@ -6,10 +6,11 @@ import tempfile
 from PySide6.QtCore import Qt, QPoint, QRect, QRectF, QSize, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame, QScrollArea,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
     QDialog, QRadioButton, QLineEdit, QButtonGroup, QMessageBox, QInputDialog,
     QSizePolicy, QLayout,
 )
+from src.ui.scroll_contain import ContainedScrollArea
 
 from src.ui.theme import BG_INPUT, CYAN
 from src.ui.window_focus import force_window_foreground
@@ -31,9 +32,19 @@ from src.io.test_photos import (
     rename_photo,
     album_dir,
 )
+from src.models.project_state import DUPLICATE_TEST_NAME_MESSAGE
 
 # Sentinel from RenamePhotosDialog / _ask_prefix: keep source basenames on import.
 KEEP_ORIGINAL = object()
+
+
+def warn_duplicate_test_names(parent) -> None:
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Warning)
+    box.setWindowTitle("提示")
+    box.setText(DUPLICATE_TEST_NAME_MESSAGE)
+    box.addButton("确认", QMessageBox.AcceptRole)
+    box.exec()
 
 
 THUMB = 72
@@ -160,7 +171,7 @@ class FlowLayout(QLayout):
         return y + line_height - rect.y() if self._items else 0
 
 
-class ThumbGallery(QScrollArea):
+class ThumbGallery(ContainedScrollArea):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._fit_host()
@@ -624,11 +635,12 @@ class PhotoAlbumRow(QFrame):
 class TestPhotosPanel(QWidget):
     changed = Signal()
 
-    def __init__(self, project_root, test_name, project_id, parent=None):
+    def __init__(self, project_root, test_name, project_id, parent=None, project_state=None):
         super().__init__(parent)
         self.project_root = Path(project_root) if project_root else None
         self.test_name = test_name or ""
         self.project_id = project_id or ""
+        self.project_state = project_state
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -676,6 +688,13 @@ class TestPhotosPanel(QWidget):
             return False
         return True
 
+    def _ensure_unique_test_name(self) -> bool:
+        state = self.project_state
+        if state is not None and not state.test_name_is_unique(self.test_name):
+            warn_duplicate_test_names(self)
+            return False
+        return True
+
     def reload(self):
         while self.rows_layout.count():
             item = self.rows_layout.takeAt(0)
@@ -717,6 +736,8 @@ class TestPhotosPanel(QWidget):
     def _add_template(self):
         if not self._ready():
             return
+        if not self._ensure_unique_test_name():
+            return
         try:
             created = create_template_albums(self.project_root, self.test_name)
         except PhotoError as exc:
@@ -729,6 +750,8 @@ class TestPhotosPanel(QWidget):
 
     def _add_custom(self):
         if not self._ready():
+            return
+        if not self._ensure_unique_test_name():
             return
         text, ok = QInputDialog.getText(self, "自定义新建", "文件夹名称：")
         if not ok:

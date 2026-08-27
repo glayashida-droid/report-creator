@@ -13,8 +13,8 @@ from typing import Any, Callable, List, Optional, Sequence, Tuple
 from openpyxl import Workbook, load_workbook
 
 from src.io.project_mirror import repo_root
-from src.io.test_photos import is_usable_test_name, test_dir
-from src.models.project_state import DataTableRef
+from src.io.test_photos import TEST_GROUP_DIR, is_usable_test_name, test_dir
+from src.models.project_state import DataTableRef, TestNode
 
 ATTACHMENT_DIR = "数据表附件"
 _BAD_NAME = re.compile(r'[\\/:*?"<>|]')
@@ -30,6 +30,37 @@ def default_templates_dir() -> Path:
 
 class DataTableError(Exception):
     pass
+
+
+def rewrite_test_dir_in_relative_path(
+    relative_path: str, old_name: str, new_name: str
+) -> str:
+    """Rewrite 3.测试组/{old}/… → 3.测试组/{new}/… in a stored attachment path."""
+    old = (old_name or "").strip()
+    new = (new_name or "").strip()
+    rel = (relative_path or "").replace("\\", "/")
+    if not old or not new or old == new or not rel:
+        return relative_path or ""
+    old_prefix = f"{TEST_GROUP_DIR}/{old}/"
+    if rel.startswith(old_prefix):
+        return f"{TEST_GROUP_DIR}/{new}/" + rel[len(old_prefix) :]
+    return rel
+
+
+def retarget_node_data_tables(node: TestNode, old_name: str, new_name: str) -> None:
+    """Update data_tables relative_path prefixes after a trial folder rename."""
+    refs = list(getattr(node, "data_tables", None) or [])
+    if not refs:
+        return
+    node.data_tables = [
+        DataTableRef(
+            title=ref.title,
+            relative_path=rewrite_test_dir_in_relative_path(
+                ref.relative_path, old_name, new_name
+            ),
+        )
+        for ref in refs
+    ]
 
 
 @dataclass
@@ -137,8 +168,16 @@ def _col1_has_content(ws) -> bool:
     return False
 
 
+def _sample_id_start_row(ws) -> int:
+    """First row below existing sheet content; empty sheet starts at row 2."""
+    bbox = _used_bbox(ws)
+    if bbox is None:
+        return 2
+    return bbox[2] + 1
+
+
 def import_sample_ids(path: Path, sample_ids: Sequence[str]) -> None:
-    """Write sample ids into the first sheet from row 2; insert col 1 if it has content."""
+    """Write sample ids into the first sheet below existing content; insert col 1 if needed."""
     xlsx = Path(path)
     if not xlsx.is_file():
         raise DataTableError("数据表文件不存在")
@@ -148,8 +187,9 @@ def import_sample_ids(path: Path, sample_ids: Sequence[str]) -> None:
         ws = wb.worksheets[0]
         if _col1_has_content(ws):
             ws.insert_cols(1)
+        start_row = _sample_id_start_row(ws)
         for i, sid in enumerate(ids):
-            ws.cell(row=2 + i, column=1, value=sid)
+            ws.cell(row=start_row + i, column=1, value=sid)
         wb.save(xlsx)
     finally:
         wb.close()

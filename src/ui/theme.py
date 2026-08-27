@@ -92,6 +92,25 @@ QGroupBox#overviewGroup {{
     margin-top: 14px;
 }}
 
+QToolButton#overviewReload {{
+    background: transparent;
+    border: none;
+    padding: 0 3px 0 1px;
+    margin: 0;
+    color: {CYAN};
+    font-size: 11px;
+    font-weight: 500;
+}}
+
+QToolButton#overviewReload:hover {{
+    background-color: {BG_HOVER};
+    border-radius: 4px;
+}}
+
+QToolButton#overviewReload:pressed {{
+    background-color: {BORDER};
+}}
+
 QGroupBox#overviewGroup QLineEdit,
 QGroupBox#overviewGroup QDateEdit,
 QGroupBox#overviewGroup QAbstractSpinBox {{
@@ -275,6 +294,24 @@ QLabel#errorLabel {{
     color: {MAGENTA};
 }}
 
+QPushButton#mirrorOpenLink {{
+    background: transparent;
+    border: none;
+    color: {CYAN};
+    font-size: 12px;
+    padding: 0 2px;
+    min-height: 0;
+    text-decoration: none;
+}}
+
+QPushButton#mirrorOpenLink:hover {{
+    color: {TEXT};
+}}
+
+QPushButton#mirrorOpenLink:pressed {{
+    color: {CYAN};
+}}
+
 QLabel#expiredFollowTip {{
     background-color: #1A1014;
     color: #FF6B6B;
@@ -389,6 +426,10 @@ QCalendarWidget QToolButton#qt_calendar_nextmonth:hover {{
 QCalendarWidget QAbstractItemView:enabled {{
     selection-background-color: {MAGENTA};
     selection-color: {BG};
+}}
+
+QCalendarWidget QAbstractItemView:disabled {{
+    color: {TEXT_DIM};
 }}
 
 /* ---- Combo boxes ---- */
@@ -596,6 +637,14 @@ QPushButton#poolToggle {{
     font-size: 12px;
 }}
 
+QLineEdit#projectPathInput {{
+    padding: 4px 8px;
+    min-height: 20px;
+    max-height: 28px;
+    border-radius: 6px;
+    font-size: 12px;
+}}
+
 QPushButton#poolToggle:checked {{
     background-color: rgba(0, 255, 255, 0.16);
     border: 1px solid {CYAN};
@@ -712,6 +761,16 @@ QFrame#legCard, QFrame#testNodeCard {{
     background-color: {BG_PANEL};
     border: 1px solid {BORDER};
     border-radius: 10px;
+}}
+
+QFrame#legCard[dropActive="true"] {{
+    border: 1px solid {CYAN};
+}}
+
+QFrame#legDropIndicator {{
+    background-color: {CYAN};
+    border: none;
+    border-radius: 1px;
 }}
 
 QPushButton#ganttZoomButton {{
@@ -855,6 +914,52 @@ def _triangle_icon(pointing: str, color: str, size: int = 16):
     return QIcon(pm)
 
 
+def refresh_icon(color: str = CYAN, size: int = 14):
+    """Circular refresh / reload arrow for compact tool buttons."""
+    import math
+
+    from PySide6.QtCore import QPointF, QRectF, Qt
+    from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
+
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.Antialiasing)
+    c = QColor(color)
+    stroke = max(1.2, size * 0.12)
+    pen = QPen(c, stroke)
+    pen.setCapStyle(Qt.RoundCap)
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+    m = size * 0.18
+    rect = QRectF(m, m, size - 2 * m, size - 2 * m)
+    start_deg = 40
+    span_deg = 280
+    painter.drawArc(rect, int(start_deg * 16), int(span_deg * 16))
+
+    cx = size / 2
+    cy = size / 2
+    r = (size - 2 * m) / 2
+    ang = math.radians(start_deg)
+    tip = QPointF(cx + r * math.cos(ang), cy - r * math.sin(ang))
+    tang = QPointF(-math.sin(ang), -math.cos(ang))
+    normal = QPointF(-tang.y(), tang.x())
+    ah = size * 0.28
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(c)
+    painter.drawPolygon(
+        QPolygonF(
+            [
+                tip + tang * (ah * 0.45),
+                tip - tang * (ah * 0.2) + normal * (ah * 0.4),
+                tip - tang * (ah * 0.2) - normal * (ah * 0.4),
+            ]
+        )
+    )
+    painter.end()
+    return QIcon(pm)
+
+
 def style_calendar_nav_arrows(calendar):
     """Replace default black prev/next icons with cyan triangles."""
     from PySide6.QtWidgets import QToolButton
@@ -867,6 +972,32 @@ def style_calendar_nav_arrows(calendar):
         prev_btn.setIcon(_triangle_icon("left", CYAN))
     if next_btn is not None:
         next_btn.setIcon(_triangle_icon("right", CYAN))
+
+
+def set_calendar_selectable_range(date_edit, minimum, maximum):
+    """Apply hard min/max on the popup so out-of-range days are unselectable.
+
+    Signals are blocked so QDateEdit's blank sentinel is not lifted to minimum.
+    """
+    from PySide6.QtCore import QDate
+
+    calendar = date_edit.calendarWidget()
+    if calendar is None:
+        return
+    if not minimum.isValid():
+        minimum = QDate(_EARLIEST_REAL_YEAR, 1, 1)
+    if not maximum.isValid():
+        maximum = QDate(9999, 12, 31)
+    if maximum < minimum:
+        maximum = minimum
+    calendar.blockSignals(True)
+    try:
+        # Expand max first so raising min cannot clamp max downward.
+        calendar.setMaximumDate(QDate(9999, 12, 31))
+        calendar.setMinimumDate(minimum)
+        calendar.setMaximumDate(maximum)
+    finally:
+        calendar.blockSignals(False)
 
 
 class _BlankDateCalendarFilter:

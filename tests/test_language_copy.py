@@ -34,6 +34,8 @@ def test_format_conclusion_accepts_string_aliases():
 
 def test_language_text_join_and_no_english_fallback():
     assert language_text("高温", "High temp", "中英文") == "高温 / High temp"
+    assert language_text("VW316-6 FCA", "VW316-6 FCA", "中英文") == "VW316-6 FCA"
+    assert language_text("6710820", "6710820", "中英文") == "6710820"
     assert language_text("高温", "", "中英文") == "高温"
     assert language_text("", "High temp", "中英文") == "High temp"
     assert language_text("", "", "中英文") == ""
@@ -107,12 +109,13 @@ def test_field_label_overview_and_dates_match_application_phrasing():
     assert field_label("样品接收日期", "英文") == "Sample Received Date"
     assert field_label("样品检测日期", "中英文") == "样品检测日期Testing Period"
 
-    # Date-bar start column shares report period wording
-    assert field_label("检测开始", "中文") == "样品检测日期"
-    assert field_label("检测开始", "英文") == "Testing Period"
-    assert field_label("检测结束", "中文") == ""
-    assert field_label("检测结束", "英文") == ""
-    assert field_label("检测天数", "英文") == "Testing Days"
+    # Date-bar labels are independent of the report period wording
+    assert field_label("检测开始", "中文") == "试验开始"
+    assert field_label("检测开始", "英文") == "Test Start"
+    assert field_label("检测结束", "中文") == "试验结束"
+    assert field_label("检测结束", "英文") == "Test End"
+    assert field_label("检测天数", "中文") == "天数"
+    assert field_label("检测天数", "英文") == "Days"
 
     assert field_label("颜色", "英文") == "Color"
     assert field_label("材料编号", "英文") == "Material Code"

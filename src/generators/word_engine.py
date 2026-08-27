@@ -839,15 +839,15 @@ class WordGenerator:
             "The above sample(s) and information are provided and confirmed by the applicant"
         )
         if lang == "中英文":
-            self._add_para_before(doc, anchor, note_zh, size=SIZE_CAPTION).alignment = (
+            self._add_para_before(doc, anchor, note_zh, size=SIZE_BODY).alignment = (
                 WD_ALIGN_PARAGRAPH.LEFT
             )
-            self._add_para_before(doc, anchor, note_en, size=SIZE_CAPTION).alignment = (
+            self._add_para_before(doc, anchor, note_en, size=SIZE_BODY).alignment = (
                 WD_ALIGN_PARAGRAPH.LEFT
             )
         else:
             note_p = self._add_para_before(
-                doc, anchor, note_en if lang == "英文" else note_zh, size=SIZE_CAPTION
+                doc, anchor, note_en if lang == "英文" else note_zh, size=SIZE_BODY
             )
             note_p.alignment = WD_ALIGN_PARAGRAPH.LEFT
 

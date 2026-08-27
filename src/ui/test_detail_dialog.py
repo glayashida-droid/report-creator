@@ -6,10 +6,11 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QDateEdit, QGroupBox, QMessageBox,
-    QTextEdit, QSizePolicy, QAbstractItemView, QScrollArea, QFrame, QWidget,
+    QSizePolicy, QAbstractItemView, QScrollArea, QFrame, QWidget,
     QStyledItemDelegate, QStyle, QStyleOptionViewItem, QCheckBox, QInputDialog,
     QDialogButtonBox, QFileDialog,
 )
+from src.ui.scroll_contain import ContainedTableWidget, ContainedTextEdit
 from PySide6.QtCore import Qt, QDate, Signal, QTimer, QEvent, QPoint
 from PySide6.QtGui import QColor, QCursor, QPainter, QPixmap
 from openpyxl.utils import range_boundaries
@@ -38,7 +39,8 @@ from src.io.data_tables import (
     upload_existing_xlsx,
 )
 from src.io.test_photos import is_usable_test_name
-from src.ui.test_photos_panel import TestPhotosPanel
+from src.ui.test_photos_panel import TestPhotosPanel, warn_duplicate_test_names
+from src.ui.data_table_template_dialog import DataTableTemplateDialog
 from src.ui.theme import default_project_qdate, polish_date_edit_calendar
 from src.ui.gantt_utils import (
     cascade_subsequent_nodes,
@@ -537,7 +539,7 @@ class TestDetailDialog(QDialog):
         return date_edit
 
     def _make_table(self, headers, min_height):
-        table = QTableWidget(0, len(headers))
+        table = ContainedTableWidget(0, len(headers))
         table.setHorizontalHeaderLabels(headers)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -768,7 +770,7 @@ class TestDetailDialog(QDialog):
         toolbar.addStretch()
         sample_layout.addLayout(toolbar)
 
-        self.table = QTableWidget(0, 4)
+        self.table = ContainedTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["", "样品编号", "结果描述", "测试结果"])
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.Fixed)
@@ -803,7 +805,11 @@ class TestDetailDialog(QDialog):
                 project_root = Path(raw)
             project_id = getattr(self._project_state, "project_id", "") or ""
         self.photos_panel = TestPhotosPanel(
-            project_root, self.node_data.test_name, project_id, self.drawer_photos
+            project_root,
+            self.node_data.test_name,
+            project_id,
+            self.drawer_photos,
+            project_state=self._project_state,
         )
         self.photos_panel.changed.connect(self._refresh_photo_summary)
         self.drawer_photos.body_layout.addWidget(self.photos_panel)
@@ -1241,7 +1247,7 @@ class TestDetailDialog(QDialog):
             drawer.set_expanded(False)
             if image_getter is not None:
                 drawer.set_images(image_getter(std))
-            editor = QTextEdit()
+            editor = ContainedTextEdit()
             editor.setMinimumHeight(120)
             editor.setPlaceholderText(placeholder)
             text = edits.get(key)
@@ -1422,7 +1428,7 @@ class TestDetailDialog(QDialog):
             name_item.setData(Qt.UserRole, key)
             name_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             self.result_desc_table.setItem(row, 0, name_item)
-            editor = QTextEdit()
+            editor = ContainedTextEdit()
             editor.setFixedHeight(52)
             editor.setPlaceholderText("可直接修改")
             text = active.get(key)
@@ -1943,7 +1949,7 @@ class TestDetailDialog(QDialog):
             bar.addWidget(btn_delete)
             drawer.body_layout.addLayout(bar)
 
-            preview = QTableWidget(0, 0)
+            preview = ContainedTableWidget(0, 0)
             preview.setObjectName("dataTablePreview")
             preview.setEditTriggers(QAbstractItemView.NoEditTriggers)
             preview.setSelectionMode(QAbstractItemView.NoSelection)
@@ -1985,6 +1991,10 @@ class TestDetailDialog(QDialog):
             return
         if self._project_root() is None:
             QMessageBox.warning(self, "提示", "请先加载项目以确定本地镜像路径")
+            return
+        state = self._project_state
+        if state is not None and not state.test_name_is_unique(self.node_data.test_name):
+            warn_duplicate_test_names(self)
             return
 
         chooser = QDialog(self)
@@ -2070,23 +2080,26 @@ class TestDetailDialog(QDialog):
                 "templates/data_tables/ 中暂无可用的 .xlsx 模版。",
             )
             return
-        labels = [p.name for p in templates]
-        choice, ok = QInputDialog.getItem(
-            self, "选择模版", "模版文件：", labels, 0, False
-        )
-        if not ok or not choice:
+        dlg = DataTableTemplateDialog(templates, self)
+        if dlg.exec() != QDialog.Accepted:
             return
-        src = next((p for p in templates if p.name == choice), None)
-        if src is None:
+        paths = dlg.selected_paths()
+        if not paths:
+            QMessageBox.information(self, "模版", "请至少选择一个模版。")
             return
         root = self._project_root()
-        try:
-            ref = copy_from_template(root, self.node_data.test_name, src)
-        except DataTableError as exc:
-            QMessageBox.warning(self, "提示", str(exc))
+        added = 0
+        for src in paths:
+            try:
+                ref = copy_from_template(root, self.node_data.test_name, src)
+            except DataTableError as exc:
+                QMessageBox.warning(self, "提示", str(exc))
+                continue
+            self._data_tables.append(ref)
+            self._load_preview_for_ref(ref, force=True)
+            added += 1
+        if not added:
             return
-        self._data_tables.append(ref)
-        self._load_preview_for_ref(ref, force=True)
         self._refresh_data_table_list()
         if self._data_table_drawers:
             self._data_table_drawers[-1].set_expanded(True)

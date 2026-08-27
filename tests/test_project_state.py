@@ -77,7 +77,34 @@ def test_project_saves_standard_images_and_edits():
             path.unlink()
 
 
+def test_duplicate_test_names_across_legs():
+    state = ProjectState(
+        project_id="P1",
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[
+                    TestNode(test_name="湿热循环"),
+                    TestNode(test_name="湿热循环"),
+                    TestNode(test_name=""),
+                ],
+            ),
+            TestLeg(
+                leg_id="L2",
+                leg_name="Leg 2",
+                nodes=[TestNode(test_name="振动"), TestNode(test_name="湿热循环")],
+            ),
+        ],
+    )
+    assert state.duplicate_test_names() == ["湿热循环"]
+    assert not state.test_name_is_unique("湿热循环")
+    assert state.test_name_is_unique("振动")
+    assert state.test_name_usage_count("湿热循环") == 3
+
+
 if __name__ == "__main__":
     test_project_state()
     test_project_saves_standard_images_and_edits()
+    test_duplicate_test_names_across_legs()
     print("test_project_state: ok")

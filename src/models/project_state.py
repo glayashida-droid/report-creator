@@ -243,6 +243,10 @@ class TestLeg(BaseModel):
     leg_name: str
     nodes: List[TestNode] = Field(default_factory=list)
 
+
+DUPLICATE_TEST_NAME_MESSAGE = "试验名称重复，请确认"
+
+
 class ProjectState(BaseModel):
     project_id: str = ""
     source_path: str = ""
@@ -302,6 +306,31 @@ class ProjectState(BaseModel):
             name = (node.test_name or "").strip() or "（未命名试验）"
             labels.append(f"{leg.leg_name} / {name}")
         return labels
+
+    def duplicate_test_names(self) -> List[str]:
+        """Usable test names that appear more than once across all Legs."""
+        counts: Dict[str, int] = {}
+        for leg in self.legs or []:
+            for node in leg.nodes or []:
+                name = (node.test_name or "").strip()
+                if not name or name in {"请选择试验...", "自定义"}:
+                    continue
+                counts[name] = counts.get(name, 0) + 1
+        return sorted(name for name, count in counts.items() if count > 1)
+
+    def test_name_usage_count(self, test_name: str) -> int:
+        needle = (test_name or "").strip()
+        if not needle:
+            return 0
+        count = 0
+        for leg in self.legs or []:
+            for node in leg.nodes or []:
+                if (node.test_name or "").strip() == needle:
+                    count += 1
+        return count
+
+    def test_name_is_unique(self, test_name: str) -> bool:
+        return self.test_name_usage_count(test_name) <= 1
 
     def combo_pool(self, extra: str = "") -> List[str]:
         """Dropdown items: quotation pool then template pool, exact-string unique."""
