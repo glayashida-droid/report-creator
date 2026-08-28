@@ -25,7 +25,7 @@ from src.language_copy import (
     has_chinese,
     language_text,
     photo_caption,
-    raw_label,
+    table_header_label,
 )
 from src.models.project_state import ProjectState, TestNode, TestResult, TestSample
 
@@ -59,7 +59,7 @@ _CONTENT_WIDTH_DXA = 8802
 # Column widths from golden A226061368610100001E.docx (DXA)
 _WIDTHS_COVER_INFO = (3423, 5292)  # ~39:61, not 50:50
 _WIDTHS_SAMPLE_LIST = (704, 1697, 1276, 1236, 1980)
-_WIDTHS_SUMMARY = (704, 2410, 2003, 1682, 1418)
+_WIDTHS_SUMMARY = (704, 2090, 1690, 1400, 1500, 1418)
 _WIDTHS_EQUIPMENT = (704, 2693, 1843, 2126, 1418)
 _WIDTHS_SAMPLE_RESULT = (1523, 6269, 1353)
 
@@ -129,8 +129,12 @@ class WordGenerator:
         return "中文"
 
     def _L(self, zh: str, en: str) -> str:
-        """Fixed section/table labels (raw concat for 中英文)."""
-        return raw_label(zh, en, self._lang())
+        """Inline section labels (raw concat for 中英文)."""
+        return table_header_label(zh, en, self._lang(), inline=True)
+
+    def _H(self, zh: str, en: str) -> str:
+        """Word table column headers (bilingual line break)."""
+        return table_header_label(zh, en, self._lang())
 
     def _or_slash(self, text: str) -> str:
         """Chinese/bilingual keep '/' placeholder; English stays empty when missing."""
@@ -896,11 +900,11 @@ class WordGenerator:
         table = self._add_table_before(doc, anchor, 2, 5)
         self._set_col_widths(table, _WIDTHS_SAMPLE_LIST)
         headers = [
-            self._L("序号", "No."),
-            self._L("样品名称", "Sample Name"),
-            self._L("零件号", "Part No."),
-            self._L("送样数量", "Quantity of Samples"),
-            self._L("样品编号", "Sample No."),
+            self._H("序号", "No."),
+            self._H("样品名称", "Sample Name"),
+            self._H("零件号", "Part No."),
+            self._H("送样数量", "Quantity of Samples"),
+            self._H("样品编号", "Sample No."),
         ]
         for i, h in enumerate(headers):
             self._set_cell_text(table.rows[0].cells[i], h)
@@ -909,14 +913,15 @@ class WordGenerator:
             self._set_cell_text(table.rows[1].cells[i], v)
 
     def _insert_summary_table(self, doc: Document, anchor: Paragraph, nodes: List[TestNode]):
-        table = self._add_table_before(doc, anchor, max(len(nodes), 0) + 1, 5)
+        table = self._add_table_before(doc, anchor, max(len(nodes), 0) + 1, 6)
         self._set_col_widths(table, _WIDTHS_SUMMARY)
         headers = [
-            self._L("序号", "No."),
-            self._L("检测项目", "Test Item"),
-            self._L("检测方法", "Test Method"),
-            self._L("样品编号", "Sample No."),
-            self._L("结论", "Conclusion"),
+            self._H("序号", "No."),
+            self._H("检测项目", "Test Item"),
+            self._H("检测方法", "Test Method"),
+            self._H("检测时间", "Testing Period"),
+            self._H("样品编号", "Sample No."),
+            self._H("结论", "Conclusion"),
         ]
         for i, h in enumerate(headers):
             self._set_cell_text(table.rows[0].cells[i], h)
@@ -927,6 +932,7 @@ class WordGenerator:
                 str(idx),
                 self._test_item_label(node) or "/",
                 self._format_method(node) or "/",
+                self._fmt_period(node.start_date, node.end_date) or "/",
                 self._format_id_range(ids) if ids else "/",
                 conclusion,
             ]
@@ -1112,11 +1118,11 @@ class WordGenerator:
     def _insert_equipment_table(self, doc: Document, anchor: Paragraph, node: TestNode):
         items = list(node.equipments or [])
         headers = [
-            self._L("序号", "No."),
-            self._L("名称", "Name"),
-            self._L("型号", "Model"),
-            self._L("设备编号", "Equipment No."),
-            self._L("校准有效期", "Calibration due date"),
+            self._H("序号", "No."),
+            self._H("名称", "Name"),
+            self._H("型号", "Model"),
+            self._H("设备编号", "Equipment No."),
+            self._H("校准有效期", "Calibration due date"),
         ]
         if not items and node.equipment_name:
             table = self._add_table_before(doc, anchor, 2, 5)
@@ -1233,9 +1239,9 @@ class WordGenerator:
         )
         multi = len(descs) > 1
         headers = [
-            self._L("样品编号", "Sample No."),
-            self._L("试验结果", "Test result"),
-            self._L("试验结论", "Conclusion"),
+            self._H("样品编号", "Sample No."),
+            self._H("试验结果", "Test result"),
+            self._H("试验结论", "Conclusion"),
         ]
         for ti, table_desc in enumerate(descs):
             if ti:

@@ -3,8 +3,14 @@ import sys
 from PySide6.QtCore import QDate, QPoint
 from PySide6.QtWidgets import QApplication, QComboBox
 
-from src.models.project_state import ProjectState, TestLeg, TestNode
-from src.ui.leg_graph import PLACEHOLDER_TEST, LegGraphArea, fill_test_combo, insert_index_for_y
+from src.models.project_state import ProjectState, TestEquipment, TestLeg, TestNode, TestResult, TestSample, TestStandard
+from src.ui.leg_graph import (
+    LEG_CARD_WIDTH,
+    PLACEHOLDER_TEST,
+    LegGraphArea,
+    fill_test_combo,
+    insert_index_for_y,
+)
 from src.ui.gantt_chart import LEG_BAR_HEIGHT, DragMode, GanttChartWidget
 from src.ui.gantt_utils import leg_range, node_range
 
@@ -445,6 +451,61 @@ def test_gantt_axis_extends_past_last_bar():
     before = chart._view.axis.end
     assert chart._view.extend_axis_end(14)
     assert chart._view.axis.end == before.addDays(14)
+
+
+def test_leg_cards_share_fixed_width():
+    _app()
+    state = ProjectState(project_id="P1")
+    area = LegGraphArea(state)
+    area.add_leg()
+    area.add_leg()
+    widths = [lw.width() for lw in area.leg_widgets]
+    assert all(w == LEG_CARD_WIDTH for w in widths)
+    assert widths[0] == widths[1]
+
+
+def test_complete_mark_reserves_width_without_changing_leg_width():
+    _app()
+    complete = TestNode(test_name="M-05Mechanical Shock")
+    complete.apply_standards([TestStandard(standard_id="S1", chapter="1", test_name="M-05")])
+    complete.equipments = [TestEquipment(name="设备", code="EQ-1")]
+    complete.samples = [TestSample(sample_id="A01", result=TestResult.PASS)]
+    incomplete = TestNode(test_name="M-04Vibration test")
+    state = ProjectState(
+        project_id="P1",
+        legs=[
+            TestLeg(leg_id="L1", leg_name="Leg 1", nodes=[complete]),
+            TestLeg(leg_id="L2", leg_name="Leg 2", nodes=[incomplete]),
+        ],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    leg1, leg2 = area.leg_widgets
+    mark1 = leg1.node_widgets[0].lbl_complete
+    mark2 = leg2.node_widgets[0].lbl_complete
+    assert mark1.text() == "✓"
+    assert mark2.text() == ""
+    assert leg1.width() == leg2.width() == LEG_CARD_WIDTH
+
+
+def test_fill_test_combo_anchors_long_name_at_start():
+    _app()
+    combo = QComboBox()
+    combo.setEditable(True)
+    fill_test_combo(combo, [], "M-05Mechanical Shock")
+    assert combo.lineEdit().cursorPosition() == 0
+
+
+def test_test_combo_tooltip_shows_full_name():
+    _app()
+    combo = QComboBox()
+    combo.setEditable(True)
+    fill_test_combo(combo, [], "M-05Mechanical Shock")
+    assert combo.toolTip() == "M-05Mechanical Shock"
+    assert combo.lineEdit().toolTip() == "M-05Mechanical Shock"
+    fill_test_combo(combo, [], "")
+    assert combo.toolTip() == ""
+    assert combo.lineEdit().toolTip() == ""
 
 
 if __name__ == "__main__":

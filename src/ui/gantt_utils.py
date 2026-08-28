@@ -76,6 +76,14 @@ def test_label(node: TestNode) -> str:
     return name or "（未命名试验）"
 
 
+def label_tooltip_if_elided(full: str, elided: str) -> str:
+    """Return the full label for hover when the visible text was elided."""
+    full = (full or "").strip()
+    if not full:
+        return ""
+    return full if elided != full else ""
+
+
 def ranges_overlap(a: DateRange, b: DateRange) -> bool:
     """Two date ranges overlap only when they share at least one interior day.
     Ranges that merely touch at a single endpoint (end == other.start) are
@@ -227,12 +235,29 @@ def restore_leg_dates(leg: TestLeg, snapshot: dict[int, Tuple[Optional[str], Opt
             node.end_date = end
 
 
+def range_exceeds_project_bounds(
+    start: QDate,
+    end: QDate,
+    proj_start: QDate,
+    proj_end: QDate,
+) -> Optional[str]:
+    """Return a user-facing message when a range falls outside the project window."""
+    if not start.isValid() or not end.isValid() or not start <= end:
+        return None
+    if proj_start.isValid() and start < proj_start:
+        return "试验开始日期超出项目开始日期"
+    if proj_end.isValid() and end > proj_end:
+        return "试验结束日期超出项目结束日期"
+    return None
+
+
 def clamp_range(
     start: QDate,
     end: QDate,
     proj_start: QDate,
     proj_end: QDate,
 ) -> Optional[DateRange]:
+    """Clamp a range for move/create: preserve duration when hitting project bounds."""
     if not start.isValid() or not end.isValid():
         return None
     if start > end:
@@ -253,6 +278,46 @@ def clamp_range(
     if start > end:
         return None
     return DateRange(start, end)
+
+
+def clamp_resize_end(
+    fixed_start: QDate,
+    end: QDate,
+    proj_start: QDate,
+    proj_end: QDate,
+) -> Optional[DateRange]:
+    """Clamp only the trailing edge; keep the start fixed (resize-right handle)."""
+    if not fixed_start.isValid() or not end.isValid():
+        return None
+    if end < fixed_start:
+        end = fixed_start
+    if proj_end.isValid() and end > proj_end:
+        end = proj_end
+    if proj_start.isValid() and fixed_start < proj_start:
+        return None
+    if end < fixed_start:
+        return None
+    return DateRange(fixed_start, end)
+
+
+def clamp_resize_start(
+    start: QDate,
+    fixed_end: QDate,
+    proj_start: QDate,
+    proj_end: QDate,
+) -> Optional[DateRange]:
+    """Clamp only the leading edge; keep the end fixed (resize-left handle)."""
+    if not start.isValid() or not fixed_end.isValid():
+        return None
+    if start > fixed_end:
+        start = fixed_end
+    if proj_start.isValid() and start < proj_start:
+        start = proj_start
+    if proj_end.isValid() and fixed_end > proj_end:
+        return None
+    if start > fixed_end:
+        return None
+    return DateRange(start, fixed_end)
 
 
 def set_node_range(node: TestNode, start: QDate, end: QDate) -> None:

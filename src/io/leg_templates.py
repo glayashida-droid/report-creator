@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from src.io.project_mirror import default_data_root
+from src.io.network_sources import leg_templates_directory
 from src.models.project_state import ProjectState, TestLeg, TestNode, TestStandard
 from src.parsers.db_loader import hydrate_legs_from_catalog
 
@@ -26,8 +26,8 @@ class TemplateNameError(ValueError):
     pass
 
 
-def default_templates_dir(data_root: Optional[Path] = None) -> Path:
-    return (data_root or default_data_root()) / "leg_templates"
+def default_templates_dir(templates_dir: Optional[Path] = None) -> Path:
+    return templates_dir if templates_dir is not None else leg_templates_directory()
 
 
 def sanitize_template_filename(name: str) -> str:

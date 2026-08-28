@@ -15,7 +15,7 @@ from openpyxl.utils.cell import range_boundaries
 
 from application_parser.sample_id_labels import is_sample_id_column_key
 
-from src.io.project_mirror import repo_root
+from src.io.network_sources import data_table_templates_directory
 from src.io.test_photos import TEST_GROUP_DIR, is_usable_test_name, test_dir
 from src.models.project_state import DataTableRef, TestNode
 
@@ -28,7 +28,7 @@ _WPS_APP_NAMES = ("wpsoffice", "WPS Office", "kingsoft")
 
 
 def default_templates_dir() -> Path:
-    return repo_root() / "templates" / "data_tables"
+    return data_table_templates_directory()
 
 
 class DataTableError(Exception):

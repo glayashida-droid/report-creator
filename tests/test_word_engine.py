@@ -12,6 +12,7 @@ from src.generators.word_engine import (
     WordGenerator,
     _WIDTHS_COVER_INFO,
     _WIDTHS_SAMPLE_LIST,
+    _WIDTHS_SUMMARY,
 )
 from src.models.project_state import (
     DataTableRef,
@@ -444,6 +445,62 @@ def test_word_engine_data_table_two_row_header_by_sample_id(tmp_path):
         assert trPr is not None and trPr.find(qn("w:tblHeader")) is not None
     trPr_data = data_tbl.rows[2]._tr.find(qn("w:trPr"))
     assert trPr_data is None or trPr_data.find(qn("w:tblHeader")) is None
+
+
+def test_summary_table_testing_period_column(tmp_path):
+    state = ProjectState(
+        project_id="A2260613686101",
+        application_fields={"申请单号": "A22606136861", "样品名称": "ECU"},
+    )
+    node = TestNode(
+        test_name="振动试验",
+        start_date="2026-07-03",
+        end_date="2026-07-23",
+        samples=[TestSample(sample_id="A01", result=TestResult.PASS)],
+    )
+    leg = TestLeg(leg_id="L1", leg_name="Leg 1", nodes=[node])
+    state.legs.append(leg)
+
+    templates = {
+        "中文": Path("templates/template_zh.docx"),
+        "英文": Path("templates/template_en.docx"),
+        "中英文": Path("templates/template_ze.docx"),
+    }
+
+    for lang, header, period in [
+        ("中文", "检测时间", "2026.07.03~2026.07.23"),
+        ("英文", "Testing Period", "2026.07.03~2026.07.23"),
+        ("中英文", "检测时间\nTesting Period", "2026.07.03~2026.07.23"),
+    ]:
+        template_path = templates[lang]
+        if not template_path.exists():
+            template_path = Path("templates/template_raw.docx")
+        out_path = Path(tmp_path) / f"summary_{lang}.docx"
+        WordGenerator(str(template_path)).generate(
+            state, str(out_path), report_language=lang
+        )
+        doc = Document(str(out_path))
+        summary = None
+        for t in doc.tables:
+            headers = [(c.text or "").strip() for c in t.rows[0].cells]
+            if len(headers) != 6:
+                continue
+            joined = " ".join(headers)
+            if ("检测项目" in joined or "Test Item" in joined) and (
+                "检测时间" in joined or "Testing Period" in joined
+            ):
+                summary = t
+                break
+        assert summary is not None, lang
+        assert len(summary.columns) == 6, lang
+        assert _grid_widths(summary) == list(_WIDTHS_SUMMARY)
+        headers = [(c.text or "").strip() for c in summary.rows[0].cells]
+        assert headers[3] == header, lang
+        assert summary.rows[1].cells[3].text.strip() == period, lang
+
+
+def test_fmt_period_zero_pads_month():
+    assert WordGenerator._fmt_period("2026-01-05", "2026-09-07") == "2026.01.05~2026.09.07"
 
 
 def test_custom_report_no_in_document(tmp_path):

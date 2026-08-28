@@ -294,6 +294,20 @@ QLabel#errorLabel {{
     color: {MAGENTA};
 }}
 
+QCheckBox#connectionStatus {{
+    color: {TEXT_DIM};
+    spacing: 4px;
+}}
+
+QCheckBox#connectionStatus::indicator {{
+    width: 14px;
+    height: 14px;
+}}
+
+QCheckBox#connectionStatus:checked {{
+    color: {CYAN};
+}}
+
 QPushButton#mirrorOpenLink {{
     background: transparent;
     border: none;
@@ -470,6 +484,10 @@ QComboBox QLineEdit {{
     border: none;
     padding: 0px;
     min-height: 18px;
+}}
+
+QComboBox#nodeTestCombo QLineEdit {{
+    padding: 2px 4px 2px 6px;
 }}
 
 QComboBox QAbstractItemView {{

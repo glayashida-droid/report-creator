@@ -1,0 +1,25 @@
+{
+  "network_sources": {
+    "equipment_list": {
+      "directory": "smb://10.10.31.8/材料实验室a/01-E&E/D01 设备信息",
+      "file_prefix": "01-设备清单",
+      "extension": ".xlsx"
+    },
+    "standards_library": {
+      "file": "smb://10.10.31.8/材料实验室b/车载电子/report_creator/standard sheet/标准库.xlsx"
+    },
+    "leg_templates": {
+      "directory": "smb://10.10.31.8/材料实验室b/车载电子/report_creator/leg_templates"
+    },
+    "report_templates": {
+      "directory": "smb://10.10.31.8/材料实验室b/车载电子/report_creator/report_templates"
+    },
+    "data_tables": {
+      "directory": "smb://10.10.31.8/材料实验室b/车载电子/report_creator/data_tables"
+    }
+  },
+  "connection_check": {
+    "retry_interval_disconnected_sec": 30,
+    "retry_interval_connected_sec": 60
+  }
+}

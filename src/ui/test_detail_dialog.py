@@ -2024,7 +2024,7 @@ class TestDetailDialog(QDialog):
         btn_upload = QPushButton("1 · 上传现有 Excel")
         btn_free = QPushButton("2 · 自由编辑")
         btn_template = QPushButton("3 · 模版")
-        btn_template.setToolTip("从 templates/data_tables/ 复制一份，并默认写入当前样品编号")
+        btn_template.setToolTip("从公盘数据表模板复制一份，并默认写入当前样品编号")
         for btn in (btn_upload, btn_free, btn_template):
             btn.setObjectName("dataTableAddChoice")
         layout.addWidget(btn_upload)
@@ -2099,7 +2099,7 @@ class TestDetailDialog(QDialog):
             QMessageBox.information(
                 self,
                 "模版",
-                "templates/data_tables/ 中暂无可用的 .xlsx 模版。",
+                "公盘 data_tables 目录中暂无可用的 .xlsx 模版。",
             )
             return
         dlg = DataTableTemplateDialog(templates, self)

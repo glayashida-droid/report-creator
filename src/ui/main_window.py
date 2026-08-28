@@ -1,3 +1,4 @@
+import os
 import sys
 import re
 import subprocess
@@ -9,9 +10,9 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QGroupBox, QSplitter, QComboBox, QMessageBox,
     QDateEdit, QFileDialog, QFormLayout, QScrollArea, QSizePolicy, QFrame,
-    QInputDialog, QButtonGroup, QToolButton, QDialog,
+    QInputDialog, QButtonGroup, QToolButton, QDialog, QCheckBox,
 )
-from PySide6.QtCore import Qt, QDate, QThread, Signal, QEvent, QObject, QSize
+from PySide6.QtCore import Qt, QDate, QThread, Signal, QEvent, QObject, QSize, QTimer
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
@@ -21,6 +22,13 @@ from src.application_ingest import apply_application_data
 from application_parser import parse_application, prepare_excel_bytes
 from src.parsers.pdf_parser import QuotationParser
 from src.io.project_mirror import incremental_copy, list_saved_projects, local_project_dir
+from src.io.network_sources import (
+    NetworkSourcesConfig,
+    ProbeResult,
+    load_network_sources_config,
+    probe_network_sources,
+    resolve_report_template_for_language,
+)
 from src.io.leg_templates import (
     TemplateExistsError,
     TemplateNameError,
@@ -70,6 +78,17 @@ class _GroupTitleButtonHost(QObject):
         btn.raise_()
 
 
+class NetworkProbeWorker(QThread):
+    finished = Signal(object)
+
+    def __init__(self, config: NetworkSourcesConfig, parent=None):
+        super().__init__(parent)
+        self._config = config
+
+    def run(self):
+        self.finished.emit(probe_network_sources(self._config))
+
+
 class MirrorWorker(QThread):
     succeeded = Signal(int, str)
     failed = Signal(int, str)
@@ -92,7 +111,7 @@ class MirrorWorker(QThread):
             self.failed.emit(self._generation, str(e))
 
 
-APP_VERSION = "1.2.3"
+APP_VERSION = "1.3"
 # Calendar popup floor. Dates before this are treated as "no end date"
 # because QDateEdit may clamp the blank sentinel to 1752-09-14.
 _EARLIEST_REAL_YEAR = 1990
@@ -117,8 +136,15 @@ class MainWindow(QMainWindow):
         self._mirror_gen = 0
         self._abandoned_workers = []
         self._is_dirty = False
+        self._network_config = load_network_sources_config()
+        self._network_probe_worker = None  # type: Optional[NetworkProbeWorker]
+        self._network_all_connected = False
+        self._connection_timer = QTimer(self)
+        self._connection_timer.timeout.connect(self._start_network_probe)
 
         self.init_ui()
+        self._start_network_probe()
+        self._schedule_network_probe()
 
     def init_ui(self):
         central_widget = QWidget()
@@ -177,6 +203,18 @@ class MainWindow(QMainWindow):
         meta_row.setSpacing(8)
         self.lbl_project_id = QLabel("项目号: —")
         self.lbl_project_id.setObjectName("dimLabel")
+        self.chk_equipment_conn = QCheckBox("设备清单连接ok")
+        self.chk_equipment_conn.setObjectName("connectionStatus")
+        self.chk_equipment_conn.setEnabled(False)
+        self.chk_standards_conn = QCheckBox("标准库连接ok")
+        self.chk_standards_conn.setObjectName("connectionStatus")
+        self.chk_standards_conn.setEnabled(False)
+        self.chk_templates_conn = QCheckBox("模板连接ok")
+        self.chk_templates_conn.setObjectName("connectionStatus")
+        self.chk_templates_conn.setEnabled(False)
+        self.chk_mirror_conn = QCheckBox("本地镜像ok")
+        self.chk_mirror_conn.setObjectName("connectionStatus")
+        self.chk_mirror_conn.setEnabled(False)
         self.lbl_mirror_status = QLabel("")
         self.lbl_mirror_status.setObjectName("dimLabel")
         self.btn_open_local = QPushButton("打开")
@@ -186,6 +224,13 @@ class MainWindow(QMainWindow):
         self.btn_open_local.setVisible(False)
         self.btn_open_local.setToolTip("在访达中打开本地镜像文件夹")
         self.btn_open_local.clicked.connect(self._open_local_project_folder)
+        connection_row = QHBoxLayout()
+        connection_row.setContentsMargins(0, 0, 0, 0)
+        connection_row.setSpacing(10)
+        connection_row.addWidget(self.chk_equipment_conn)
+        connection_row.addWidget(self.chk_standards_conn)
+        connection_row.addWidget(self.chk_templates_conn)
+        connection_row.addWidget(self.chk_mirror_conn)
         mirror_row = QHBoxLayout()
         mirror_row.setContentsMargins(0, 0, 0, 0)
         mirror_row.setSpacing(4)
@@ -193,6 +238,7 @@ class MainWindow(QMainWindow):
         mirror_row.addWidget(self.btn_open_local)
         meta_row.addWidget(self.lbl_project_id)
         meta_row.addStretch()
+        meta_row.addLayout(connection_row)
         meta_row.addLayout(mirror_row)
         top_outer.addLayout(meta_row)
 
@@ -467,6 +513,10 @@ class MainWindow(QMainWindow):
         if self._mirror_worker is not None:
             self._mirror_worker.requestInterruption()
             self._mirror_worker.wait(2000)
+        if self._network_probe_worker is not None:
+            self._network_probe_worker.requestInterruption()
+            self._network_probe_worker.wait(2000)
+        self._connection_timer.stop()
         for worker in list(self._abandoned_workers):
             worker.requestInterruption()
             worker.wait(500)
@@ -913,6 +963,8 @@ class MainWindow(QMainWindow):
 
     def _set_mirror_status(self, text, kind="dim"):
         names = {"dim": "dimLabel", "ok": "hintLabel", "err": "errorLabel"}
+        if kind == "ok":
+            text = ""
         self.lbl_mirror_status.setText(text or "")
         self.lbl_mirror_status.setObjectName(names.get(kind, "dimLabel"))
         self.lbl_mirror_status.style().unpolish(self.lbl_mirror_status)
@@ -923,13 +975,56 @@ class MainWindow(QMainWindow):
             and self._local_path.is_dir()
         )
         self.btn_open_local.setVisible(ready)
+        self.chk_mirror_conn.setChecked(ready)
+
+    def _start_network_probe(self):
+        if self._network_probe_worker is not None and self._network_probe_worker.isRunning():
+            return
+        worker = NetworkProbeWorker(self._network_config, self)
+        worker.finished.connect(self._on_network_probe_done)
+        self._network_probe_worker = worker
+        worker.start()
+
+    def _on_network_probe_done(self, result: ProbeResult):
+        loader = self.leg_graph.db_loader
+        loader.apply_network_probe(
+            standards_path=result.standards_path,
+            standards_ok=result.standards_ok,
+            equipment_path=result.equipment_path,
+            equipment_ok=result.equipment_ok,
+        )
+        self._network_all_connected = (
+            result.equipment_ok and result.standards_ok and result.templates_ok
+        )
+        self.chk_equipment_conn.setChecked(result.equipment_ok)
+        self.chk_standards_conn.setChecked(result.standards_ok)
+        self.chk_templates_conn.setChecked(result.templates_ok)
+        self.chk_equipment_conn.setToolTip(
+            "" if result.equipment_ok else (result.equipment_error or "设备清单未连接")
+        )
+        self.chk_standards_conn.setToolTip(
+            "" if result.standards_ok else (result.standards_error or "标准库未连接")
+        )
+        self.chk_templates_conn.setToolTip(
+            "" if result.templates_ok else (result.templates_error or "模板未连接")
+        )
+        self._schedule_network_probe()
+
+    def _schedule_network_probe(self):
+        check = self._network_config.connection_check
+        interval_ms = (
+            check.retry_interval_connected_sec
+            if self._network_all_connected
+            else check.retry_interval_disconnected_sec
+        ) * 1000
+        self._connection_timer.start(max(interval_ms, 1000))
 
     def _open_local_project_folder(self):
         path = self._local_path
         if path is None or not path.is_dir():
             QMessageBox.warning(self, "提示", "本地镜像尚未就绪")
             return
-        subprocess.run(["open", str(path)])
+        _open_in_file_manager(path)
 
     def _drop_abandoned(self, worker):
         try:
@@ -964,7 +1059,7 @@ class MainWindow(QMainWindow):
         self._mirror_ready = True
         self._project_path = self._local_path
         self.state.project_path = str(self._local_path)
-        self._set_mirror_status("本地镜像完成", "ok")
+        self._set_mirror_status("", "ok")
 
     def _on_mirror_fail(self, generation, message):
         if generation != self._mirror_gen:
@@ -1037,7 +1132,7 @@ class MainWindow(QMainWindow):
         self._source_path = Path(loaded.source_path) if loaded.source_path else saved.local_path
         self._mirror_ready = True
         self._set_path_text(loaded.source_path or str(saved.local_path))
-        self._set_mirror_status("本地镜像完成", "ok")
+        self._set_mirror_status("", "ok")
         self._apply_state_to_ui()
         self._is_dirty = False
 
@@ -1110,7 +1205,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "导入失败", f"无法读取模板:\n{exc}")
             return
         try:
-            catalog = self.leg_graph.db_loader.load_standards() if self.leg_graph.db_loader else []
+            if not self.leg_graph.db_loader.is_standards_ready:
+                QMessageBox.warning(self, "提示", "标准库尚未就绪，无法导入模板")
+                return
+            catalog = self.leg_graph.db_loader.load_standards()
         except DuplicateStandardError as exc:
             QMessageBox.warning(self, "提示", duplicate_standard_message(exc))
             return
@@ -1176,16 +1274,11 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "无法导出", "报告编号不能为空")
                 return
 
-            template_by_lang = {
-                "中文": Path("templates/template_zh.docx"),
-                "英文": Path("templates/template_en.docx"),
-                "中英文": Path("templates/template_ze.docx"),
-            }
-            template_path = template_by_lang.get(lang, Path("templates/template_zh.docx"))
-            if not template_path.exists() and lang == "中文":
-                template_path = Path("templates/template_raw.docx")
-            if not template_path.exists():
-                QMessageBox.warning(self, "错误", f"找不到模板文件: {template_path}")
+            template_path = resolve_report_template_for_language(
+                lang, self._network_config
+            )
+            if template_path is None:
+                QMessageBox.warning(self, "错误", "找不到报告模板，请确认公盘模板连接正常")
                 return
 
             stem = WordGenerator.report_filename_stem(report_no)
@@ -1263,10 +1356,24 @@ class MainWindow(QMainWindow):
             msg.exec()
 
             if msg.clickedButton() == btn_open:
-                subprocess.run(["open", "-R", str(out_path)])
+                _open_in_file_manager(out_path, reveal=True)
 
         except Exception as e:
             QMessageBox.critical(self, "导出失败", f"生成报告时发生错误:\n{str(e)}")
+
+
+def _open_in_file_manager(path: Path, *, reveal: bool = False) -> None:
+    target = str(path)
+    if sys.platform == "win32":
+        if reveal:
+            subprocess.run(["explorer", "/select,", target], check=False)
+        else:
+            os.startfile(target)
+    elif sys.platform == "darwin":
+        args = ["open", "-R", target] if reveal else ["open", target]
+        subprocess.run(args, check=False)
+    else:
+        subprocess.run(["xdg-open", target], check=False)
 
 
 if __name__ == "__main__":

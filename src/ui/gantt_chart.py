@@ -7,7 +7,7 @@ from enum import Enum, auto
 from typing import List, Optional, Tuple
 
 from PySide6.QtCore import QDate, QPoint, QSize, Qt, Signal, QTimer
-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractSlider,
     QHBoxLayout,
@@ -25,15 +25,18 @@ from src.ui.gantt_utils import (
     DateRange,
     cascade_subsequent_nodes,
     clamp_range,
+    clamp_resize_end,
+    clamp_resize_start,
     compute_axis_range,
     day_offset,
-    equipment_tooltip,
     format_date,
+    label_tooltip_if_elided,
     leg_has_overlap,
     leg_range,
     node_range,
     overlapped_node_ids_in_leg,
     parse_date,
+    range_exceeds_project_bounds,
     restore_leg_dates,
     set_node_range,
     shift_scheduled_nodes,
@@ -205,6 +208,22 @@ class GanttLeftPanel(QWidget):
         self.setFixedWidth(LEFT_COL_WIDTH)
         self.setMouseTracking(True)
 
+    def _label_font(self, row: GanttRow) -> QFont:
+        font = self.font()
+        font.setBold(row.kind == "leg_header")
+        return font
+
+    def _label_max_width(self) -> int:
+        return max(self.width() - 20, 1)
+
+    def _label_display(self, row: GanttRow) -> tuple[str, str]:
+        full = (row.label or "").strip()
+        if not full:
+            return "", ""
+        fm = QFontMetrics(self._label_font(row))
+        elided = fm.elidedText(full, Qt.ElideRight, self._label_max_width())
+        return elided, label_tooltip_if_elided(full, elided)
+
     def set_view(self, view: GanttViewState) -> None:
         self._view = view
 
@@ -237,8 +256,7 @@ class GanttLeftPanel(QWidget):
             painter.setPen(QPen(_BORDER, 1))
             painter.drawLine(0, y + h - 1, self.width(), y + h - 1)
 
-            font = painter.font()
-            font.setBold(row.kind == "leg_header")
+            font = self._label_font(row)
             painter.setFont(font)
             if row.kind == "leg_header":
                 painter.setPen(_CYAN)
@@ -246,7 +264,8 @@ class GanttLeftPanel(QWidget):
                 painter.setPen(_OVERLAP)
             else:
                 painter.setPen(_TEXT if i == self._view.hover_row else _TEXT_DIM)
-            painter.drawText(8, y, self.width() - 12, h, Qt.AlignVCenter | Qt.AlignLeft, row.label)
+            elided, _ = self._label_display(row)
+            painter.drawText(8, y, self.width() - 12, h, Qt.AlignVCenter | Qt.AlignLeft, elided)
             y += h
 
     def mouseMoveEvent(self, event: QMouseEvent):
@@ -255,12 +274,18 @@ class GanttLeftPanel(QWidget):
             self._view.hover_row = row_index
             self.hover_changed.emit(row_index)
             self.update()
-            if 0 <= row_index < len(self._view.rows):
-                row = self._view.rows[row_index]
-                if row.kind == "test" and row.node is not None:
-                    QToolTip.showText(event.globalPosition().toPoint(), equipment_tooltip(row.node), self)
-                else:
-                    QToolTip.hideText()
+        if 0 <= row_index < len(self._view.rows):
+            _, tip = self._label_display(self._view.rows[row_index])
+            if tip:
+                QToolTip.showText(event.globalPosition().toPoint(), tip, self)
+            else:
+                QToolTip.hideText()
+        else:
+            QToolTip.hideText()
+
+    def leaveEvent(self, event):
+        QToolTip.hideText()
+        super().leaveEvent(event)
 
 
 class GanttTimelinePanel(QWidget):
@@ -282,6 +307,7 @@ class GanttTimelinePanel(QWidget):
         self._orig_leg_range: Optional[DateRange] = None
         self._drag_start_offset = 0
         self._create_anchor_day: Optional[QDate] = None
+        self._intended_range: Optional[DateRange] = None
 
         self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Minimum)
@@ -564,8 +590,10 @@ class GanttTimelinePanel(QWidget):
         if self._drag_mode == DragMode.NONE:
             return
 
-        if self._drag_mode == DragMode.MOVE_LEG:
-            self.schedule_changed.emit()
+        bounds_msg = self._drag_bounds_violation()
+        if bounds_msg and self._drag_leg is not None:
+            restore_leg_dates(self._drag_leg, self._drag_snapshot)
+            QMessageBox.warning(self, "日期无效", f"{bounds_msg}，已恢复原计划。")
         elif self._drag_leg is not None and leg_has_overlap(self._drag_leg):
             reply = QMessageBox.question(
                 self, "试验重叠", "试验重叠，是否后续试验顺延？",
@@ -593,8 +621,19 @@ class GanttTimelinePanel(QWidget):
         self._orig_range = None
         self._orig_leg_range = None
         self._create_anchor_day = None
+        self._intended_range = None
         self.setCursor(Qt.ArrowCursor)
         self.update()
+
+    def _drag_bounds_violation(self) -> Optional[str]:
+        if self._intended_range is None or not self._intended_range.is_valid():
+            return None
+        return range_exceeds_project_bounds(
+            self._intended_range.start,
+            self._intended_range.end,
+            self._view.proj_start,
+            self._view.proj_end,
+        )
 
     def _node_index(self, leg: TestLeg, node: Optional[TestNode]) -> int:
         if node is None:
@@ -612,6 +651,10 @@ class GanttTimelinePanel(QWidget):
             anchor = self._view.day_at_x(pos.x())
             new_start = anchor.addDays(-self._drag_start_offset)
             delta = self._orig_leg_range.start.daysTo(new_start)
+            duration = self._orig_leg_range.days() - 1
+            intended_start = self._orig_leg_range.start.addDays(delta)
+            intended_end = intended_start.addDays(duration)
+            self._intended_range = DateRange(intended_start, intended_end)
             shift_scheduled_nodes(
                 self._drag_leg, delta, self._view.proj_start, self._view.proj_end,
             )
@@ -625,6 +668,7 @@ class GanttTimelinePanel(QWidget):
             end = max(self._create_anchor_day, day)
             if start.daysTo(end) + 1 < MIN_BAR_DAYS:
                 end = start
+            self._intended_range = DateRange(start, end)
             clamped = clamp_range(start, end, self._view.proj_start, self._view.proj_end)
             if clamped:
                 set_node_range(self._drag_node, clamped.start, clamped.end)
@@ -643,15 +687,26 @@ class GanttTimelinePanel(QWidget):
             new_start = anchor.addDays(-self._drag_start_offset)
             duration = self._orig_range.days() - 1
             new_end = new_start.addDays(duration)
+            self._intended_range = DateRange(new_start, new_end)
             clamped = clamp_range(new_start, new_end, self._view.proj_start, self._view.proj_end)
             if clamped:
                 set_node_range(self._drag_node, clamped.start, clamped.end)
         elif self._drag_mode == DragMode.RESIZE_START:
-            clamped = clamp_range(day, current.end, self._view.proj_start, self._view.proj_end)
+            if self._orig_range is None:
+                return
+            self._intended_range = DateRange(day, self._orig_range.end)
+            clamped = clamp_resize_start(
+                day, self._orig_range.end, self._view.proj_start, self._view.proj_end,
+            )
             if clamped and clamped.days() >= MIN_BAR_DAYS:
                 set_node_range(self._drag_node, clamped.start, clamped.end)
         elif self._drag_mode == DragMode.RESIZE_END:
-            clamped = clamp_range(current.start, day, self._view.proj_start, self._view.proj_end)
+            if self._orig_range is None:
+                return
+            self._intended_range = DateRange(self._orig_range.start, day)
+            clamped = clamp_resize_end(
+                self._orig_range.start, day, self._view.proj_start, self._view.proj_end,
+            )
             if clamped and clamped.days() >= MIN_BAR_DAYS:
                 set_node_range(self._drag_node, clamped.start, clamped.end)
 

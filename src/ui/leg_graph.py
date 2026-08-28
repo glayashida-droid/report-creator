@@ -23,6 +23,29 @@ from src.io.data_tables import retarget_node_data_tables
 
 PLACEHOLDER_TEST = "请选择试验..."
 CUSTOM_TEST = CUSTOM_TEST_NAME
+LEG_CARD_WIDTH = 220
+
+
+def snap_combo_text_start(combo: QComboBox) -> None:
+    """Keep long test names anchored at the left; editable combos default cursor-at-end."""
+    le = combo.lineEdit()
+    if le is None:
+        return
+    le.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+    le.setCursorPosition(0)
+
+
+def sync_test_combo_tooltip(combo: QComboBox) -> None:
+    """Show the full test name on hover when the field may clip it."""
+    le = combo.lineEdit()
+    text = (le.text() if le is not None else combo.currentText() or "").strip()
+    if not is_usable_test_name(text):
+        tip = ""
+    else:
+        tip = text
+    combo.setToolTip(tip)
+    if le is not None:
+        le.setToolTip(tip)
 
 
 def insert_index_for_y(leg_widget, node_widgets, y: int) -> int:
@@ -53,6 +76,8 @@ def fill_test_combo(combo: QComboBox, pool: list, current_test: str = ""):
         combo.setCurrentIndex(0)
         combo.setEditText("")
     combo.blockSignals(False)
+    snap_combo_text_start(combo)
+    sync_test_combo_tooltip(combo)
 
 
 class TestNodeWidget(QFrame):
@@ -79,13 +104,12 @@ class TestNodeWidget(QFrame):
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(6)
 
-        # Two mirrored HBoxes keep outer edges flush whether or not the
-        # complete mark is visible (grid column spacing used to leave a 4px gap).
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
         top_row.setSpacing(4)
 
         self.combo = QComboBox()
+        self.combo.setObjectName("nodeTestCombo")
         self.combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.combo.setEditable(True)
         self.combo.setInsertPolicy(QComboBox.NoInsert)
@@ -95,8 +119,12 @@ class TestNodeWidget(QFrame):
         le = self.combo.lineEdit()
         le.setAcceptDrops(False)
         le.setPlaceholderText(PLACEHOLDER_TEST)
+        le.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        le.setTextMargins(2, 0, 4, 0)
+        le.editingFinished.connect(lambda: snap_combo_text_start(self.combo))
         fill_test_combo(self.combo, self.candidate_pool, self.node_data.test_name)
         self.combo.currentTextChanged.connect(self.on_test_changed)
+        self.combo.currentTextChanged.connect(lambda _text: sync_test_combo_tooltip(self.combo))
         self.combo.lineEdit().editingFinished.connect(self.on_test_edit_finished)
         self.combo.activated.connect(self.on_test_edit_finished)
         top_row.addWidget(self.combo, stretch=1)
@@ -132,7 +160,7 @@ class TestNodeWidget(QFrame):
         self._initializing = False
 
     def _refresh_complete_mark(self):
-        self.lbl_complete.setVisible(self.node_data.is_detail_complete())
+        self.lbl_complete.setText("✓" if self.node_data.is_detail_complete() else "")
 
     def _sync_detail_button(self):
         ok = is_usable_test_name(self._committed_name)
@@ -145,6 +173,12 @@ class TestNodeWidget(QFrame):
             return
         if not self.db_loader:
             QMessageBox.warning(self, "提示", "标准库尚未就绪，无法编辑明细")
+            return
+        if not self.db_loader.is_standards_ready:
+            QMessageBox.warning(self, "提示", "标准库尚未就绪，无法编辑明细")
+            return
+        if not self.db_loader.is_equipment_ready:
+            QMessageBox.warning(self, "提示", "设备清单尚未就绪，无法编辑明细")
             return
 
         try:
@@ -287,6 +321,7 @@ class TestNodeWidget(QFrame):
             self.combo.blockSignals(True)
             self.combo.setEditText(name)
             self.combo.blockSignals(False)
+            snap_combo_text_start(self.combo)
         self._commit_test_name(name)
 
 class LegWidget(QFrame):
@@ -304,8 +339,8 @@ class LegWidget(QFrame):
         self.setObjectName("legCard")
         self.setFrameShape(QFrame.StyledPanel)
         self.setFrameShadow(QFrame.Plain)
-        self.setMinimumWidth(220)
-        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
+        self.setFixedWidth(LEG_CARD_WIDTH)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Maximum)
         self.setAcceptDrops(True)
         self._drop_index: Optional[int] = None
         self._drop_indicator = QFrame(self)
@@ -497,7 +532,7 @@ class LegGraphArea(QWidget):
     def __init__(self, state_ref, parent=None):
         super().__init__(parent)
         self._state_ref = state_ref
-        self.db_loader = BaseDataLoader() # Initialize loader here
+        self.db_loader = BaseDataLoader(network_mode=True) # Initialize loader here
         self.leg_widgets = []
         self.init_ui()
 

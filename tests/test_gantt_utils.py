@@ -4,9 +4,12 @@ from PySide6.QtCore import QDate
 
 from src.models.project_state import ProjectState, TestLeg, TestNode
 from src.ui.gantt_utils import (
+    label_tooltip_if_elided,
     DateRange,
     cascade_subsequent_nodes,
     clamp_range,
+    clamp_resize_end,
+    clamp_resize_start,
     compute_axis_range,
     equipment_tooltip,
     find_leg_for_node,
@@ -18,6 +21,7 @@ from src.ui.gantt_utils import (
     overlapped_node_ids_in_leg,
     parse_date,
     ranges_overlap,
+    range_exceeds_project_bounds,
     restore_leg_dates,
     set_node_range,
     shift_scheduled_nodes,
@@ -39,6 +43,20 @@ def test_ranges_overlap_exclusive_endpoints():
     assert ranges_overlap(a, d)
 
 
+def test_range_exceeds_project_bounds():
+    proj_start = QDate(2026, 8, 19)
+    proj_end = QDate(2026, 8, 31)
+    assert range_exceeds_project_bounds(
+        QDate(2026, 8, 28), QDate(2026, 9, 2), proj_start, proj_end,
+    ) == "试验结束日期超出项目结束日期"
+    assert range_exceeds_project_bounds(
+        QDate(2026, 8, 15), QDate(2026, 8, 20), proj_start, proj_end,
+    ) == "试验开始日期超出项目开始日期"
+    assert range_exceeds_project_bounds(
+        QDate(2026, 8, 28), QDate(2026, 8, 31), proj_start, proj_end,
+    ) is None
+
+
 def test_clamp_range_respects_project_bounds():
     proj_start = QDate(2026, 8, 1)
     proj_end = QDate(2026, 8, 31)
@@ -46,6 +64,30 @@ def test_clamp_range_respects_project_bounds():
     assert clamped is not None
     assert clamped.start == proj_start
     assert clamped.end == QDate(2026, 8, 22)
+
+
+def test_clamp_resize_end_keeps_start_when_past_project_end():
+    proj_start = QDate(2026, 8, 17)
+    proj_end = QDate(2026, 8, 28)
+    fixed = QDate(2026, 8, 28)
+    clamped = clamp_resize_end(fixed, QDate(2026, 9, 5), proj_start, proj_end)
+    assert clamped == DateRange(fixed, proj_end)
+
+
+def test_clamp_resize_end_extends_within_project_window():
+    proj_start = QDate(2026, 8, 17)
+    proj_end = QDate(2026, 8, 31)
+    fixed = QDate(2026, 8, 28)
+    clamped = clamp_resize_end(fixed, QDate(2026, 8, 30), proj_start, proj_end)
+    assert clamped == DateRange(fixed, QDate(2026, 8, 30))
+
+
+def test_clamp_resize_start_keeps_end_when_before_project_start():
+    proj_start = QDate(2026, 8, 17)
+    proj_end = QDate(2026, 8, 28)
+    fixed = QDate(2026, 8, 28)
+    clamped = clamp_resize_start(QDate(2026, 8, 10), fixed, proj_start, proj_end)
+    assert clamped == DateRange(proj_start, fixed)
 
 
 def test_overlap_detection_in_leg():
@@ -208,6 +250,13 @@ def test_shift_scheduled_nodes_clamps_to_project_window():
     assert leg.nodes[1].end_date == "2026-08-31"
 
 
+def test_label_tooltip_if_elided():
+    assert label_tooltip_if_elided("M-05Mechanical Shock", "M-05Mechanical Sh…") == "M-05Mechanical Shock"
+    assert label_tooltip_if_elided("Leg 1", "Leg 1") == ""
+    assert label_tooltip_if_elided("", "Leg 1") == ""
+    assert label_tooltip_if_elided("  ", "Leg 1") == ""
+
+
 def test_equipment_tooltip():
     node = TestNode(test_name="振动", equipment_name="SHAED-A050 冲击台")
     assert "SHAED-A050" in equipment_tooltip(node)
@@ -223,7 +272,11 @@ def test_node_range_invalid():
 
 if __name__ == "__main__":
     test_ranges_overlap_exclusive_endpoints()
+    test_range_exceeds_project_bounds()
     test_clamp_range_respects_project_bounds()
+    test_clamp_resize_end_keeps_start_when_past_project_end()
+    test_clamp_resize_end_extends_within_project_window()
+    test_clamp_resize_start_keeps_end_when_before_project_start()
     test_overlap_detection_in_leg()
     test_would_node_overlap_in_leg()
     test_find_leg_for_node_and_format_warning()
@@ -235,6 +288,7 @@ if __name__ == "__main__":
     test_leg_range_envelope_ignores_unscheduled()
     test_shift_scheduled_nodes_keeps_durations_and_gaps()
     test_shift_scheduled_nodes_clamps_to_project_window()
+    test_label_tooltip_if_elided()
     test_equipment_tooltip()
     test_node_range_invalid()
     print("test_gantt_utils: ok")

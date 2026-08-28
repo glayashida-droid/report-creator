@@ -139,15 +139,69 @@ def hydrate_legs_from_catalog(legs: Sequence[TestLeg], catalog: Sequence[Dict[st
 
 
 class BaseDataLoader:
-    def __init__(self, db_folder: str = "database"):
+    def __init__(
+        self,
+        db_folder: str = "database",
+        *,
+        network_mode: bool = False,
+        standards_path: str | None = None,
+        equipment_path: str | None = None,
+    ):
         self.db_folder = db_folder
+        self.network_mode = network_mode
         self.standards_df = None
         self.equipments_df = None
         self._standard_images = None
         self._standards_mtime = None
+        self._equipments_mtime = None
+        self._standards_path = standards_path
+        self._equipment_path = equipment_path
+        self.standards_connected = False
+        self.equipment_connected = False
+        if not network_mode:
+            self._standards_path = standards_path or os.path.join(db_folder, "标准库.xlsx")
+            self._equipment_path = equipment_path or os.path.join(
+                db_folder, "01-设备清单.xlsx"
+            )
+            self.standards_connected = os.path.isfile(self._standards_path)
+            self.equipment_connected = os.path.isfile(self._equipment_path)
+
+    @property
+    def is_standards_ready(self) -> bool:
+        if self.network_mode:
+            return self.standards_connected
+        return bool(self._standards_path and os.path.isfile(self._standards_path))
+
+    @property
+    def is_equipment_ready(self) -> bool:
+        if self.network_mode:
+            return self.equipment_connected
+        return bool(self._equipment_path and os.path.isfile(self._equipment_path))
+
+    def apply_network_probe(
+        self,
+        *,
+        standards_path: str | None,
+        standards_ok: bool,
+        equipment_path: str | None,
+        equipment_ok: bool,
+    ) -> None:
+        if standards_path != self._standards_path:
+            self.standards_df = None
+            self._standard_images = None
+            self._standards_mtime = None
+        if equipment_path != self._equipment_path:
+            self.equipments_df = None
+            self._equipments_mtime = None
+        self._standards_path = standards_path
+        self._equipment_path = equipment_path
+        self.standards_connected = bool(standards_ok and standards_path)
+        self.equipment_connected = bool(equipment_ok and equipment_path)
 
     def load_standards(self) -> List[Dict[str, Any]]:
-        path = f"{self.db_folder}/标准库.xlsx"
+        if not self.is_standards_ready or not self._standards_path:
+            raise FileNotFoundError("标准库尚未就绪")
+        path = self._standards_path
         mtime = os.path.getmtime(path)
         if self.standards_df is None or mtime != self._standards_mtime:
             df = pd.read_excel(path)
@@ -167,9 +221,13 @@ class BaseDataLoader:
         return records
 
     def load_equipments(self) -> List[Dict[str, Any]]:
-        if self.equipments_df is None:
-            path = f"{self.db_folder}/01-设备清单.xlsx"
-            self.equipments_df = pd.read_excel(path)  # Removed skiprows=1 because columns are on the first row
+        if not self.is_equipment_ready or not self._equipment_path:
+            raise FileNotFoundError("设备清单尚未就绪")
+        path = self._equipment_path
+        mtime = os.path.getmtime(path)
+        if self.equipments_df is None or mtime != self._equipments_mtime:
+            self.equipments_df = pd.read_excel(path)
             self.equipments_df = self.equipments_df.fillna("")
+            self._equipments_mtime = mtime
 
         return self.equipments_df.to_dict("records")

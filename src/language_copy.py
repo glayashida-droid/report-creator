@@ -107,6 +107,22 @@ def raw_label(zh: str, en: str, language: str) -> str:
     return zh
 
 
+def table_header_label(zh: str, en: str, language: str, *, inline: bool = False) -> str:
+    """Word table headers: bilingual zh/en on separate lines unless inline."""
+    zh = (zh or "").strip()
+    en = (en or "").strip()
+    lang = (language or "中文").strip()
+    if lang == "英文":
+        return en
+    if lang == "中英文":
+        if zh and en:
+            if inline:
+                return f"{zh}{en}"
+            return f"{zh}\n{en}"
+        return zh or en
+    return zh
+
+
 def english_from_application(cn_value: str, en_value: str = "") -> str:
     """Prefer explicit EN (must be Han-free); else a CN value with no Han may serve as EN."""
     en = (en_value or "").strip()

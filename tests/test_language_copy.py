@@ -7,6 +7,7 @@ from src.language_copy import (
     is_custom_photo_stem,
     language_text,
     photo_caption,
+    table_header_label,
 )
 from src.models.project_state import TestResult
 
@@ -94,6 +95,14 @@ def test_photo_caption_data_and_unknown_use_filename():
     assert photo_caption("数据", "中英文") == ""
     assert photo_caption("预处理", "英文", file_stem="pre-01") == "pre-01"
     assert photo_caption("自定义夹", "中文") == ""
+
+
+def test_table_header_label_multiline():
+    assert table_header_label("检测时间", "Testing Period", "中英文") == "检测时间\nTesting Period"
+    assert table_header_label("检测时间", "Testing Period", "中文") == "检测时间"
+    assert table_header_label("检测时间", "Testing Period", "英文") == "Testing Period"
+    assert table_header_label("样品编号", "Sample No.", "中英文") == "样品编号\nSample No."
+    assert table_header_label("序号", "No.", "中英文") == "序号\nNo."
 
 
 def test_field_label_overview_and_dates_match_application_phrasing():
