@@ -131,7 +131,7 @@ def test_bilingual_export_join_and_zh_only_when_en_missing(tmp_path):
     )
     blob = texts + "\n" + tables
 
-    assert "合格 / Pass" in blob
+    assert "合格/Pass" in blob
     assert "试验前 / Before test" in blob
     assert "高温试验 / High temperature" in blob or "High temperature" in blob
     assert "中文条件正文" in blob

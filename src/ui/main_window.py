@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QGroupBox, QSplitter, QComboBox, QMessageBox,
     QDateEdit, QFileDialog, QFormLayout, QScrollArea, QSizePolicy, QFrame,
-    QInputDialog, QButtonGroup, QToolButton,
+    QInputDialog, QButtonGroup, QToolButton, QDialog,
 )
 from PySide6.QtCore import Qt, QDate, QThread, Signal, QEvent, QObject, QSize
 
@@ -33,6 +33,7 @@ from src.parsers.db_loader import DuplicateStandardError, duplicate_standard_mes
 from src.ui.leg_graph import LegGraphArea
 from src.ui.load_state_dialog import LoadStateDialog
 from src.ui.leg_template_dialog import ImportTemplateDialog
+from src.ui.save_success_dialog import SaveSuccessDialog
 from src.ui.candidate_pool import CandidatePoolList
 from src.ui.theme import polish_date_edit_calendar, refresh_icon, set_calendar_selectable_range
 from src.language_copy import field_label
@@ -375,7 +376,8 @@ class MainWindow(QMainWindow):
         self.right_panel = QGroupBox("项目明细")
         right_layout = QVBoxLayout(self.right_panel)
         self.leg_graph = LegGraphArea(self.state)
-        self.leg_graph.btn_save.clicked.connect(self.save_state)
+        # clicked(bool) must not map to save_state(show_success=…)
+        self.leg_graph.btn_save.clicked.connect(lambda: self.save_state())
         self.leg_graph.btn_load_state.clicked.connect(self.load_saved_state)
         self.leg_graph.btn_save_template.clicked.connect(self.save_leg_template)
         self.leg_graph.btn_import_template.clicked.connect(self.import_leg_template)
@@ -415,7 +417,53 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         self._apply_golden_split()
 
+    def _confirm_unsaved_exit(self):
+        """Ask how to leave with unsaved work. Returns 'exit', 'save', or 'back'."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("提示")
+        dlg.setModal(True)
+        root = QVBoxLayout(dlg)
+        root.setContentsMargins(20, 16, 20, 16)
+        root.setSpacing(16)
+        root.addWidget(QLabel("项目未保存，是否退出"))
+
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        btn_exit = QPushButton("直接退出")
+        btn_back = QPushButton("返回")
+        btn_save = QPushButton("保存并退出")
+        btn_save.setObjectName("accentButton")
+        for btn in (btn_exit, btn_back, btn_save):
+            btn.setMinimumWidth(110)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            row.addWidget(btn)
+        root.addLayout(row)
+
+        choice = {"value": "back"}
+
+        def _pick(value):
+            choice["value"] = value
+            dlg.accept()
+
+        btn_exit.clicked.connect(lambda: _pick("exit"))
+        btn_back.clicked.connect(lambda: _pick("back"))
+        btn_save.clicked.connect(lambda: _pick("save"))
+        btn_back.setDefault(True)
+        btn_back.setFocus()
+        dlg.exec()
+        return choice["value"]
+
     def closeEvent(self, event):
+        if self._has_unsaved_changes():
+            choice = self._confirm_unsaved_exit()
+            if choice == "back":
+                event.ignore()
+                return
+            if choice == "save":
+                if not self.save_state(show_success=False):
+                    event.ignore()
+                    return
+
         if self._mirror_worker is not None:
             self._mirror_worker.requestInterruption()
             self._mirror_worker.wait(2000)
@@ -789,7 +837,7 @@ class MainWindow(QMainWindow):
             self._sync_dates_to_state()
             self._update_duration_display(start, end)
             if source in (self.date_receive, self.date_start, self.date_end):
-                self._mark_dirty()
+                self._mark_dirty()  # no-op when no project is loaded
                 if self.leg_graph.is_gantt_mode():
                     self.leg_graph.gantt_chart.refresh()
         finally:
@@ -851,7 +899,13 @@ class MainWindow(QMainWindow):
     # ---------- dirty / mirror helpers ----------
 
     def _mark_dirty(self):
+        # Date-only edits with no loaded project are not savable — ignore them.
+        if not self.state.project_id:
+            return
         self._is_dirty = True
+
+    def _has_unsaved_changes(self):
+        return bool(self._is_dirty and self.state.project_id)
 
     def _on_structure_changed(self):
         self._mark_dirty()
@@ -919,7 +973,7 @@ class MainWindow(QMainWindow):
         self._set_mirror_status(f"镜像失败: {message}", "err")
 
     def _confirm_discard_if_dirty(self):
-        if not self._is_dirty:
+        if not self._has_unsaved_changes():
             return True
         reply = QMessageBox.question(
             self,
@@ -941,14 +995,14 @@ class MainWindow(QMainWindow):
 
     # ---------- save / load state / export ----------
 
-    def save_state(self):
+    def save_state(self, show_success=True):
         if not self.state.project_id:
             QMessageBox.warning(self, "提示", "请先加载项目")
-            return
+            return False
         self._sync_dates_to_state()
         if self.state.duplicate_test_names():
             warn_duplicate_test_names(self)
-            return
+            return False
         if self._local_path is None:
             self._local_path = local_project_dir(self.state.project_id)
         self._local_path.mkdir(parents=True, exist_ok=True)
@@ -956,7 +1010,9 @@ class MainWindow(QMainWindow):
         save_path = self._local_path / "project_state.json"
         self.state.save_to_file(str(save_path))
         self._is_dirty = False
-        QMessageBox.information(self, "已保存", f"项目已保存至:\n{save_path}")
+        if show_success:
+            SaveSuccessDialog(self).exec()
+        return True
 
     def load_saved_state(self):
         if not self._confirm_discard_if_dirty():
@@ -1106,6 +1162,20 @@ class MainWindow(QMainWindow):
             if not ok:
                 return
 
+            default_no = WordGenerator.default_report_no(self.state, lang)
+            report_no, ok = QInputDialog.getText(
+                self,
+                "请确认报告编号",
+                "请确认报告编号：",
+                text=default_no,
+            )
+            if not ok:
+                return
+            report_no = (report_no or "").strip()
+            if not report_no:
+                QMessageBox.warning(self, "无法导出", "报告编号不能为空")
+                return
+
             template_by_lang = {
                 "中文": Path("templates/template_zh.docx"),
                 "英文": Path("templates/template_en.docx"),
@@ -1118,7 +1188,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "错误", f"找不到模板文件: {template_path}")
                 return
 
-            out_name = f"{self.state.project_id}_Report.docx"
+            stem = WordGenerator.report_filename_stem(report_no)
+            out_name = f"{stem}.docx"
             project_path = self._local_path
 
             if project_path and project_path.is_dir():
@@ -1126,7 +1197,22 @@ class MainWindow(QMainWindow):
                 report_dir.mkdir(exist_ok=True)
                 out_path = report_dir / out_name
             else:
-                out_path = Path(".scratch") / out_name
+                report_dir = Path(".scratch")
+                report_dir.mkdir(parents=True, exist_ok=True)
+                out_path = report_dir / out_name
+
+            if out_path.exists():
+                reply = QMessageBox.question(
+                    self,
+                    "存在同名报告",
+                    f"已存在同名报告「{out_name}」，是否覆盖？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if reply == QMessageBox.Yes:
+                    out_path.unlink()
+                else:
+                    out_path = WordGenerator.next_duplicate_report_path(report_dir, stem)
 
             engine = WordGenerator(str(template_path))
             mode = self.combo_export_mode.currentText()
@@ -1159,11 +1245,11 @@ class MainWindow(QMainWindow):
                 )
                 return
 
-            report_no = WordGenerator.default_report_no(self.state, lang)
             engine.generate(
                 self.state, str(out_path),
                 project_path=target_project_path, leg_filter=leg_filter,
                 report_language=lang,
+                report_no=report_no,
             )
 
             msg = QMessageBox(self)

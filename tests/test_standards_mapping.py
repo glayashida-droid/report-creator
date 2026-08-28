@@ -51,6 +51,25 @@ def test_legacy_scalar_fields_still_resolve():
     assert stds[0].result_desc == "无腐蚀"
 
 
+def test_resolved_env_condition_prefers_node_then_standard():
+    node = TestNode(test_name="振动", env_condition="（23±5）℃，（50±25）%RH")
+    node.apply_standards([
+        _std("VW 2", "4.2", "振动", "条件", "描述", "要求"),
+    ])
+    assert node.resolved_env_condition() == "（23±5）℃，（50±25）%RH"
+
+    node2 = TestNode(test_name="振动")
+    node2.apply_standards([
+        TestStandard(
+            standard_id="VW 2",
+            chapter="4.2",
+            test_name="振动",
+            env_condition="(25±5)°C (50±25)%Rh",
+        )
+    ])
+    assert node2.resolved_env_condition() == "(25±5)°C (50±25)%Rh"
+
+
 if __name__ == "__main__":
     test_join_follows_selection_order_not_library_order()
     test_single_standard_keeps_result_desc_scalar()

@@ -69,12 +69,14 @@ def test_hydrate_copies_key_params_unconfirmed():
         "结果描述": "完好",
         "评价要求": "无损坏",
         "关键参数": "（70±2.5）℃",
+        "环境温湿度": "(25±5)°C (50±25)%Rh",
     }
     out = hydrate_standard_from_record(std, rec)
     assert out.key_params_defaults == ["（70±2.5）℃"]
     assert out.key_params == ["（70±2.5）℃"]
     assert out.key_params_confirmed is False
     assert out.needs_key_param_confirm() is True
+    assert out.env_condition == "(25±5)°C (50±25)%Rh"
 
 
 def _filled_node(**std_kwargs):

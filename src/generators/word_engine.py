@@ -17,7 +17,7 @@ from docx.shared import Inches, Pt, Twips
 from docx.text.paragraph import Paragraph
 from openpyxl.utils.cell import range_boundaries
 
-from src.io.data_tables import read_preview_snapshot, resolve_attachment_path
+from src.io.data_tables import infer_header_row_count, read_preview_snapshot, resolve_attachment_path
 from src.io.test_photos import TEMPLATE_ALBUMS, list_albums, list_photos
 from src.language_copy import (
     field_label,
@@ -87,10 +87,13 @@ class WordGenerator:
         project_path: str = None,
         leg_filter: str = None,
         report_language: str = "中文",
+        report_no: str | None = None,
     ):
         self._report_language = (report_language or "中文").strip() or "中文"
         doc = Document(self.template_path)
-        placeholders = self._build_placeholders(state, report_language=self._report_language)
+        placeholders = self._build_placeholders(
+            state, report_language=self._report_language, report_no=report_no
+        )
         self._replace_everywhere(doc, placeholders)
         self._tighten_cover_info_table(doc)
         if self._report_language == "中英文":
@@ -171,12 +174,20 @@ class WordGenerator:
 
     # ------------------------------------------------------------------ placeholders
 
-    def _build_placeholders(self, state: ProjectState, report_language: str = "中文") -> Dict[str, str]:
+    def _build_placeholders(
+        self,
+        state: ProjectState,
+        report_language: str = "中文",
+        report_no: str | None = None,
+    ) -> Dict[str, str]:
         lang = (report_language or "中文").strip() or "中文"
         # 中英文 cover: CN placeholders for 委托单位/地址; EN filled separately
         side = "英文" if lang == "英文" else "中文"
         visible = dict(state.iter_overview_fields(side))
-        report_no = self.default_report_no(state, report_language)
+        if report_no is None:
+            report_no = self.default_report_no(state, report_language)
+        else:
+            report_no = (report_no or "").strip()
         name_fallback = state.applicant_name_en if side == "英文" else state.applicant_name
         addr_fallback = state.applicant_address_en if side == "英文" else state.applicant_address
         sample_fallback = state.sample_name_en if side == "英文" else state.sample_name
@@ -234,6 +245,25 @@ class WordGenerator:
         if lang == "中英文":
             return f"{base}E"
         return f"{base}C"  # 中文
+
+    @staticmethod
+    def report_filename_stem(report_no: str) -> str:
+        from src.io.data_tables import sanitize_filename_stem
+
+        stem = sanitize_filename_stem(report_no)
+        if stem == "未命名数据表":
+            return "未命名报告"
+        return stem
+
+    @staticmethod
+    def next_duplicate_report_path(folder: Path, stem: str) -> Path:
+        """First available stem-2.docx, stem-3.docx, … under folder."""
+        n = 2
+        while True:
+            candidate = folder / f"{stem}-{n}.docx"
+            if not candidate.exists():
+                return candidate
+            n += 1
 
     @staticmethod
     def _fmt_date(value: Optional[str]) -> str:
@@ -528,28 +558,6 @@ class WordGenerator:
                     if (r, c) != (r0, c0):
                         covered.add((r, c))
         return covered
-
-    @staticmethod
-    def _infer_header_row_count(snap) -> int:
-        """Rows that touch a merge starting at/including the first sheet row = header band."""
-        if not snap.values:
-            return 0
-        origin_r = snap.origin_row or 1
-        max_header = 0
-        touched = False
-        for merge in snap.merges or []:
-            try:
-                min_c, min_r, max_c, max_r = range_boundaries(merge)
-            except Exception:
-                continue
-            r0 = min_r - origin_r
-            r1 = max_r - origin_r
-            if r0 <= 0 <= r1 or r0 == 0:
-                touched = True
-                max_header = max(max_header, r1)
-        if touched:
-            return max_header + 1
-        return 1
 
     @staticmethod
     def _apply_snapshot_merges(table, snap) -> None:
@@ -925,6 +933,10 @@ class WordGenerator:
             for i, v in enumerate(vals):
                 self._set_cell_text(table.rows[idx].cells[i], v)
 
+    def _env_condition_text(self, node: TestNode) -> str:
+        text = node.resolved_env_condition()
+        return text or ENV_CONDITION_TEXT
+
     def _test_item_label(self, node: TestNode) -> str:
         zh = (node.test_name or "").strip()
         en = (node.joined_test_item() or "").strip()
@@ -1018,7 +1030,7 @@ class WordGenerator:
         self._add_para_before(
             doc,
             anchor,
-            f"（1）{self._L('检测环境条件', 'Test environment')}：{ENV_CONDITION_TEXT}",
+            f"（1）{self._L('检测环境条件', 'Test environment')}：{self._env_condition_text(node)}",
             size=SIZE_BODY,
         )
 
@@ -1272,7 +1284,7 @@ class WordGenerator:
                 continue
             if not snap.values:
                 continue
-            title = (ref.title or path.stem).strip()
+            title = Path(ref.title or path.stem).stem.strip()
             if title:
                 self._add_para_before(
                     doc, anchor, title, size=SIZE_BODY, align=WD_ALIGN_PARAGRAPH.CENTER
@@ -1291,7 +1303,7 @@ class WordGenerator:
                         continue
                     val = row[c_i] if c_i < len(row) else ""
                     self._set_cell_text(table.rows[r_i].cells[c_i], val)
-            n_header = self._infer_header_row_count(snap)
+            n_header = infer_header_row_count(snap)
             for i in range(min(n_header, rows)):
                 self._set_row_as_tbl_header(table.rows[i])
 

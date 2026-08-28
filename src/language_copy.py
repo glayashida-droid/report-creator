@@ -73,7 +73,7 @@ def format_conclusion(result: Union[TestResult, str, None], language: str) -> st
     if lang == "中英文":
         if normalized is TestResult.NA:
             return "N/A"
-        return f"{zh} / {en}"
+        return f"{zh}/{en}"
     return zh
 
 

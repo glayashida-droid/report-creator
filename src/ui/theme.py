@@ -493,6 +493,11 @@ QPushButton {{
     min-height: 22px;
 }}
 
+QPushButton#dataTableAddChoice {{
+    text-align: left;
+    padding-left: 28px;
+}}
+
 QPushButton:hover {{
     background-color: {BG_HOVER};
     border: 1px solid {CYAN};

@@ -4,7 +4,7 @@ from PySide6.QtCore import QDate, QPoint
 from PySide6.QtWidgets import QApplication, QComboBox
 
 from src.models.project_state import ProjectState, TestLeg, TestNode
-from src.ui.leg_graph import CUSTOM_TEST, PLACEHOLDER_TEST, LegGraphArea, fill_test_combo, insert_index_for_y
+from src.ui.leg_graph import PLACEHOLDER_TEST, LegGraphArea, fill_test_combo, insert_index_for_y
 from src.ui.gantt_chart import LEG_BAR_HEIGHT, DragMode, GanttChartWidget
 from src.ui.gantt_utils import leg_range, node_range
 
@@ -80,7 +80,7 @@ def test_toolbar_save_load_use_detail_labels():
     assert area.btn_load_state.text() == "加载明细"
 
 
-def test_combo_includes_custom_and_keeps_typed_name():
+def test_combo_keeps_typed_name_without_custom_option():
     _app()
     combo = QComboBox()
     combo.setEditable(True)
@@ -90,11 +90,11 @@ def test_combo_includes_custom_and_keeps_typed_name():
     assert "振动" in texts
     assert "机械冲击" in texts
     assert "盐雾" in texts
-    assert texts[-1] == CUSTOM_TEST
+    assert "自定义" not in texts
     assert combo.currentText() == "盐雾"
-    fill_test_combo(combo, ["振动"], CUSTOM_TEST)
+    fill_test_combo(combo, ["振动"], "自定义")
     assert combo.currentText() == ""
-    assert combo.itemText(combo.count() - 1) == CUSTOM_TEST
+    assert "自定义" not in [combo.itemText(i) for i in range(combo.count())]
 
 
 def test_gantt_follows_state_reassignment():
@@ -450,7 +450,7 @@ def test_gantt_axis_extends_past_last_bar():
 if __name__ == "__main__":
     test_reloaded_nodes_get_db_loader()
     test_added_nodes_get_db_loader()
-    test_combo_includes_custom_and_keeps_typed_name()
+    test_combo_keeps_typed_name_without_custom_option()
     test_gantt_follows_state_reassignment()
     test_gantt_marks_overlapping_nodes()
     test_gantt_leg_bar_is_move_only()

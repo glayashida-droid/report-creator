@@ -58,6 +58,7 @@ class TestStandard(BaseModel):
     result_desc_en: str = ""
     evaluation_req: str = ""
     evaluation_req_en: str = ""
+    env_condition: str = ""  # library 「环境温湿度」
     images: List[bytes] = Field(default_factory=list)
     key_params: List[str] = Field(default_factory=list)
     key_params_defaults: List[str] = Field(default_factory=list)
@@ -135,6 +136,7 @@ class TestNode(BaseModel):
     equipments: List[TestEquipment] = Field(default_factory=list)
     start_date: Optional[str] = None
     end_date: Optional[str] = None
+    env_condition: Optional[str] = None  # test environment; from standard library or user edit
     samples: List[TestSample] = Field(default_factory=list)
     data_tables: List[DataTableRef] = Field(default_factory=list)
 
@@ -195,6 +197,14 @@ class TestNode(BaseModel):
 
     def joined_test_item(self) -> str:
         return "；".join(s.test_item for s in self.resolved_standards() if (s.test_item or "").strip())
+
+    def resolved_env_condition(self) -> str:
+        if self._has_text(self.env_condition):
+            return str(self.env_condition).strip()
+        for std in self.resolved_standards():
+            if self._has_text(std.env_condition):
+                return str(std.env_condition).strip()
+        return ""
 
     def apply_standards(self, picked: List[TestStandard]) -> None:
         """Persist selection order. Concatenate method/conditions/eval; never smash result_desc."""

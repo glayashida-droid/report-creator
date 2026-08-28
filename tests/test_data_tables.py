@@ -10,6 +10,7 @@ from src.io.data_tables import (
     create_blank_workbook,
     delete_attachment,
     import_sample_ids,
+    infer_header_row_count,
     list_data_table_templates,
     open_attachment,
     read_preview_snapshot,
@@ -102,7 +103,7 @@ def test_upload_copies_xlsx_and_titles_from_filename():
         src.parent.mkdir()
         _write_bbox_fixture(src)
         ref = upload_existing_xlsx(root, "高温试验", src)
-        assert ref.title == "工况记录表.xlsx"
+        assert ref.title == "工况记录表"
         dest = root / ref.relative_path
         assert dest.is_file()
         assert dest.parent == attachment_dir(root, "高温试验")
@@ -118,8 +119,8 @@ def test_upload_same_name_gets_suffix_not_overwrite():
         _write_bbox_fixture(src)
         first = upload_existing_xlsx(root, "高温试验", src)
         second = upload_existing_xlsx(root, "高温试验", src)
-        assert first.title == "同名.xlsx"
-        assert second.title == "同名.xlsx"
+        assert first.title == "同名"
+        assert second.title == "同名"
         assert first.relative_path != second.relative_path
         assert (root / first.relative_path).is_file()
         assert (root / second.relative_path).is_file()
@@ -234,6 +235,57 @@ def test_import_sample_ids_starts_below_multi_row_header():
         wb.close()
 
 
+def test_infer_header_row_count_two_row_header_without_vertical_merge():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "two_header.xlsx"
+        wb = Workbook()
+        ws = wb.active
+        ws.merge_cells("B1:D1")
+        ws["B1"] = "试验后 after test"
+        ws["B2"] = "桥路电阻"
+        ws["C2"] = "短路电阻"
+        ws["D2"] = "绝缘电阻"
+        ws["A3"] = "A22607480801-A01"
+        wb.save(path)
+        wb.close()
+        snap = read_preview_snapshot(path)
+        assert infer_header_row_count(snap) == 2
+
+
+def test_infer_header_row_count_sample_no_label_with_merge_band():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "merge_header.xlsx"
+        wb = Workbook()
+        ws = wb.active
+        ws["A1"] = "样品编号 Sample No."
+        ws.merge_cells("A1:A4")
+        ws["B1"] = "试验前"
+        ws["E1"] = "试验后"
+        ws.merge_cells("B1:D1")
+        ws.merge_cells("E1:G1")
+        ws["B2"] = "Before test"
+        ws["E2"] = "After test"
+        ws.merge_cells("B2:D2")
+        ws.merge_cells("E2:G2")
+        ws["B3"] = "桥路电阻"
+        ws["C3"] = "短路电阻"
+        ws["D3"] = "绝缘电阻"
+        ws["E3"] = "桥路电阻"
+        ws["F3"] = "短路电阻"
+        ws["G3"] = "绝缘电阻"
+        ws["B4"] = "(Ω)"
+        ws["C4"] = "(Ω)"
+        ws["D4"] = "(MΩ)"
+        ws["E4"] = "(Ω)"
+        ws["F4"] = "(Ω)"
+        ws["G4"] = "(MΩ)"
+        ws["A5"] = "TP-1"
+        wb.save(path)
+        wb.close()
+        snap = read_preview_snapshot(path)
+        assert infer_header_row_count(snap) == 4
+
+
 def test_import_sample_ids_missing_file_raises():
     try:
         import_sample_ids(Path("/tmp/no-such-data-table.xlsx"), ["A01"])
@@ -325,7 +377,7 @@ def test_copy_from_template_copies_and_titles_from_filename():
         src = templates / "高温记录.xlsx"
         _write_bbox_fixture(src)
         ref = copy_from_template(root, "高温试验", src)
-        assert ref.title == "高温记录.xlsx"
+        assert ref.title == "高温记录"
         dest = root / ref.relative_path
         assert dest.is_file()
         assert dest.parent == attachment_dir(root, "高温试验")

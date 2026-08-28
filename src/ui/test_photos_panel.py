@@ -453,7 +453,8 @@ class PhotoThumb(QFrame):
 
 
 class PhotoAlbumRow(QFrame):
-    changed = Signal()
+    # True when the album list or row order must be rebuilt (delete/rename folder).
+    changed = Signal(bool)
 
     def __init__(self, project_root: Path, test_name: str, album_name: str, project_id: str, parent=None):
         super().__init__(parent)
@@ -531,11 +532,10 @@ class PhotoAlbumRow(QFrame):
 
     def _on_thumb_removed(self):
         self.reload()
-        self.changed.emit()
+        self.changed.emit(False)
 
     def _on_thumb_renamed(self):
-        self.reload()
-        self.changed.emit()
+        self.changed.emit(False)
 
     def _ask_prefix(self, title, allow_keep_original=False):
         dlg = RenamePhotosDialog(
@@ -563,7 +563,7 @@ class PhotoAlbumRow(QFrame):
         else:
             copy_into_album(self.folder(), images, choice)
         self.reload()
-        self.changed.emit()
+        self.changed.emit(False)
 
     def _rename_all(self):
         photos = list_photos(self.project_root, self.test_name, self.album_name)
@@ -579,7 +579,7 @@ class PhotoAlbumRow(QFrame):
             QMessageBox.warning(self, "提示", str(exc))
             return
         self.reload()
-        self.changed.emit()
+        self.changed.emit(False)
 
     def _rename_folder(self):
         text, ok = QInputDialog.getText(self, "改名", "新的文件夹名称：", text=self.album_name)
@@ -592,7 +592,7 @@ class PhotoAlbumRow(QFrame):
             return
         self.album_name = text.strip()
         self.reload()
-        self.changed.emit()
+        self.changed.emit(True)
 
     def _delete_folder(self):
         answer = QMessageBox.question(
@@ -605,7 +605,7 @@ class PhotoAlbumRow(QFrame):
         if answer != QMessageBox.Yes:
             return
         delete_album(self.project_root, self.test_name, self.album_name)
-        self.changed.emit()
+        self.changed.emit(True)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -635,12 +635,21 @@ class PhotoAlbumRow(QFrame):
 class TestPhotosPanel(QWidget):
     changed = Signal()
 
-    def __init__(self, project_root, test_name, project_id, parent=None, project_state=None):
+    def __init__(
+        self,
+        project_root,
+        test_name,
+        project_id,
+        parent=None,
+        project_state=None,
+        form_scroll=None,
+    ):
         super().__init__(parent)
         self.project_root = Path(project_root) if project_root else None
         self.test_name = test_name or ""
         self.project_id = project_id or ""
         self.project_state = project_state
+        self._form_scroll = form_scroll
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -695,6 +704,16 @@ class TestPhotosPanel(QWidget):
             return False
         return True
 
+    def _reload_preserve_scroll(self):
+        bar = None
+        pos = 0
+        if self._form_scroll is not None:
+            bar = self._form_scroll.verticalScrollBar()
+            pos = bar.value()
+        self.reload()
+        if bar is not None:
+            QTimer.singleShot(0, lambda: bar.setValue(min(pos, bar.maximum())))
+
     def reload(self):
         while self.rows_layout.count():
             item = self.rows_layout.takeAt(0)
@@ -729,8 +748,9 @@ class TestPhotosPanel(QWidget):
             row.changed.connect(self._on_row_changed)
             self.rows_layout.addWidget(row)
 
-    def _on_row_changed(self):
-        self.reload()
+    def _on_row_changed(self, rebuild_rows=False):
+        if rebuild_rows:
+            self._reload_preserve_scroll()
         self.changed.emit()
 
     def _add_template(self):
@@ -745,7 +765,7 @@ class TestPhotosPanel(QWidget):
             return
         if not created and list_albums(self.project_root, self.test_name):
             QMessageBox.information(self, "提示", "模版四个文件夹都已存在。")
-        self.reload()
+        self._reload_preserve_scroll()
         self.changed.emit()
 
     def _add_custom(self):
@@ -761,5 +781,5 @@ class TestPhotosPanel(QWidget):
         except PhotoError as exc:
             QMessageBox.warning(self, "提示", str(exc))
             return
-        self.reload()
+        self._reload_preserve_scroll()
         self.changed.emit()

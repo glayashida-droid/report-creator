@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.utils.cell import range_boundaries
+
+from application_parser.sample_id_labels import is_sample_id_column_key
 
 from src.io.project_mirror import repo_root
 from src.io.test_photos import TEST_GROUP_DIR, is_usable_test_name, test_dir
@@ -126,7 +129,7 @@ def create_blank_workbook(
 def upload_existing_xlsx(
     project_root: Path, test_name: str, source: Path
 ) -> DataTableRef:
-    """Copy an existing .xlsx into the attachment folder; title is the filename."""
+    """Copy an existing .xlsx into the attachment folder; title is the filename stem."""
     test = _require_usable_test_name(test_name)
     src = Path(source)
     if not src.is_file():
@@ -137,7 +140,7 @@ def upload_existing_xlsx(
     stem = sanitize_filename_stem(src.stem)
     dest = unique_xlsx_path(folder, stem)
     shutil.copy2(src, dest)
-    title = src.name
+    title = stem
     rel = dest.relative_to(Path(project_root)).as_posix()
     return DataTableRef(title=title, relative_path=rel)
 
@@ -315,6 +318,86 @@ def _merges_in_bbox(
             continue
         out.append(str(rng))
     return out
+
+
+def _header_count_from_merges(snap: PreviewSnapshot) -> int:
+    """Rows touched by a merge starting at/including the first sheet row."""
+    if not snap.values:
+        return 0
+    origin_r = snap.origin_row or 1
+    max_header = 0
+    touched = False
+    for merge in snap.merges or []:
+        try:
+            min_c, min_r, max_c, max_r = range_boundaries(merge)
+        except Exception:
+            continue
+        r0 = min_r - origin_r
+        r1 = max_r - origin_r
+        if r0 <= 0 <= r1 or r0 == 0:
+            touched = True
+            max_header = max(max_header, r1)
+    if touched:
+        return max_header + 1
+    return 0
+
+
+def _merge_bottom_by_cell(snap: PreviewSnapshot) -> dict[tuple[int, int], int]:
+    """Grid (r,c) -> bottom row index of its merge (or r if unmerged)."""
+    origin_r = snap.origin_row or 1
+    origin_c = snap.origin_col or 1
+    out: dict[tuple[int, int], int] = {}
+    for merge in snap.merges or []:
+        try:
+            min_c, min_r, max_c, max_r = range_boundaries(merge)
+        except Exception:
+            continue
+        r0 = min_r - origin_r
+        r1 = max_r - origin_r
+        c0 = min_c - origin_c
+        c1 = max_c - origin_c
+        for r in range(r0, r1 + 1):
+            for c in range(c0, c1 + 1):
+                out[(r, c)] = max(out.get((r, c), r), r1)
+    return out
+
+
+def _header_count_from_sample_id(snap: PreviewSnapshot) -> int | None:
+    """First data row is below 样品编号 label band, or first non-label value in column A."""
+    values = snap.values or []
+    if not values:
+        return None
+    merge_bottom = _merge_bottom_by_cell(snap)
+
+    label_data_start: int | None = None
+    for r, row in enumerate(values):
+        for c, val in enumerate(row):
+            if is_sample_id_column_key((val or "").strip()):
+                bottom = merge_bottom.get((r, c), r)
+                start = bottom + 1
+                if label_data_start is None or start > label_data_start:
+                    label_data_start = start
+
+    if label_data_start is not None:
+        return label_data_start
+
+    for r, row in enumerate(values):
+        val = (row[0] if row else "").strip()
+        if not val or is_sample_id_column_key(val):
+            continue
+        return r
+    return None
+
+
+def infer_header_row_count(snap: PreviewSnapshot) -> int:
+    """How many top rows repeat as table headers on page breaks in Word export."""
+    if not snap.values:
+        return 0
+    merge_count = _header_count_from_merges(snap)
+    sample_count = _header_count_from_sample_id(snap)
+    if sample_count is not None:
+        return max(merge_count, sample_count, 1)
+    return max(merge_count, 1)
 
 
 def read_preview_snapshot(path: Path) -> PreviewSnapshot:

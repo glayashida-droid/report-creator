@@ -610,23 +610,29 @@ class TestDetailDialog(QDialog):
         outer.setContentsMargins(10, 10, 10, 10)
         outer.setSpacing(8)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
+        self._form_scroll = QScrollArea()
+        self._form_scroll.setWidgetResizable(True)
+        self._form_scroll.setFrameShape(QFrame.NoFrame)
         host = QWidget()
         layout = QVBoxLayout(host)
         layout.setContentsMargins(2, 2, 8, 2)
         layout.setSpacing(8)
         layout.setAlignment(Qt.AlignTop)
 
-        date_group, date_layout = self._make_group("日期设置")
+        date_group, date_layout = self._make_group("")
         date_row = QHBoxLayout()
+        date_row.setContentsMargins(12, 0, 0, 0)
         self.date_start = self._make_calendar_date_edit()
         self.date_end = self._make_calendar_date_edit()
+        self.txt_env_condition = QLineEdit()
+        self.txt_env_condition.setPlaceholderText("选择标准后自动填入")
         date_row.addWidget(QLabel("开始日期:"))
         date_row.addWidget(self.date_start)
         date_row.addWidget(QLabel("结束日期:"))
         date_row.addWidget(self.date_end)
+        date_row.addStretch(1)
+        date_row.addWidget(QLabel("检测环境:"))
+        date_row.addWidget(self.txt_env_condition, stretch=1)
         date_layout.addLayout(date_row)
         self._updating_dates = False
         self.date_start.dateChanged.connect(self._on_node_dates_changed)
@@ -810,11 +816,11 @@ class TestDetailDialog(QDialog):
             project_id,
             self.drawer_photos,
             project_state=self._project_state,
+            form_scroll=self._form_scroll,
         )
         self.photos_panel.changed.connect(self._refresh_photo_summary)
         self.drawer_photos.body_layout.addWidget(self.photos_panel)
         layout.addWidget(self.drawer_photos)
-        layout.addStretch(1)
 
         self.drawer_std.set_expanded(True)
         self.drawer_eq.set_expanded(False)
@@ -822,8 +828,8 @@ class TestDetailDialog(QDialog):
         self.drawer_photos.set_expanded(False)
         self._refresh_photo_summary()
 
-        scroll.setWidget(host)
-        outer.addWidget(scroll, stretch=1)
+        self._form_scroll.setWidget(host)
+        outer.addWidget(self._form_scroll, stretch=1)
 
         btn_layout = QHBoxLayout()
         btn_save = QPushButton("保存")
@@ -1087,6 +1093,7 @@ class TestDetailDialog(QDialog):
                 result_desc_en=result_desc_en,
                 evaluation_req=eval_req,
                 evaluation_req_en=eval_req_en,
+                env_condition=_cell_text(data.get("环境温湿度")),
                 images=list(images or []),
                 key_params=list(self._key_param_edits.get(key) or []),
                 key_params_defaults=list(self._key_param_defaults.get(key) or []),
@@ -1094,11 +1101,19 @@ class TestDetailDialog(QDialog):
             ))
         return picked
 
+    def _env_from_picked(self, picked):
+        for std in picked or []:
+            text = _cell_text(getattr(std, "env_condition", None))
+            if text:
+                return text
+        return ""
+
     def _refresh_std_summary(self):
         picked = self._selected_standards()
         if not picked:
             self.drawer_std.set_summary("未选择")
             self.txt_std_method.setText("")
+            self.txt_env_condition.clear()
             self._rebuild_cond_drawers([])
             self._rebuild_eval_drawers([])
             self._fill_result_desc_table([])
@@ -1111,6 +1126,9 @@ class TestDetailDialog(QDialog):
         self.drawer_std.set_summary(
             f"已选 {len(picked)} 项：{shown}" if shown else f"已选 {len(picked)} 项"
         )
+        env = self._env_from_picked(picked)
+        if env:
+            self.txt_env_condition.setText(env)
         scratch = TestNode(test_name=self.node_data.test_name or "")
         scratch.apply_standards(picked)
         self.txt_std_method.setText(scratch.joined_test_method())
@@ -1823,6 +1841,8 @@ class TestDetailDialog(QDialog):
         self._on_node_dates_changed()
         self._restore_standards()
         self._restore_equipments()
+        if self.node_data.env_condition:
+            self.txt_env_condition.setText(self.node_data.env_condition)
 
         for s in self.node_data.samples:
             self.add_sample_row(s.sample_id, s.result)
@@ -2004,7 +2024,9 @@ class TestDetailDialog(QDialog):
         btn_upload = QPushButton("1 · 上传现有 Excel")
         btn_free = QPushButton("2 · 自由编辑")
         btn_template = QPushButton("3 · 模版")
-        btn_template.setToolTip("从 templates/data_tables/ 复制一份")
+        btn_template.setToolTip("从 templates/data_tables/ 复制一份，并默认写入当前样品编号")
+        for btn in (btn_upload, btn_free, btn_template):
+            btn.setObjectName("dataTableAddChoice")
         layout.addWidget(btn_upload)
         layout.addWidget(btn_free)
         layout.addWidget(btn_template)
@@ -2088,6 +2110,7 @@ class TestDetailDialog(QDialog):
             QMessageBox.information(self, "模版", "请至少选择一个模版。")
             return
         root = self._project_root()
+        sample_ids = self._existing_sample_ids()
         added = 0
         for src in paths:
             try:
@@ -2095,6 +2118,11 @@ class TestDetailDialog(QDialog):
             except DataTableError as exc:
                 QMessageBox.warning(self, "提示", str(exc))
                 continue
+            if sample_ids:
+                try:
+                    import_sample_ids(resolve_attachment_path(root, ref), sample_ids)
+                except DataTableError as exc:
+                    QMessageBox.warning(self, "提示", str(exc))
             self._data_tables.append(ref)
             self._load_preview_for_ref(ref, force=True)
             added += 1
@@ -2333,6 +2361,8 @@ class TestDetailDialog(QDialog):
             return False
         self.node_data.start_date = start.toString("yyyy-MM-dd")
         self.node_data.end_date = end.toString("yyyy-MM-dd")
+        env = self.txt_env_condition.text().strip()
+        self.node_data.env_condition = env or None
         return True
 
     def save_and_close(self):

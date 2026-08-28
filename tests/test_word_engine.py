@@ -74,6 +74,7 @@ def test_word_engine_zh_template(tmp_path=None):
         standard_desc="在35度环境下喷洒盐水...",
         equipment_name="盐雾试验箱",
         evaluation_req="表面无腐蚀",
+        env_condition="(25±5)°C (50±25)%Rh",
         samples=[
             TestSample(sample_id="A01", result=TestResult.PASS, result_desc="无腐蚀"),
             TestSample(sample_id="A02", result=TestResult.PASS, result_desc="无腐蚀"),
@@ -99,6 +100,7 @@ def test_word_engine_zh_template(tmp_path=None):
     texts = "\n".join(p.text for p in doc.paragraphs)
     assert "盐雾试验" in texts
     assert "检测环境条件" in texts
+    assert "(25±5)°C (50±25)%Rh" in texts
     assert "{{试验明细}}" not in texts
     assert "{{样品信息表}}" not in texts
     assert "No." in texts
@@ -384,8 +386,118 @@ def test_word_engine_data_table_merges(tmp_path):
 
     data_label = next(p for p in doc.paragraphs if p.text.strip() == "试验数据")
     assert data_label.alignment == WD_ALIGN_PARAGRAPH.CENTER
-    title_para = next(p for p in doc.paragraphs if p.text.strip() == "resist.xlsx")
+    title_para = next(p for p in doc.paragraphs if p.text.strip() == "resist")
     assert title_para.alignment == WD_ALIGN_PARAGRAPH.CENTER
+
+
+def test_word_engine_data_table_two_row_header_by_sample_id(tmp_path):
+    from openpyxl import Workbook
+
+    project = Path(tmp_path) / "proj"
+    attach = project / "3.测试组" / "冲击" / "数据表附件"
+    attach.mkdir(parents=True)
+    xlsx = attach / "after.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.merge_cells("B1:D1")
+    ws["B1"] = "试验后 after test"
+    ws["B2"] = "桥路电阻"
+    ws["C2"] = "短路电阻"
+    ws["D2"] = "绝缘电阻"
+    ws["A3"] = "A22607480801-A01"
+    ws["B3"] = "1.2"
+    wb.save(xlsx)
+    wb.close()
+
+    state = ProjectState(
+        project_id="T1",
+        application_fields={"申请单号": "T1", "样品名称": "S"},
+    )
+    node = TestNode(
+        test_name="冲击",
+        samples=[TestSample(sample_id="A22607480801-A01", result=TestResult.PASS)],
+        data_tables=[
+            DataTableRef(title="after.xlsx", relative_path=str(xlsx.relative_to(project)))
+        ],
+    )
+    leg = TestLeg(leg_id="L1", leg_name="L1")
+    leg.nodes.append(node)
+    state.legs.append(leg)
+
+    template_path = Path("templates/template_zh.docx")
+    if not template_path.exists():
+        template_path = Path("templates/template_raw.docx")
+    out_path = Path(tmp_path) / "two_row_header.docx"
+    WordGenerator(str(template_path)).generate(
+        state, str(out_path), project_path=str(project), report_language="中文"
+    )
+
+    doc = Document(str(out_path))
+    data_tbl = None
+    for t in doc.tables:
+        if (t.rows[0].cells[1].text or "").startswith("试验后") and len(t.columns) == 4:
+            data_tbl = t
+            break
+    assert data_tbl is not None
+    for ri in range(2):
+        trPr = data_tbl.rows[ri]._tr.find(qn("w:trPr"))
+        assert trPr is not None and trPr.find(qn("w:tblHeader")) is not None
+    trPr_data = data_tbl.rows[2]._tr.find(qn("w:trPr"))
+    assert trPr_data is None or trPr_data.find(qn("w:tblHeader")) is None
+
+
+def test_custom_report_no_in_document(tmp_path):
+    state = ProjectState(
+        project_id="A2260613686101",
+        applicant_name="Test Client Co.",
+        sample_name="Engine Control Unit",
+        sample_receive_date="2026-08-01",
+        test_start_date="2026-08-02",
+        test_end_date="2026-08-10",
+        application_fields={"申请单号": "A22606136861", "样品名称": "Engine Control Unit"},
+    )
+    leg = TestLeg(leg_id="L1", leg_name="Leg 1")
+    leg.nodes.append(
+        TestNode(
+            test_name="盐雾试验",
+            samples=[TestSample(sample_id="A01", result=TestResult.PASS)],
+        )
+    )
+    state.legs.append(leg)
+
+    template_path = Path("templates/template_zh.docx")
+    if not template_path.exists():
+        template_path = Path("templates/template_raw.docx")
+    out_path = Path(tmp_path) / "custom_no.docx"
+    custom_no = "A226061368610100002C"
+    WordGenerator(str(template_path)).generate(
+        state,
+        str(out_path),
+        project_path=None,
+        report_language="中文",
+        report_no=custom_no,
+    )
+
+    doc = Document(str(out_path))
+    hdr = "\n".join(
+        c.text for t in doc.sections[0].header.tables for r in t.rows for c in r.cells
+    )
+    assert custom_no in hdr
+    assert "A226061368610100001C" not in hdr
+
+
+def test_report_filename_stem_and_duplicate_path(tmp_path):
+    assert WordGenerator.report_filename_stem("A226061368610100001C") == "A226061368610100001C"
+    assert WordGenerator.report_filename_stem("bad/name") == "bad_name"
+
+    folder = Path(tmp_path)
+    (folder / "A226061368610100001C.docx").write_bytes(b"x")
+    alt = WordGenerator.next_duplicate_report_path(folder, "A226061368610100001C")
+    assert alt.name == "A226061368610100001C-2.docx"
+
+    alt.write_bytes(b"y")
+    alt2 = WordGenerator.next_duplicate_report_path(folder, "A226061368610100001C")
+    assert alt2.name == "A226061368610100001C-3.docx"
 
 
 if __name__ == "__main__":

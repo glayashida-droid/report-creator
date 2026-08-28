@@ -109,6 +109,7 @@ def hydrate_standard_from_record(std: TestStandard, record: Dict[str, Any]) -> T
         result_desc_en=cell_text(record.get("result")),
         evaluation_req=cell_text(record.get("评价要求")),
         evaluation_req_en=cell_text(record.get("Evaluation requirement")),
+        env_condition=cell_text(record.get("环境温湿度")),
         images=list(record.get("_images") or []),
         key_params=list(defaults),
         key_params_defaults=list(defaults),

@@ -20,8 +20,8 @@ def test_format_conclusion_zh_en_bilingual():
     assert format_conclusion(TestResult.FAIL, "英文") == "Fail"
     assert format_conclusion(TestResult.NA, "英文") == "N/A"
 
-    assert format_conclusion(TestResult.PASS, "中英文") == "合格 / Pass"
-    assert format_conclusion(TestResult.FAIL, "中英文") == "不合格 / Fail"
+    assert format_conclusion(TestResult.PASS, "中英文") == "合格/Pass"
+    assert format_conclusion(TestResult.FAIL, "中英文") == "不合格/Fail"
     assert format_conclusion(TestResult.NA, "中英文") == "N/A"
 
 
@@ -29,7 +29,7 @@ def test_format_conclusion_accepts_string_aliases():
     assert format_conclusion("合格", "英文") == "Pass"
     assert format_conclusion("Pass", "中文") == "合格"
     assert format_conclusion("不合格", "英文") == "Fail"
-    assert format_conclusion("Fail", "中英文") == "不合格 / Fail"
+    assert format_conclusion("Fail", "中英文") == "不合格/Fail"
 
 
 def test_language_text_join_and_no_english_fallback():

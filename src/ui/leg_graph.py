@@ -2,9 +2,9 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton,
+from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QScrollArea, QComboBox, QFrame, QSizePolicy, QMessageBox,
-                               QInputDialog, QStackedWidget)
+                               QStackedWidget)
 from PySide6.QtCore import Qt, Signal, QTimer, QPoint
 from PySide6.QtGui import QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent, QResizeEvent
 
@@ -46,7 +46,6 @@ def fill_test_combo(combo: QComboBox, pool: list, current_test: str = ""):
     if current and current not in items and current not in {PLACEHOLDER_TEST, CUSTOM_TEST}:
         items.append(current)
     combo.addItems(items)
-    combo.addItem(CUSTOM_TEST)
     if current and current != CUSTOM_TEST:
         combo.setCurrentText(current)
         combo.setEditText(current)
@@ -80,11 +79,11 @@ class TestNodeWidget(QFrame):
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(6)
 
-        grid = QGridLayout()
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(4)
-        grid.setVerticalSpacing(6)
-        grid.setColumnStretch(0, 1)
+        # Two mirrored HBoxes keep outer edges flush whether or not the
+        # complete mark is visible (grid column spacing used to leave a 4px gap).
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(4)
 
         self.combo = QComboBox()
         self.combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -99,15 +98,16 @@ class TestNodeWidget(QFrame):
         fill_test_combo(self.combo, self.candidate_pool, self.node_data.test_name)
         self.combo.currentTextChanged.connect(self.on_test_changed)
         self.combo.lineEdit().editingFinished.connect(self.on_test_edit_finished)
-        self.combo.activated.connect(self._on_combo_activated)
-        grid.addWidget(self.combo, 0, 0)
+        self.combo.activated.connect(self.on_test_edit_finished)
+        top_row.addWidget(self.combo, stretch=1)
 
         self.lbl_complete = QLabel("✓")
         self.lbl_complete.setObjectName("nodeCompleteMark")
         self.lbl_complete.setToolTip("标准、关键参数、设备、结果均已填写")
         self.lbl_complete.setAlignment(Qt.AlignCenter)
         self.lbl_complete.setFixedWidth(16)
-        grid.addWidget(self.lbl_complete, 0, 1, Qt.AlignCenter)
+        top_row.addWidget(self.lbl_complete, alignment=Qt.AlignCenter)
+        layout.addLayout(top_row)
 
         btn_layout = QHBoxLayout()
         btn_layout.setContentsMargins(0, 0, 0, 0)
@@ -126,8 +126,7 @@ class TestNodeWidget(QFrame):
 
         btn_layout.addWidget(self.btn_detail, stretch=1)
         btn_layout.addWidget(self.btn_delete)
-        grid.addLayout(btn_layout, 1, 0, 1, 2)
-        layout.addLayout(grid)
+        layout.addLayout(btn_layout)
         self._refresh_complete_mark()
         self._sync_detail_button()
         self._initializing = False
@@ -169,41 +168,6 @@ class TestNodeWidget(QFrame):
         if name in {PLACEHOLDER_TEST, CUSTOM_TEST}:
             return ""
         return name
-
-    def _restore_committed_combo(self):
-        self.combo.blockSignals(True)
-        fill_test_combo(self.combo, self.candidate_pool, self._committed_name)
-        self.combo.blockSignals(False)
-        self.node_data.test_name = self._committed_name
-        self._refresh_complete_mark()
-        self._sync_detail_button()
-        self.node_updated.emit()
-
-    def _prompt_custom_name(self):
-        text, ok = QInputDialog.getText(
-            self,
-            "自定义试验名称",
-            "试验名称：",
-            text=self._committed_name or "",
-        )
-        if not ok:
-            self._restore_committed_combo()
-            return
-        name = (text or "").strip()
-        if not is_usable_test_name(name):
-            QMessageBox.warning(self, "提示", "请输入有效的试验名称")
-            self._restore_committed_combo()
-            return
-        self.combo.blockSignals(True)
-        fill_test_combo(self.combo, self.candidate_pool, name)
-        self.combo.blockSignals(False)
-        self._commit_test_name(name)
-
-    def _on_combo_activated(self, *_args):
-        if self.combo.currentText().strip() == CUSTOM_TEST:
-            self._prompt_custom_name()
-            return
-        self.on_test_edit_finished()
 
     def _project_state(self):
         widget = self.parent()
