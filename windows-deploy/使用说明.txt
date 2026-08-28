@@ -5,9 +5,9 @@ Report Creator - Windows 部署说明
 1. 将整个项目文件夹复制到 U 盘
 2. 在目标 Windows 电脑上打开 U 盘，进入 windows-deploy 文件夹
 3. 双击 setup.bat
-4. 选择安装目录（默认 C:\ReportCreator）
-5. 等待 Python 环境与依赖安装完成
-6. 完成后可通过桌面快捷方式或安装目录下的 run.bat 启动程序
+4. 弹出窗口中自行选择安装目录（不要选 D:\ 这类盘符根目录，请选如 D:\ReportCreator）
+5. 确认后等待 Python 环境与依赖安装完成
+6. 完成后可通过桌面快捷方式或安装目录下的 run.vbs / run.bat 启动程序（无黑色命令行窗口）
 
 【后续更新】
 1. 在本机更新程序后，再次将整个项目文件夹复制到 U 盘（覆盖旧文件）
@@ -17,14 +17,30 @@ Report Creator - Windows 部署说明
 
 【环境要求】
 - Windows 10 或更高版本
-- 首次部署需联网（自动安装 Python 3.12 与 pip 依赖）
-- 若目标电脑已安装 Python 3.10+ 且已加入 PATH，可直接使用，无需重复安装
+- 首次部署建议联网（仅用于自动安装 Python 3.12；依赖包已预下载到 windows-deploy\wheels）
+- 若目标电脑已安装 Python 3.12 且已加入 PATH，可直接使用
+- 若只有 Python 3.10/3.11，setup.bat 会自动安装 3.12（并存，不卸载旧版）
+- 预下载 wheel 针对 Python 3.12 / Windows x64（约 285MB，含 PySide6）
+
+【离线依赖包】
+windows-deploy\wheels\ 内含 PySide6 等大型包的 Windows 安装文件。
+setup.bat / update.bat 会优先从此目录安装，无需再从外网慢慢下载。
+若缺包才会回退到联网安装。
+在 Mac 上更新依赖后可运行: bash windows-deploy/download_wheels.sh
 
 【安装记录】
 安装路径保存在: %LOCALAPPDATA%\ReachReportCreator\install_path.txt
 update.bat 会优先读取该文件定位已安装目录。
 
+【路径自检】
+若 setup.bat 报错，先双击同目录下的 test_paths.bat：
+- 只检查路径与文件是否齐全，不会安装任何东西
+- 把窗口输出截图发回即可定位问题
+- 也可只更新 windows-deploy 文件夹到 U 盘，无需整盘拷贝
+- 部署脚本窗口为英文（避免中文 Windows 编码问题），说明见本文件
+
 【常见问题】
 - 提示找不到 Python：关闭窗口后重新运行 setup.bat，或手动安装 Python 并勾选 Add to PATH
 - 程序无法启动：确认安装目录下存在 .venv 文件夹，可重新运行 setup.bat
 - 网络共享路径（config.json 中的设备清单/标准库）需在 Windows 上可访问
+- The system cannot find the path specified：先运行 test_paths.bat，看哪一项显示 [缺]

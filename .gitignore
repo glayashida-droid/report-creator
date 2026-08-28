@@ -24,3 +24,6 @@ build/
 
 # Local project mirrors and saved sessions
 data/
+
+# Pre-downloaded Windows wheels (USB copy / regenerate with download_wheels.sh)
+windows-deploy/wheels/*.whl

@@ -1,113 +1,184 @@
 @echo off
-chcp 65001 >nul
 setlocal EnableExtensions EnableDelayedExpansion
 
-title Report Creator - 更新部署
+title Report Creator Update
+
+set "RC_FAIL_STEP="
+set "RC_COMMON=%~dp0_lib\common.bat"
 
 echo ============================================================
-echo   Report Creator - 更新部署
+echo   Report Creator - Update
 echo ============================================================
 echo.
-echo 从 U 盘同步最新程序到已安装的 Windows 电脑。
-echo 请在本机已安装过 setup.bat 的前提下运行本脚本。
+echo Sync latest app from USB to an installed copy on this PC.
+echo Run setup.bat first if this PC has never been set up.
 echo.
 
-call "%~dp0_lib\common.bat" :InitPaths
-if errorlevel 1 goto :Fail
-
-if not exist "%PROJECT_ROOT%\run.py" (
-    echo [错误] 未找到 run.py，请确认 U 盘中的项目目录完整。
-    pause
-    exit /b 1
+echo [Step 1/6] Check deploy scripts...
+if not exist "%RC_COMMON%" (
+    set "RC_FAIL_STEP=missing _lib\common.bat"
+    echo [ERROR] !RC_FAIL_STEP!
+    echo         expected: %RC_COMMON%
+    goto Fail
 )
+echo         [OK] %RC_COMMON%
 
+echo [Step 2/6] Resolve project paths...
+call "%RC_COMMON%" InitPaths "%~dp0"
+if errorlevel 1 (
+    set "RC_FAIL_STEP=InitPaths failed"
+    goto Fail
+)
+echo         DEPLOY_DIR   = %DEPLOY_DIR%
+echo         PROJECT_ROOT = %PROJECT_ROOT%
+
+echo [Step 3/6] Check project files...
+call "%RC_COMMON%" Diagnose
+if not exist "%PROJECT_ROOT%\run.py" (
+    set "RC_FAIL_STEP=run.py missing in project root"
+    echo [ERROR] !RC_FAIL_STEP!
+    echo         PROJECT_ROOT: %PROJECT_ROOT%
+    goto Fail
+)
+echo         [OK] run.py
+
+echo [Step 4/6] Locate installed copy...
 call :ReadInstallMarker
 if errorlevel 1 (
-    echo 未找到本机安装记录，请手动选择已安装目录。
-    call :PickInstallFolder "选择已安装的 Report Creator 目录" "C:\ReportCreator"
-    if errorlevel 1 goto :Fail
+    echo No install record found, pick the installed folder manually.
+    call :PickInstallFolder "Select installed Report Creator folder" "%USERPROFILE%"
+    if errorlevel 1 (
+        set "RC_FAIL_STEP=pick install folder failed"
+        goto Fail
+    )
     set "RC_INSTALL_DIR=!RC_PICKED_DIR!"
 ) else (
-    echo 检测到已安装目录: !RC_INSTALL_DIR!
-    set /p RC_CONFIRM=使用该目录进行更新? [Y/n]: 
+    echo Found install folder: !RC_INSTALL_DIR!
+    set /p RC_CONFIRM=Update this folder? [Y/n]: 
     if /I "!RC_CONFIRM!"=="N" (
-        call :PickInstallFolder "选择已安装的 Report Creator 目录" "!RC_INSTALL_DIR!"
-        if errorlevel 1 goto :Fail
+        call :PickInstallFolder "Select installed Report Creator folder" "!RC_INSTALL_DIR!"
+        if errorlevel 1 (
+            set "RC_FAIL_STEP=pick install folder failed"
+            goto Fail
+        )
         set "RC_INSTALL_DIR=!RC_PICKED_DIR!"
     )
 )
+if not defined RC_INSTALL_DIR (
+    set "RC_FAIL_STEP=install folder is empty"
+    goto Fail
+)
+if "!RC_INSTALL_DIR!"=="" (
+    set "RC_FAIL_STEP=install folder is empty"
+    goto Fail
+)
 
 echo.
-echo 即将更新: !RC_INSTALL_DIR!
-set /p RC_GO=继续更新? [Y/n]: 
+echo Will update: !RC_INSTALL_DIR!
+set /p RC_GO=Continue? [Y/n]: 
 if /I "!RC_GO!"=="N" (
-    echo 已取消。
+    echo Cancelled.
     pause
     exit /b 0
 )
 
+echo [Step 5/6] Sync project files...
 call :SyncProject "%PROJECT_ROOT%" "!RC_INSTALL_DIR!"
-if errorlevel 1 goto :Fail
-
-call :FindPython
 if errorlevel 1 (
-    if errorlevel 2 (
-        echo [错误] Python 版本过低，需要 %RC_PYTHON_MIN% 或更高。
-        goto :Fail
-    )
-    echo [错误] 未找到 Python，请先运行 setup.bat 或手动安装 Python %RC_PYTHON_MIN%+。
-    goto :Fail
+    set "RC_FAIL_STEP=sync project failed"
+    goto Fail
 )
+echo         [OK] sync done
 
-echo.
-echo 使用 Python: !RC_PYTHON!
+echo [Step 6/6] Refresh venv dependencies...
+call :FindPython
+set "RC_PY_CODE=%ERRORLEVEL%"
+if %RC_PY_CODE% EQU 0 goto PyReady
+if %RC_PY_CODE% EQU 2 (
+    set "RC_FAIL_STEP=Python too old, need %RC_PYTHON_MIN%+"
+    echo [ERROR] !RC_FAIL_STEP!
+    goto Fail
+)
+if %RC_PY_CODE% EQU 3 (
+    echo         Found older Python; installing 3.12 alongside...
+    call :InstallPython
+    if errorlevel 1 (
+        set "RC_FAIL_STEP=auto install Python failed"
+        goto Fail
+    )
+    call :FindPython
+    if errorlevel 1 (
+        set "RC_FAIL_STEP=Python 3.12 not found after install"
+        goto Fail
+    )
+) else (
+    set "RC_FAIL_STEP=Python 3.12 not found, run setup.bat first"
+    echo [ERROR] !RC_FAIL_STEP!
+    goto Fail
+)
+:PyReady
+echo         Python: !RC_PYTHON!
 call :SetupVenv "!RC_INSTALL_DIR!"
-if errorlevel 1 goto :Fail
-
+if errorlevel 1 (
+    set "RC_FAIL_STEP=venv or pip install failed"
+    goto Fail
+)
 call :WriteRunLauncher "!RC_INSTALL_DIR!"
+if errorlevel 1 (
+    set "RC_FAIL_STEP=write run.bat failed"
+    goto Fail
+)
 call :WriteInstallMarker "!RC_INSTALL_DIR!"
+echo         [OK] update complete
 
 echo.
 echo ============================================================
-echo   更新完成
+echo   Update complete
 echo ============================================================
 echo.
-echo 安装位置: !RC_INSTALL_DIR!
-echo 启动程序: !RC_INSTALL_DIR!\run.bat
+echo Install folder: !RC_INSTALL_DIR!
+echo Start app: !RC_INSTALL_DIR!\run.vbs  (or run.bat)
 echo.
 pause
 exit /b 0
 
 :ReadInstallMarker
-call "%~dp0_lib\common.bat" :ReadInstallMarker
+call "%RC_COMMON%" ReadInstallMarker
 exit /b %ERRORLEVEL%
 
 :PickInstallFolder
-call "%~dp0_lib\common.bat" :PickInstallFolder %*
+call "%RC_COMMON%" PickInstallFolder %*
 exit /b %ERRORLEVEL%
 
 :SyncProject
-call "%~dp0_lib\common.bat" :SyncProject %*
+call "%RC_COMMON%" SyncProject %*
 exit /b %ERRORLEVEL%
 
 :FindPython
-call "%~dp0_lib\common.bat" :FindPython
+call "%RC_COMMON%" FindPython
 exit /b %ERRORLEVEL%
 
 :SetupVenv
-call "%~dp0_lib\common.bat" :SetupVenv %*
+call "%RC_COMMON%" SetupVenv %*
 exit /b %ERRORLEVEL%
 
 :WriteRunLauncher
-call "%~dp0_lib\common.bat" :WriteRunLauncher %*
+call "%RC_COMMON%" WriteRunLauncher %*
 exit /b %ERRORLEVEL%
 
 :WriteInstallMarker
-call "%~dp0_lib\common.bat" :WriteInstallMarker %*
+call "%RC_COMMON%" WriteInstallMarker %*
 exit /b %ERRORLEVEL%
 
 :Fail
 echo.
-echo [失败] 更新未完成，请根据上方提示排查后重试。
+echo ============================================================
+echo [FAILED] Update not completed
+if defined RC_FAIL_STEP echo         failed step: !RC_FAIL_STEP!
+echo ============================================================
+echo.
+echo Run test_paths.bat in this folder for full diagnostics.
+echo.
+if exist "%RC_COMMON%" call "%RC_COMMON%" Diagnose
 pause
 exit /b 1
