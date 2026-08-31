@@ -77,7 +77,7 @@ def test_project_saves_standard_images_and_edits():
             path.unlink()
 
 
-def test_duplicate_test_names_across_legs():
+def test_duplicate_test_names_within_same_leg():
     state = ProjectState(
         project_id="P1",
         legs=[
@@ -98,13 +98,87 @@ def test_duplicate_test_names_across_legs():
         ],
     )
     assert state.duplicate_test_names() == ["湿热循环"]
-    assert not state.test_name_is_unique("湿热循环")
-    assert state.test_name_is_unique("振动")
+    assert not state.test_name_is_unique_in_leg("L1", "湿热循环")
+    assert state.test_name_is_unique_in_leg("L2", "湿热循环")
+    assert state.test_name_is_unique_in_leg("L1", "振动")
+    assert state.test_name_usage_count_in_leg("L1", "湿热循环") == 2
+    assert state.test_name_usage_count_in_leg("L2", "湿热循环") == 1
     assert state.test_name_usage_count("湿热循环") == 3
+
+
+def test_cross_leg_same_name_is_not_duplicate():
+    state = ProjectState(
+        project_id="P1",
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[TestNode(test_name="温湿度试验")],
+            ),
+            TestLeg(
+                leg_id="L2",
+                leg_name="Leg 2",
+                nodes=[TestNode(test_name="温湿度试验")],
+            ),
+        ],
+    )
+    assert state.duplicate_test_names() == []
+    assert state.test_name_is_unique_in_leg("L1", "温湿度试验")
+    assert state.test_name_is_unique_in_leg("L2", "温湿度试验")
+
+
+def test_duplicate_test_names_ignores_placeholder_and_custom():
+    state = ProjectState(
+        project_id="P1",
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[
+                    TestNode(test_name="请选择试验..."),
+                    TestNode(test_name="请选择试验..."),
+                    TestNode(test_name="自定义"),
+                ],
+            )
+        ],
+    )
+    assert state.duplicate_test_names() == []
+
+
+def test_save_state_blocks_duplicate_test_names_in_same_leg(tmp_path):
+    import sys
+    from unittest.mock import patch
+
+    from PySide6.QtWidgets import QApplication
+
+    from src.ui.main_window import MainWindow
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    win = MainWindow()
+    win.state.project_id = "P1"
+    win.state.legs = [
+        TestLeg(
+            leg_id="L1",
+            leg_name="Leg 1",
+            nodes=[
+                TestNode(test_name="湿热循环"),
+                TestNode(test_name="湿热循环"),
+            ],
+        )
+    ]
+    win._local_path = tmp_path
+    with patch("src.ui.main_window.warn_duplicate_test_names") as warn:
+        assert win.save_state(show_success=False) is False
+        warn.assert_called_once()
+    assert not (tmp_path / "project_state.json").exists()
 
 
 if __name__ == "__main__":
     test_project_state()
     test_project_saves_standard_images_and_edits()
-    test_duplicate_test_names_across_legs()
+    test_duplicate_test_names_within_same_leg()
+    test_cross_leg_same_name_is_not_duplicate()
+    test_duplicate_test_names_ignores_placeholder_and_custom()
     print("test_project_state: ok")

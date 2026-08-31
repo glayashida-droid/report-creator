@@ -1,9 +1,12 @@
 import base64
 import json
+import uuid
 from enum import Enum
 from pathlib import Path
 from typing import ClassVar, Dict, Iterator, List, Optional, Tuple
 from pydantic import BaseModel, Field, field_serializer, field_validator
+
+from src.sample_columns import ALL_SAMPLE_COLUMNS, merge_sample_column_dicts
 
 class TestResult(str, Enum):
     PASS = "合格"
@@ -17,26 +20,87 @@ class DataTableRef(BaseModel):
     relative_path: str
 
 
+class CustomOverviewField(BaseModel):
+    """User-added project overview row; label and value are editable per language side."""
+
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
+    label_cn: str = ""
+    value_cn: str = ""
+    label_en: str = ""
+    value_en: str = ""
+
+
+def _coerce_test_result(value):
+    mapping = {
+        "Pass": "合格",
+        "Fail": "不合格",
+        "合格": "合格",
+        "不合格": "不合格",
+        "N/A": "N/A",
+        "NA": "N/A",
+    }
+    if isinstance(value, TestResult):
+        return value
+    return mapping.get(str(value), value)
+
+
+class SampleStandardResult(BaseModel):
+    """Per-standard outcome for one sample row (multi-standard tables)."""
+
+    standard_id: str = ""
+    chapter: str = ""
+    result: TestResult = TestResult.NA
+    result_desc: Optional[str] = None
+
+    @field_validator("result", mode="before")
+    @classmethod
+    def _coerce_result(cls, value):
+        return _coerce_test_result(value)
+
+    def ref_key(self) -> tuple:
+        return (self.standard_id or "", self.chapter or "")
+
+
 class TestSample(BaseModel):
     sample_id: str
     result: TestResult = TestResult.NA
     result_desc: Optional[str] = None
     notes: Optional[str] = None
+    standard_results: List[SampleStandardResult] = Field(default_factory=list)
 
     @field_validator("result", mode="before")
     @classmethod
     def _coerce_result(cls, value):
-        mapping = {
-            "Pass": "合格",
-            "Fail": "不合格",
-            "合格": "合格",
-            "不合格": "不合格",
-            "N/A": "N/A",
-            "NA": "N/A",
-        }
-        if isinstance(value, TestResult):
-            return value
-        return mapping.get(str(value), value)
+        return _coerce_test_result(value)
+
+    def result_for(self, std) -> TestResult:
+        """Conclusion for a standard; falls back to scalar ``result`` for legacy data."""
+        sid = getattr(std, "standard_id", None) or ""
+        chap = getattr(std, "chapter", None) or ""
+        if isinstance(std, (tuple, list)) and len(std) >= 2:
+            sid, chap = std[0] or "", std[1] or ""
+        key = (sid, chap)
+        for entry in self.standard_results or []:
+            if entry.ref_key() == key:
+                return entry.result
+        return self.result
+
+    def desc_for(self, std) -> Optional[str]:
+        sid = getattr(std, "standard_id", None) or ""
+        chap = getattr(std, "chapter", None) or ""
+        if isinstance(std, (tuple, list)) and len(std) >= 2:
+            sid, chap = std[0] or "", std[1] or ""
+        key = (sid, chap)
+        for entry in self.standard_results or []:
+            if entry.ref_key() == key:
+                return entry.result_desc
+        return self.result_desc
+
+    def all_results(self) -> List[TestResult]:
+        """All conclusions used for node-level aggregation."""
+        if self.standard_results:
+            return [entry.result for entry in self.standard_results]
+        return [self.result]
 
 class TestEquipment(BaseModel):
     name: str = ""
@@ -122,6 +186,7 @@ def _join_blocks(parts) -> str:
 
 class TestNode(BaseModel):
     test_name: str
+    test_name_en: str = ""
     standard_id: Optional[str] = None
     standard_chapter: Optional[str] = None
     standard_test_name: Optional[str] = None
@@ -139,6 +204,8 @@ class TestNode(BaseModel):
     env_condition: Optional[str] = None  # test environment; from standard library or user edit
     samples: List[TestSample] = Field(default_factory=list)
     data_tables: List[DataTableRef] = Field(default_factory=list)
+    # Manual order of photo album folders under 3.测试组/{Leg名}-{试验名}/; empty → default sort.
+    photo_album_order: List[str] = Field(default_factory=list)
 
     @staticmethod
     def _has_text(value) -> bool:
@@ -198,6 +265,24 @@ class TestNode(BaseModel):
     def joined_test_item(self) -> str:
         return "；".join(s.test_item for s in self.resolved_standards() if (s.test_item or "").strip())
 
+    def card_display_name(self, language: str = "中文") -> str:
+        """Leg card / report label for the given language side."""
+        lang = (language or "中文").strip()
+        if lang == "英文":
+            return (self.test_name_en or "").strip()
+        return (self.test_name or "").strip()
+
+    def sync_card_names_from_standards(self) -> None:
+        """Overwrite card labels from the first selected standard (always on save)."""
+        stds = self.resolved_standards()
+        if not stds:
+            return
+        first = stds[0]
+        cn = (first.test_name or "").strip()
+        if cn:
+            self.test_name = cn
+        self.test_name_en = (first.test_item or "").strip()
+
     def resolved_env_condition(self) -> str:
         if self._has_text(self.env_condition):
             return str(self.env_condition).strip()
@@ -254,7 +339,14 @@ class TestLeg(BaseModel):
     nodes: List[TestNode] = Field(default_factory=list)
 
 
-DUPLICATE_TEST_NAME_MESSAGE = "试验名称重复，请确认"
+DUPLICATE_TEST_NAME_MESSAGE = "同一 Leg 内试验名称重复，请确认"
+
+_USABLE_TEST_NAME_BLOCKLIST = {"请选择试验...", "自定义"}
+
+
+def _usable_test_name(name: str) -> bool:
+    text = (name or "").strip()
+    return bool(text) and text not in _USABLE_TEST_NAME_BLOCKLIST
 
 
 class ProjectState(BaseModel):
@@ -279,8 +371,15 @@ class ProjectState(BaseModel):
     # 申请单首页全部字段（含主机厂、生产商等）
     application_fields: Dict[str, str] = Field(default_factory=dict)
     application_fields_en: Dict[str, str] = Field(default_factory=dict)
+    # 申请单样品信息页多列（001/002…）；active=-1 表示 All 合并视图
+    application_columns: List[Dict[str, str]] = Field(default_factory=list)
+    application_columns_en: List[Dict[str, str]] = Field(default_factory=list)
+    sample_column_tab_labels: List[str] = Field(default_factory=list)
+    active_sample_column_index: int = 0
     # 用户从项目概况中移除的字段，不再写入报告
     excluded_overview_keys: List[str] = Field(default_factory=list)
+    # 用户手动添加的项目信息行（标题与内容均可编辑）
+    custom_overview_fields: List[CustomOverviewField] = Field(default_factory=list)
     
     candidate_pool: List[str] = Field(default_factory=list)
     template_pool: List[str] = Field(default_factory=list)
@@ -318,15 +417,33 @@ class ProjectState(BaseModel):
         return labels
 
     def duplicate_test_names(self) -> List[str]:
-        """Usable test names that appear more than once across all Legs."""
-        counts: Dict[str, int] = {}
+        """Usable test names that appear more than once within any single Leg."""
+        dupes: set[str] = set()
         for leg in self.legs or []:
+            counts: Dict[str, int] = {}
             for node in leg.nodes or []:
                 name = (node.test_name or "").strip()
-                if not name or name in {"请选择试验...", "自定义"}:
+                if not _usable_test_name(name):
                     continue
                 counts[name] = counts.get(name, 0) + 1
-        return sorted(name for name, count in counts.items() if count > 1)
+            dupes.update(name for name, count in counts.items() if count > 1)
+        return sorted(dupes)
+
+    def test_name_usage_count_in_leg(self, leg_id: str, test_name: str) -> int:
+        needle = (test_name or "").strip()
+        if not needle:
+            return 0
+        count = 0
+        for leg in self.legs or []:
+            if leg.leg_id != leg_id:
+                continue
+            for node in leg.nodes or []:
+                if (node.test_name or "").strip() == needle:
+                    count += 1
+        return count
+
+    def test_name_is_unique_in_leg(self, leg_id: str, test_name: str) -> bool:
+        return self.test_name_usage_count_in_leg(leg_id, test_name) <= 1
 
     def test_name_usage_count(self, test_name: str) -> int:
         needle = (test_name or "").strip()
@@ -340,6 +457,7 @@ class ProjectState(BaseModel):
         return count
 
     def test_name_is_unique(self, test_name: str) -> bool:
+        """Deprecated for hook/save checks — prefer test_name_is_unique_in_leg."""
         return self.test_name_usage_count(test_name) <= 1
 
     def combo_pool(self, extra: str = "") -> List[str]:
@@ -357,6 +475,16 @@ class ProjectState(BaseModel):
             out.append(extra_text)
         return out
     
+    def migrate_legacy_card_names(self) -> None:
+        """Backfill test_name_en from standards when loading older project files."""
+        for leg in self.legs or []:
+            for node in leg.nodes or []:
+                if (node.test_name_en or "").strip():
+                    continue
+                fallback = node.joined_test_item()
+                if fallback:
+                    node.test_name_en = fallback
+
     @classmethod
     def load_from_file(cls, filepath: str) -> "ProjectState":
         path = Path(filepath)
@@ -364,13 +492,17 @@ class ProjectState(BaseModel):
             return cls()
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-            return cls(**data)
+            state = cls(**data)
+            state.migrate_legacy_card_names()
+            return state
             
     def save_to_file(self, filepath: str):
         path = Path(filepath)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.model_dump(mode="json"), f, ensure_ascii=False, indent=2)
+
+    CUSTOM_OVERVIEW_PREFIX: ClassVar[str] = "@custom:"
 
     _OVERVIEW_HEAD: ClassVar[tuple] = (
         "申请单号",
@@ -398,6 +530,132 @@ class ProjectState(BaseModel):
     def _edit_lang(self) -> str:
         lang = (self.edit_language or "中文").strip()
         return "英文" if lang == "英文" else "中文"
+
+    @classmethod
+    def is_custom_overview_key(cls, key: str) -> bool:
+        return (key or "").startswith(cls.CUSTOM_OVERVIEW_PREFIX)
+
+    @classmethod
+    def custom_overview_key(cls, field_id: str) -> str:
+        return f"{cls.CUSTOM_OVERVIEW_PREFIX}{field_id}"
+
+    def parse_custom_overview_id(self, key: str) -> Optional[str]:
+        if not self.is_custom_overview_key(key):
+            return None
+        return key[len(self.CUSTOM_OVERVIEW_PREFIX) :]
+
+    def _custom_overview_row(self, field_id: str) -> Optional[CustomOverviewField]:
+        needle = (field_id or "").strip()
+        if not needle:
+            return None
+        for row in self.custom_overview_fields or []:
+            if row.id == needle:
+                return row
+        return None
+
+    def overview_display_label(self, key: str, language: Optional[str] = None) -> str:
+        from src.language_copy import field_label
+
+        lang = (language or self._edit_lang()).strip()
+        if lang != "英文":
+            lang = "中文"
+        if self.is_custom_overview_key(key):
+            row = self._custom_overview_row(self.parse_custom_overview_id(key) or "")
+            if not row:
+                return ""
+            if lang == "英文":
+                return (row.label_en or row.label_cn or "").strip()
+            return (row.label_cn or row.label_en or "").strip()
+        return field_label(key, lang) or key
+
+    def add_custom_overview_field(self) -> CustomOverviewField:
+        row = CustomOverviewField()
+        fields = list(self.custom_overview_fields or [])
+        fields.append(row)
+        self.custom_overview_fields = fields
+        return row
+
+    def set_custom_overview_label(self, field_id: str, label: str) -> None:
+        row = self._custom_overview_row(field_id)
+        if not row:
+            return
+        label = (label or "").strip()
+        if self._edit_lang() == "英文":
+            row.label_en = label
+        else:
+            row.label_cn = label
+
+    def set_custom_overview_value(self, field_id: str, value: str) -> None:
+        row = self._custom_overview_row(field_id)
+        if not row:
+            return
+        value = (value or "").strip()
+        if self._edit_lang() == "英文":
+            row.value_en = value
+        else:
+            row.value_cn = value
+
+    def remove_custom_overview_field(self, field_id: str) -> None:
+        needle = (field_id or "").strip()
+        if not needle:
+            return
+        self.custom_overview_fields = [
+            row for row in (self.custom_overview_fields or []) if row.id != needle
+        ]
+        key = self.custom_overview_key(needle)
+        excluded = list(self.excluded_overview_keys or [])
+        if key in excluded:
+            self.excluded_overview_keys = [k for k in excluded if k != key]
+
+    def has_multiple_sample_columns(self) -> bool:
+        return len(self.application_columns or []) > 1
+
+    def is_all_sample_columns_active(self) -> bool:
+        return (
+            self.has_multiple_sample_columns()
+            and self.active_sample_column_index == ALL_SAMPLE_COLUMNS
+        )
+
+    def _sample_column_field_map(self, language: Optional[str] = None) -> Dict[str, str]:
+        lang = (language or self._edit_lang()).strip()
+        columns = self.application_columns or []
+        columns_en = self.application_columns_en or []
+        if not columns:
+            return {}
+        if self.is_all_sample_columns_active():
+            if lang == "英文":
+                return merge_sample_column_dicts(columns_en)
+            return merge_sample_column_dicts(columns)
+        idx = self.active_sample_column_index
+        if idx < 0 or idx >= len(columns):
+            idx = 0
+        if lang == "英文":
+            return dict(columns_en[idx] if idx < len(columns_en) else {})
+        return dict(columns[idx])
+
+    def sync_application_fields_from_sample_column(self) -> None:
+        """Project overview + export read application_fields; sync from active column."""
+        from src.language_copy import english_from_application
+
+        cn = self._sample_column_field_map("中文")
+        en = self._sample_column_field_map("英文")
+        self.application_fields = cn
+        self.application_fields_en = en
+        self.sample_name = cn.get("样品名称", "") or self.sample_name
+        explicit_en = en.get("样品名称", "")
+        self.sample_name_en = explicit_en or english_from_application(
+            self.sample_name, self.sample_name_en or ""
+        )
+
+    def set_active_sample_column(self, index: int) -> None:
+        if not self.has_multiple_sample_columns():
+            self.active_sample_column_index = 0
+            return
+        if index == ALL_SAMPLE_COLUMNS:
+            self.active_sample_column_index = ALL_SAMPLE_COLUMNS
+        elif 0 <= index < len(self.application_columns):
+            self.active_sample_column_index = index
+        self.sync_application_fields_from_sample_column()
 
     def overview_field_map(self, language: Optional[str] = None) -> Dict[str, str]:
         lang = (language or self._edit_lang()).strip()
@@ -451,12 +709,31 @@ class ProjectState(BaseModel):
                     yield key, val
             elif val:
                 yield key, val
+        for row in self.custom_overview_fields or []:
+            key = self.custom_overview_key(row.id)
+            if key in excluded:
+                continue
+            cn_label = (row.label_cn or "").strip()
+            cn_val = (row.value_cn or "").strip()
+            en_label = (row.label_en or "").strip()
+            en_val = (row.value_en or "").strip()
+            if lang == "英文":
+                if not (cn_label or cn_val or en_label or en_val):
+                    continue
+                yield key, en_val
+            elif cn_label or cn_val or en_label or en_val:
+                yield key, cn_val
 
     def set_overview_value(self, key: str, value: str) -> None:
         """Write one overview field into the side matching edit_language."""
         key = (key or "").strip()
         value = (value or "").strip()
         if not key:
+            return
+        if self.is_custom_overview_key(key):
+            field_id = self.parse_custom_overview_id(key)
+            if field_id:
+                self.set_custom_overview_value(field_id, value)
             return
         if self._edit_lang() == "英文":
             attr = self._OVERVIEW_ATTR_EN.get(key)
@@ -468,6 +745,7 @@ class ProjectState(BaseModel):
             else:
                 fields.pop(key, None)
             self.application_fields_en = fields
+            self._write_active_sample_column_field(key, value, english=True)
             return
         attr = self._OVERVIEW_ATTR.get(key)
         if attr:
@@ -478,3 +756,24 @@ class ProjectState(BaseModel):
         else:
             fields.pop(key, None)
         self.application_fields = fields
+        self._write_active_sample_column_field(key, value, english=False)
+
+    def _write_active_sample_column_field(
+        self, key: str, value: str, *, english: bool
+    ) -> None:
+        if self.is_all_sample_columns_active():
+            return
+        idx = self.active_sample_column_index
+        columns = list(self.application_columns_en if english else self.application_columns)
+        if idx < 0 or idx >= len(columns):
+            return
+        col = dict(columns[idx])
+        if value:
+            col[key] = value
+        else:
+            col.pop(key, None)
+        columns[idx] = col
+        if english:
+            self.application_columns_en = columns
+        else:
+            self.application_columns = columns

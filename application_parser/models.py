@@ -32,3 +32,7 @@ class ApplicationData(BaseModel):
     sample_info_candidates: Dict[str, List[str]] = Field(default_factory=dict)
     # Sheet2 各列样品名称（按 001/002/… 顺序；沃尔沃单页通常为空）
     sample_column_names: List[str] = Field(default_factory=list)
+    # Sheet2 按 Excel 列索引的样品字段（每 dict 为一样品列；含申请单号等公共字段）
+    sample_columns_cn: List[Dict[str, str]] = Field(default_factory=list)
+    sample_columns_en: List[Dict[str, str]] = Field(default_factory=list)
+    sample_column_tab_labels: List[str] = Field(default_factory=list)

@@ -485,6 +485,182 @@ def parse_application_sheet2(sheet) -> Tuple[Dict[str, str], Dict[str, List[str]
     return sample_info, sample_info_candidates
 
 
+def _sample_value_cell_has_content(val: str) -> bool:
+    text = (val or "").strip()
+    if not text or _is_instruction_text(text):
+        return False
+    return True
+
+
+def _raw_sample_row_values_by_column(row) -> List[str]:
+    """Sheet2 一行按列对齐的取值（col 1..n 各一个单元格，不跨列去重）。"""
+    values: List[str] = []
+    for col_idx in range(1, len(row)):
+        val = _cell_str(row[col_idx]) if col_idx < len(row) else ""
+        if _is_instruction_text(val):
+            values.append("")
+            continue
+        if is_blank_or_slash(val):
+            values.append((val or "").strip())
+            continue
+        pieces = _expand_multiline_cell_values(val)
+        values.append(pieces[0] if pieces else "")
+    return values
+
+
+def _trim_trailing_empty_sample_values(values: List[str]) -> List[str]:
+    """Drop trailing columns that are blank in this row (None/空白/说明文字)。"""
+    trimmed = list(values)
+    while trimmed and not _sample_value_cell_has_content(trimmed[-1]):
+        trimmed.pop()
+    return trimmed
+
+
+def _effective_sample_value_column_count(sheet) -> int:
+    """样品值列数：各行的最右非空值列取 max，忽略模板预留的空尾列。"""
+    max_cols = 0
+    for row in sheet.iter_rows(values_only=True):
+        if not row or not row[0]:
+            continue
+        trimmed = _trim_trailing_empty_sample_values(_raw_sample_row_values_by_column(row))
+        max_cols = max(max_cols, len(trimmed))
+    return max_cols
+
+
+def _collect_sample_row_values_by_column(row, *, limit: Optional[int] = None) -> List[str]:
+    raw = _raw_sample_row_values_by_column(row)
+    if limit is not None:
+        return raw[:limit]
+    return _trim_trailing_empty_sample_values(raw)
+
+
+def _extract_sample_seq_row_values(sheet, *, limit: Optional[int] = None) -> List[str]:
+    """Read 样品序号 row for tab labels (not stored in sample_info)."""
+    for row in sheet.iter_rows(values_only=True):
+        if not row or not row[0]:
+            continue
+        key = _normalize_sample_key(_cell_str(row[0]))
+        storage_key = _effective_sample_storage_key(key)
+        if storage_key != "样品序号" and "样品序号" not in key:
+            continue
+        return [
+            v.strip()
+            for v in _collect_sample_row_values_by_column(row, limit=limit)
+            if v and not is_blank_or_slash(v)
+        ]
+    return []
+
+
+def parse_application_sheet2_columns(
+    sheet,
+) -> Tuple[List[Dict[str, str]], List[Dict[str, str]], List[str]]:
+    """Parse Sheet2 into per-column CN/EN field dicts and tab labels."""
+    value_col_count = _effective_sample_value_column_count(sheet)
+    if value_col_count <= 0:
+        return [], [], []
+
+    columns_cn: List[Dict[str, str]] = []
+    columns_en: List[Dict[str, str]] = []
+    last_cn_key = ""
+
+    def _ensure_columns(n: int) -> None:
+        while len(columns_cn) < n:
+            columns_cn.append({})
+            columns_en.append({})
+
+    def _write_row(storage_key: str, col_values: List[str], *, english_row: bool) -> None:
+        nonlocal last_cn_key
+        if not storage_key or not col_values:
+            last_cn_key = ""
+            return
+        _ensure_columns(len(col_values))
+        target = columns_en if english_row else columns_cn
+        wrote = False
+        for i, val in enumerate(col_values):
+            text = (val or "").strip()
+            if not text or is_blank_or_slash(text):
+                continue
+            if _is_instruction_text(text):
+                continue
+            target[i][storage_key] = text
+            wrote = True
+        if wrote:
+            last_cn_key = storage_key
+        else:
+            last_cn_key = ""
+
+    for row in sheet.iter_rows(values_only=True):
+        if not row or not row[0]:
+            continue
+        key = _normalize_sample_key(_cell_str(row[0]))
+        storage_key = _effective_sample_storage_key(key)
+        if storage_key == "样品序号" or (
+            not storage_key and "样品序号" in key
+        ):
+            continue
+        if storage_key and any(skip in storage_key for skip in _SAMPLE_SKIP_KEYS):
+            continue
+
+        col_values = _collect_sample_row_values_by_column(row, limit=value_col_count)
+        if not col_values:
+            continue
+
+        english_row = not _has_chinese(key) and bool(english_sample_field_to_cn(key))
+        merged_key = storage_key
+        if (
+            merged_key
+            and last_cn_key
+            and not _has_chinese(key)
+            and sample_storage_keys_alias_equivalent(last_cn_key, merged_key)
+        ):
+            merged_key = last_cn_key
+            english_row = True
+        elif merged_key and not _has_chinese(key) and english_sample_field_to_cn(key):
+            english_row = True
+
+        if not merged_key:
+            if last_cn_key and col_values:
+                _write_row(last_cn_key, col_values, english_row=True)
+            continue
+
+        if english_row and last_cn_key and merged_key == last_cn_key:
+            _write_row(last_cn_key, col_values, english_row=True)
+            continue
+
+        if _should_include_sample_row(key, [v for v in col_values if v]):
+            _write_row(merged_key, col_values, english_row=english_row)
+        else:
+            last_cn_key = ""
+
+    num_cols = len(columns_cn)
+    if num_cols <= 0:
+        return [], [], []
+
+    seq = _extract_sample_seq_row_values(sheet, limit=value_col_count)
+    names = extract_application_sample_column_names(sheet)
+    tab_labels = _build_column_tab_labels(num_cols, seq, names)
+    return columns_cn, columns_en, tab_labels
+
+
+def _build_column_tab_labels(
+    num_columns: int,
+    sample_seq: List[str],
+    sample_names: List[str],
+) -> List[str]:
+    labels: List[str] = []
+    for i in range(num_columns):
+        seq = (sample_seq[i] if i < len(sample_seq) else "").strip()
+        if seq and not is_blank_or_slash(seq):
+            labels.append(seq)
+            continue
+        name = (sample_names[i] if i < len(sample_names) else "").strip()
+        if name and not is_blank_or_slash(name):
+            labels.append(name[:24] + ("…" if len(name) > 24 else ""))
+            continue
+        labels.append(f"{i + 1:03d}")
+    return labels
+
+
 def extract_application_sample_column_names(sheet) -> List[str]:
     """Sheet2 各列样品名称（优先中文「样品名称」行，无则取英文 Sample Name 行）。"""
     cn_names: List[str] = []
@@ -593,10 +769,16 @@ def parse_application(file_bytes: bytes, filename: str, *, volvo: bool = False) 
     sample_info: Dict[str, str] = {}
     sample_info_candidates: Dict[str, List[str]] = {}
     sample_column_names: List[str] = []
+    sample_columns_cn: List[Dict[str, str]] = []
+    sample_columns_en: List[Dict[str, str]] = []
+    sample_column_tab_labels: List[str] = []
     sheet2 = find_application_sample_sheet(wb)
     if sheet2:
         sample_info, sample_info_candidates = parse_application_sheet2(sheet2)
         sample_column_names = extract_application_sample_column_names(sheet2)
+        sample_columns_cn, sample_columns_en, sample_column_tab_labels = (
+            parse_application_sheet2_columns(sheet2)
+        )
     if sheet1:
         sel_info, sel_cands = parse_application_selection_sample_fields(sheet1)
         for key, val in sel_info.items():
@@ -611,6 +793,10 @@ def parse_application(file_bytes: bytes, filename: str, *, volvo: bool = False) 
     if application_no:
         sample_info = {"申请单号": application_no, **sample_info}
         sample_info_candidates = {"申请单号": [application_no], **sample_info_candidates}
+        for col in sample_columns_cn:
+            col.setdefault("申请单号", application_no)
+        for col in sample_columns_en:
+            col.setdefault("申请单号", application_no)
 
     # 本导出包故意不解析第 3 页「测试信息 / 试验项目」。
     return ApplicationData(
@@ -628,4 +814,7 @@ def parse_application(file_bytes: bytes, filename: str, *, volvo: bool = False) 
         sample_info=sample_info,
         sample_info_candidates=sample_info_candidates,
         sample_column_names=sample_column_names,
+        sample_columns_cn=sample_columns_cn,
+        sample_columns_en=sample_columns_en,
+        sample_column_tab_labels=sample_column_tab_labels,
     )
