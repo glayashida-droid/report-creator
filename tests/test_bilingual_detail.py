@@ -63,6 +63,9 @@ def test_apply_standards_persists_en_and_test_item(tmp_path):
             )
         ]
     )
+    node.sync_card_names_from_standards()
+    assert node.test_name == "高温"
+    assert node.test_name_en == "High temperature"
     assert node.standard_desc == "中文条件"
     assert node.standard_desc_en == "EN condition"
     assert node.evaluation_req_en == "EN eval"

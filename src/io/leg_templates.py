@@ -57,7 +57,7 @@ def node_for_template(node: TestNode) -> TestNode:
         )
         for item in (node.resolved_standards() or [])
     ]
-    out = TestNode(test_name=node.test_name or "")
+    out = TestNode(test_name=node.test_name or "", test_name_en=node.test_name_en or "")
     out.apply_standards(standards)
     return out
 

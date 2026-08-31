@@ -1,4 +1,4 @@
-"""Manage test photos on disk under 3.测试组/{试验名}/{照片文件夹}/."""
+"""Manage test photos on disk under 3.测试组/{Leg名}-{试验名}/{照片文件夹}/."""
 
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 from PIL import Image
 
 TEST_GROUP_DIR = "3.测试组"
-TEMPLATE_ALBUMS = ("试验前", "试验中", "试验后", "数据")
+RENAME_CONFLICT_MESSAGE = "同名试验项目已存在，请重新命名"
+TEMPLATE_ALBUMS = ("试验前", "试验中", "数据", "试验后")
 IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 PLACEHOLDER_TEST_NAME = "请选择试验..."
 CUSTOM_TEST_NAME = "自定义"
@@ -36,15 +37,27 @@ def is_image_file(path: Path) -> bool:
     return path.is_file() and path.suffix.lower() in IMAGE_EXTS and not path.name.startswith(".")
 
 
-def test_dir(project_root: Path, test_name: str) -> Path:
-    return Path(project_root) / TEST_GROUP_DIR / (test_name or "").strip()
+def test_dir_key(leg_name: str, test_name: str) -> str:
+    """Directory name under 3.测试组/: {leg_name}-{中文试验名}."""
+    return f"{(leg_name or '').strip()}-{(test_name or '').strip()}"
 
 
-def album_dir(project_root: Path, test_name: str, album_name: str) -> Path:
-    return test_dir(project_root, test_name) / (album_name or "").strip()
+def test_dir(project_root: Path, leg_name: str, test_name: str) -> Path:
+    return Path(project_root) / TEST_GROUP_DIR / test_dir_key(leg_name, test_name)
 
 
-def _require_usable_test_name(test_name: str) -> str:
+def album_dir(project_root: Path, leg_name: str, test_name: str, album_name: str) -> Path:
+    return test_dir(project_root, leg_name, test_name) / (album_name or "").strip()
+
+
+def require_leg_name(leg_name: str) -> str:
+    name = (leg_name or "").strip()
+    if not name:
+        raise PhotoError("缺少 Leg 名称")
+    return name
+
+
+def require_usable_test_name(test_name: str) -> str:
     name = (test_name or "").strip()
     if not is_usable_test_name(name):
         raise PhotoError("请先选择试验名称")
@@ -65,19 +78,49 @@ def album_sort_key(name: str) -> Tuple[int, object]:
         return (1, name.casefold())
 
 
-def list_albums(project_root: Path, test_name: str) -> List[str]:
-    if not is_usable_test_name(test_name):
+def apply_album_order(
+    albums: Sequence[str], preferred: Optional[Sequence[str]] = None
+) -> List[str]:
+    """Order disk albums by preferred names; unknown names keep default sort at the end."""
+    present = [a for a in albums if a]
+    if not preferred:
+        return sorted(present, key=album_sort_key)
+    seen = set()
+    out: List[str] = []
+    for name in preferred:
+        text = (name or "").strip()
+        if not text or text in seen or text not in present:
+            continue
+        out.append(text)
+        seen.add(text)
+    rest = [a for a in present if a not in seen]
+    rest.sort(key=album_sort_key)
+    out.extend(rest)
+    return out
+
+
+def uses_data_photo_layout(album: str) -> bool:
+    """Large single-column embed; locked to the default 「数据」 folder only."""
+    return (album or "").strip() == "数据"
+
+
+def list_albums(
+    project_root: Path,
+    leg_name: str,
+    test_name: str,
+    order: Optional[Sequence[str]] = None,
+) -> List[str]:
+    if not (leg_name or "").strip() or not is_usable_test_name(test_name):
         return []
-    root = test_dir(project_root, test_name)
+    root = test_dir(project_root, leg_name, test_name)
     if not root.is_dir():
         return []
     names = [p.name for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")]
-    names.sort(key=album_sort_key)
-    return names
+    return apply_album_order(names, order)
 
 
-def list_photos(project_root: Path, test_name: str, album_name: str) -> List[Path]:
-    folder = album_dir(project_root, test_name, album_name)
+def list_photos(project_root: Path, leg_name: str, test_name: str, album_name: str) -> List[Path]:
+    folder = album_dir(project_root, leg_name, test_name, album_name)
     if not folder.is_dir():
         return []
     photos = [p for p in folder.iterdir() if is_image_file(p)]
@@ -85,28 +128,54 @@ def list_photos(project_root: Path, test_name: str, album_name: str) -> List[Pat
     return photos
 
 
-def iter_export_photos(project_root: Path, test_name: str) -> List[Path]:
+def iter_export_photos(
+    project_root: Path,
+    leg_name: str,
+    test_name: str,
+    order: Optional[Sequence[str]] = None,
+) -> List[Path]:
     out: List[Path] = []
-    for album in list_albums(project_root, test_name):
-        out.extend(list_photos(project_root, test_name, album))
+    for album in list_albums(project_root, leg_name, test_name, order=order):
+        out.extend(list_photos(project_root, leg_name, test_name, album))
     return out
 
 
-def create_album(project_root: Path, test_name: str, album_name: str) -> Path:
-    test = _require_usable_test_name(test_name)
+def remap_album_order(
+    order: Sequence[str], old_name: str, new_name: str
+) -> List[str]:
+    """Keep relative position when an album folder is renamed."""
+    old = (old_name or "").strip()
+    new = (new_name or "").strip()
+    out: List[str] = []
+    seen = set()
+    for name in order or []:
+        text = new if (name or "").strip() == old else (name or "").strip()
+        if not text or text in seen:
+            continue
+        out.append(text)
+        seen.add(text)
+    if new and new not in seen:
+        out.append(new)
+    return out
+
+
+def create_album(project_root: Path, leg_name: str, test_name: str, album_name: str) -> Path:
+    leg = require_leg_name(leg_name)
+    test = require_usable_test_name(test_name)
     name = validate_album_name(album_name)
-    dest = album_dir(project_root, test, name)
+    dest = album_dir(project_root, leg, test, name)
     if dest.exists():
         raise PhotoError(f"文件夹已存在：{name}")
     dest.mkdir(parents=True, exist_ok=False)
     return dest
 
 
-def create_template_albums(project_root: Path, test_name: str) -> List[str]:
-    test = _require_usable_test_name(test_name)
+def create_template_albums(project_root: Path, leg_name: str, test_name: str) -> List[str]:
+    leg = require_leg_name(leg_name)
+    test = require_usable_test_name(test_name)
     created = []
     for name in TEMPLATE_ALBUMS:
-        dest = album_dir(project_root, test, name)
+        dest = album_dir(project_root, leg, test, name)
         if dest.exists():
             continue
         dest.mkdir(parents=True, exist_ok=True)
@@ -114,12 +183,15 @@ def create_template_albums(project_root: Path, test_name: str) -> List[str]:
     return created
 
 
-def rename_album(project_root: Path, test_name: str, old_name: str, new_name: str) -> Path:
-    test = _require_usable_test_name(test_name)
+def rename_album(
+    project_root: Path, leg_name: str, test_name: str, old_name: str, new_name: str
+) -> Path:
+    leg = require_leg_name(leg_name)
+    test = require_usable_test_name(test_name)
     src_name = validate_album_name(old_name)
     dest_name = validate_album_name(new_name)
-    src = album_dir(project_root, test, src_name)
-    dest = album_dir(project_root, test, dest_name)
+    src = album_dir(project_root, leg, test, src_name)
+    dest = album_dir(project_root, leg, test, dest_name)
     if src_name == dest_name:
         return src
     if not src.is_dir():
@@ -130,8 +202,8 @@ def rename_album(project_root: Path, test_name: str, old_name: str, new_name: st
     return dest
 
 
-def delete_album(project_root: Path, test_name: str, album_name: str) -> None:
-    folder = album_dir(project_root, test_name, validate_album_name(album_name))
+def delete_album(project_root: Path, leg_name: str, test_name: str, album_name: str) -> None:
+    folder = album_dir(project_root, leg_name, test_name, validate_album_name(album_name))
     if not folder.exists():
         return
     shutil.rmtree(folder)
@@ -143,25 +215,42 @@ def delete_photo(path: Path) -> None:
         target.unlink()
 
 
-def rename_test_dir(project_root: Path, old_name: str, new_name: str) -> Optional[Path]:
-    """Rename the 试验目录. Returns the new path, or None if there was nothing to move."""
-    old = (old_name or "").strip()
-    new = (new_name or "").strip()
-    if not is_usable_test_name(old):
+def rename_test_dir(project_root: Path, old_key: str, new_key: str) -> Optional[Path]:
+    """Rename the 试验目录. Keys are folder names under 3.测试组/ (e.g. Leg 1-高温试验)."""
+    old = (old_key or "").strip()
+    new = (new_key or "").strip()
+    if not old or not new:
         return None
-    src = test_dir(project_root, old)
+    src = Path(project_root) / TEST_GROUP_DIR / old
     if not src.exists():
         return None
-    if not is_usable_test_name(new):
-        return None
-    dest = test_dir(project_root, new)
+    dest = Path(project_root) / TEST_GROUP_DIR / new
     if src.resolve() == dest.resolve():
         return src
     if dest.exists():
-        raise PhotoError(f"无法改名：目标试验目录已存在（{new}）")
+        raise PhotoError(RENAME_CONFLICT_MESSAGE)
     dest.parent.mkdir(parents=True, exist_ok=True)
     src.rename(dest)
     return dest
+
+
+def hooked_test_dir_key(project_root: Path, leg_name: str, test_name: str) -> Optional[str]:
+    """Return the on-disk trial dir key when hooked, else None."""
+    if not is_usable_test_name(test_name):
+        return None
+    key = test_dir_key(leg_name, test_name)
+    path = Path(project_root) / TEST_GROUP_DIR / key
+    return key if path.is_dir() else None
+
+
+def delete_test_dir(project_root: Path, dir_key: str) -> None:
+    """Remove the entire 试验目录. No-op if missing."""
+    key = (dir_key or "").strip()
+    if not key:
+        return
+    path = Path(project_root) / TEST_GROUP_DIR / key
+    if path.is_dir():
+        shutil.rmtree(path)
 
 
 def collect_drop_images(paths: Sequence[Path]) -> Tuple[List[Path], List[str]]:

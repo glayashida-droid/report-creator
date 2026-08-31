@@ -4,7 +4,7 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches
 
-from src.io.test_photos import TEMPLATE_ALBUMS, list_albums, list_photos
+from src.io.test_photos import list_albums, list_photos, uses_data_photo_layout
 
 
 class PhotoScraper:
@@ -16,20 +16,21 @@ class PhotoScraper:
     def add_photos_to_document(
         self,
         doc: Document,
+        leg_name: str,
         test_name: str,
         max_width_inches: float = 2.95,
         data_width_inches: float = 5.5,
+        order=None,
     ):
-        albums = list_albums(self.base_project_dir, test_name)
+        albums = list_albums(self.base_project_dir, leg_name, test_name, order=order)
         if not albums:
             return
         doc.add_paragraph("检测样品照片:", style="Normal")
         for album in albums:
-            photos = list_photos(self.base_project_dir, test_name, album)
+            photos = list_photos(self.base_project_dir, leg_name, test_name, album)
             if not photos:
                 continue
-            is_data = album == "数据"
-            if is_data:
+            if uses_data_photo_layout(album):
                 for img_path in photos:
                     self._add_one(doc, img_path, data_width_inches)
             else:

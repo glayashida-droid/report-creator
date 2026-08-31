@@ -18,7 +18,7 @@ from docx.text.paragraph import Paragraph
 from openpyxl.utils.cell import range_boundaries
 
 from src.io.data_tables import infer_header_row_count, read_preview_snapshot, resolve_attachment_path
-from src.io.test_photos import TEMPLATE_ALBUMS, list_albums, list_photos
+from src.io.test_photos import list_albums, list_photos, uses_data_photo_layout
 from src.language_copy import (
     field_label,
     format_conclusion,
@@ -27,7 +27,7 @@ from src.language_copy import (
     photo_caption,
     table_header_label,
 )
-from src.models.project_state import ProjectState, TestNode, TestResult, TestSample
+from src.models.project_state import ProjectState, TestLeg, TestNode, TestResult, TestSample
 
 # Fixed section-(1) text kept in the Chinese template contract
 ENV_CONDITION_TEXT = "（23±5）℃，（50±25）%RH"
@@ -99,16 +99,16 @@ class WordGenerator:
         if self._report_language == "中英文":
             self._fill_ze_cover_english(doc, state)
 
-        nodes = [node for _, node in state.iter_nodes_for_export(leg_filter)]
+        nodes = list(state.iter_nodes_for_export(leg_filter))
 
         self._replace_marker_with_table(
             doc, "{{样品信息表}}", lambda d, p: self._insert_sample_info_table(d, p, state)
         )
         self._replace_marker_with_table(
-            doc, "{{样品清单表}}", lambda d, p: self._insert_sample_list_table(d, p, state, nodes)
+            doc, "{{样品清单表}}", lambda d, p: self._insert_sample_list_table(d, p, state, [n for _, n in nodes])
         )
         self._replace_marker_with_table(
-            doc, "{{结果汇总表}}", lambda d, p: self._insert_summary_table(d, p, nodes)
+            doc, "{{结果汇总表}}", lambda d, p: self._insert_summary_table(d, p, [n for _, n in nodes])
         )
         self._replace_marker_with_blocks(
             doc,
@@ -223,7 +223,13 @@ class WordGenerator:
             "{{报告编号}}": report_no,
         }
         for key, val in visible.items():
-            placeholders["{{%s}}" % key] = val
+            ph_key = (
+                state.overview_display_label(key, side)
+                if ProjectState.is_custom_overview_key(key)
+                else key
+            )
+            if ph_key:
+                placeholders["{{%s}}" % ph_key] = val
         for key in state.excluded_overview_keys or []:
             placeholders.setdefault("{{%s}}" % key, "")
             if key == "申请公司":
@@ -810,8 +816,13 @@ class WordGenerator:
         for key, val in state.iter_overview_fields(side):
             if key in _COVER_SKIP:
                 continue
-            label = field_label(key, lang)
-            if lang == "英文" and not label:
+            if ProjectState.is_custom_overview_key(key):
+                label = state.overview_display_label(key, side)
+                if not label and not (val or "").strip():
+                    continue
+            else:
+                label = field_label(key, lang)
+            if lang == "英文" and not label and not ProjectState.is_custom_overview_key(key):
                 rows_data.append(("", val))
                 continue
             rows_data.append((label or key, val))
@@ -945,7 +956,7 @@ class WordGenerator:
 
     def _test_item_label(self, node: TestNode) -> str:
         zh = (node.test_name or "").strip()
-        en = (node.joined_test_item() or "").strip()
+        en = (node.test_name_en or "").strip()
         return language_text(zh, en, self._lang())
 
     @staticmethod
@@ -995,7 +1006,11 @@ class WordGenerator:
         return (node.joined_test_method() or "").replace(" / ", "-")
 
     def _node_conclusion(self, node: TestNode) -> str:
-        results = [s.result for s in (node.samples or []) if s.sample_id]
+        results = []
+        for s in (node.samples or []):
+            if not s.sample_id:
+                continue
+            results.extend(s.all_results())
         if not results:
             return format_conclusion(TestResult.NA, self._lang())
         if any(r == TestResult.FAIL for r in results):
@@ -1011,15 +1026,20 @@ class WordGenerator:
     # ------------------------------------------------------------------ test details
 
     def _insert_test_details(
-        self, doc: Document, anchor: Paragraph, nodes: List[TestNode], project_path: Optional[str]
+        self,
+        doc: Document,
+        anchor: Paragraph,
+        nodes: List[Tuple[TestLeg, TestNode]],
+        project_path: Optional[str],
     ):
-        for idx, node in enumerate(nodes, 1):
-            self._append_test_node(doc, anchor, node, idx, project_path)
+        for idx, (leg, node) in enumerate(nodes, 1):
+            self._append_test_node(doc, anchor, leg, node, idx, project_path)
 
     def _append_test_node(
         self,
         doc: Document,
         anchor: Paragraph,
+        leg: TestLeg,
         node: TestNode,
         index: int,
         project_path: Optional[str],
@@ -1103,7 +1123,14 @@ class WordGenerator:
             align=WD_ALIGN_PARAGRAPH.CENTER,
         )
         if project_path and node.test_name:
-            self._insert_photos(doc, anchor, Path(project_path), node.test_name)
+            self._insert_photos(
+                doc,
+                anchor,
+                Path(project_path),
+                leg.leg_name,
+                node.test_name,
+                order=getattr(node, "photo_album_order", None) or None,
+            )
 
     def _evaluation_text(self, node: TestNode) -> str:
         lang = self._lang()
@@ -1237,6 +1264,7 @@ class WordGenerator:
             (getattr(node, "result_desc_en", None) or "").strip(),
             lang,
         )
+        stds = node.resolved_standards()
         multi = len(descs) > 1
         headers = [
             self._H("样品编号", "Sample No."),
@@ -1251,6 +1279,7 @@ class WordGenerator:
             for i, h in enumerate(headers):
                 self._set_cell_text(table.rows[0].cells[i], h)
             self._set_row_as_tbl_header(table.rows[0])
+            std = stds[ti] if ti < len(stds) else None
             for idx, sample in enumerate(samples, 1):
                 if multi:
                     desc = table_desc
@@ -1260,10 +1289,14 @@ class WordGenerator:
                         desc = table_desc or node_desc or ""
                     else:
                         desc = sample_zh or table_desc or node_desc or "/"
+                if std is not None:
+                    conclusion = format_conclusion(sample.result_for(std), lang)
+                else:
+                    conclusion = format_conclusion(sample.result, lang)
                 vals = [
                     sample.sample_id,
                     desc,
-                    format_conclusion(sample.result, lang),
+                    conclusion,
                 ]
                 for i, v in enumerate(vals):
                     self._set_cell_text(table.rows[idx].cells[i], v)
@@ -1314,18 +1347,23 @@ class WordGenerator:
                 self._set_row_as_tbl_header(table.rows[i])
 
     def _insert_photos(
-        self, doc: Document, anchor: Paragraph, project_root: Path, test_name: str
+        self,
+        doc: Document,
+        anchor: Paragraph,
+        project_root: Path,
+        leg_name: str,
+        test_name: str,
+        order=None,
     ):
-        albums = list_albums(project_root, test_name)
+        albums = list_albums(project_root, leg_name, test_name, order=order)
         if not albums:
             return
         lang = self._lang()
         for album in albums:
-            photos = list_photos(project_root, test_name, album)
+            photos = list_photos(project_root, leg_name, test_name, album)
             if not photos:
                 continue
-            is_data = album == "数据" or album not in TEMPLATE_ALBUMS and "数据" in album
-            if is_data:
+            if uses_data_photo_layout(album):
                 for path in photos:
                     self._add_picture_file_before(doc, anchor, path, DATA_PHOTO_WIDTH_IN)
                     cap_text = photo_caption(album, lang, file_stem=path.stem)

@@ -4,6 +4,7 @@ from typing import List
 import pdfplumber
 
 _HEADER_MARKERS = ("服务项目", "项目名称", "测试项目")
+_CONTENT_MARKERS = ("报价单号", "Quotation No", "Q/CTI QP-VBD")
 _SKIP_EXACT = {
     "序号",
     "单位",
@@ -16,6 +17,20 @@ _SKIP_EXACT = {
 
 
 class QuotationParser:
+    @staticmethod
+    def is_quotation_pdf(pdf_path: str) -> bool:
+        """True when the first page matches the CTI quotation PDF template."""
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                if not pdf.pages:
+                    return False
+                text = pdf.pages[0].extract_text() or ""
+        except Exception:
+            return False
+        if "报价单" not in text:
+            return False
+        return any(marker in text for marker in _CONTENT_MARKERS)
+
     @staticmethod
     def extract_test_items(pdf_path: str) -> List[str]:
         """Extract service/test item names from a quotation PDF into a candidate list."""

@@ -2,10 +2,23 @@
 
 from pathlib import Path
 import tempfile
+from typing import List, Optional
 
-from PySide6.QtCore import Qt, QPoint, QRect, QRectF, QSize, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtCore import Qt, QByteArray, QMimeData, QPoint, QRect, QRectF, QSize, QTimer, Signal
+from PySide6.QtGui import (
+    QColor,
+    QDrag,
+    QDragEnterEvent,
+    QDragLeaveEvent,
+    QDragMoveEvent,
+    QDropEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
+    QApplication,
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
     QDialog, QRadioButton, QLineEdit, QButtonGroup, QMessageBox, QInputDialog,
     QSizePolicy, QLayout,
@@ -27,15 +40,18 @@ from src.io.test_photos import (
     is_usable_test_name,
     list_albums,
     list_photos,
+    remap_album_order,
     rename_album,
     rename_all_in_album,
     rename_photo,
     album_dir,
 )
+from src.ui.gantt_utils import find_leg_for_node
 from src.models.project_state import DUPLICATE_TEST_NAME_MESSAGE
 
 # Sentinel from RenamePhotosDialog / _ask_prefix: keep source basenames on import.
 KEEP_ORIGINAL = object()
+ALBUM_ORDER_MIME = "application/x-reach-photo-album"
 
 
 def warn_duplicate_test_names(parent) -> None:
@@ -187,25 +203,78 @@ class ThumbGallery(ContainedScrollArea):
         host.setMinimumHeight(max(height, 1))
         host.resize(width, max(height, 1))
 
+def album_name_from_mime(mime: QMimeData) -> str:
+    raw = mime.data(ALBUM_ORDER_MIME)
+    if raw:
+        return bytes(raw).decode("utf-8").strip()
+    return ""
+
+
+def insert_index_for_album_y(host: QWidget, row_widgets: list, y: int) -> int:
+    """Return list index to insert before, based on Y in host coordinates."""
+    if not row_widgets:
+        return 0
+    for i, row in enumerate(row_widgets):
+        top = row.mapTo(host, QPoint(0, 0)).y()
+        center = top + row.height() // 2
+        if y < center:
+            return i
+    return len(row_widgets)
+
+
 class FolderChip(QWidget):
-    """Folder-shaped label; double-click to rename."""
+    """Folder-shaped label; drag to reorder, double-click to rename."""
 
     doubleClicked = Signal()
 
     def __init__(self, name="", parent=None):
         super().__init__(parent)
         self._name = name or ""
+        self._drag_start: Optional[QPoint] = None
         self.setObjectName("photoFolderChip")
-        self.setCursor(Qt.PointingHandCursor)
-        self.setToolTip("双击改名")
+        self.setCursor(Qt.OpenHandCursor)
+        self.setToolTip("拖动调整顺序；双击改名")
         self.setFixedSize(92, 64)
 
     def setText(self, name):
         self._name = name or ""
         self.update()
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_start = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not (event.buttons() & Qt.LeftButton) or self._drag_start is None:
+            super().mouseMoveEvent(event)
+            return
+        if (
+            event.position().toPoint() - self._drag_start
+        ).manhattanLength() < QApplication.startDragDistance():
+            return
+        name = (self._name or "").strip()
+        if not name:
+            return
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(ALBUM_ORDER_MIME, QByteArray(name.encode("utf-8")))
+        mime.setText(name)
+        drag.setMimeData(mime)
+        self.setCursor(Qt.ClosedHandCursor)
+        try:
+            drag.exec(Qt.MoveAction)
+        finally:
+            self._drag_start = None
+            # Drop may rebuild rows and delete this chip before exec returns.
+            try:
+                self.setCursor(Qt.OpenHandCursor)
+            except RuntimeError:
+                pass
+
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton:
+            self._drag_start = None
             self.doubleClicked.emit()
             event.accept()
             return
@@ -455,10 +524,16 @@ class PhotoThumb(QFrame):
 class PhotoAlbumRow(QFrame):
     # True when the album list or row order must be rebuilt (delete/rename folder).
     changed = Signal(bool)
+    albumReorderDrop = Signal(str, int)  # album_name, 0=before this row / 1=after
+    albumRenamed = Signal(str, str)  # old_name, new_name — emitted before rebuild
+    albumDeleted = Signal(str)  # album_name
 
-    def __init__(self, project_root: Path, test_name: str, album_name: str, project_id: str, parent=None):
+    def __init__(
+        self, project_root: Path, leg_name: str, test_name: str, album_name: str, project_id: str, parent=None
+    ):
         super().__init__(parent)
         self.project_root = Path(project_root)
+        self.leg_name = leg_name or ""
         self.test_name = test_name
         self.album_name = album_name
         self.project_id = project_id
@@ -512,7 +587,7 @@ class PhotoAlbumRow(QFrame):
         self.reload()
 
     def folder(self) -> Path:
-        return album_dir(self.project_root, self.test_name, self.album_name)
+        return album_dir(self.project_root, self.leg_name, self.test_name, self.album_name)
 
     def reload(self):
         while self.thumb_layout.count():
@@ -521,7 +596,7 @@ class PhotoAlbumRow(QFrame):
             if widget is not None:
                 widget.setParent(None)
                 widget.deleteLater()
-        photos = list_photos(self.project_root, self.test_name, self.album_name)
+        photos = list_photos(self.project_root, self.leg_name, self.test_name, self.album_name)
         for path in photos:
             thumb = PhotoThumb(path, self.thumb_host)
             thumb.removed.connect(self._on_thumb_removed)
@@ -566,7 +641,7 @@ class PhotoAlbumRow(QFrame):
         self.changed.emit(False)
 
     def _rename_all(self):
-        photos = list_photos(self.project_root, self.test_name, self.album_name)
+        photos = list_photos(self.project_root, self.leg_name, self.test_name, self.album_name)
         if not photos:
             QMessageBox.information(self, "提示", "这个文件夹里还没有照片。")
             return
@@ -582,17 +657,19 @@ class PhotoAlbumRow(QFrame):
         self.changed.emit(False)
 
     def _rename_folder(self):
-        text, ok = QInputDialog.getText(self, "改名", "新的文件夹名称：", text=self.album_name)
+        old = self.album_name
+        text, ok = QInputDialog.getText(self, "改名", "新的文件夹名称：", text=old)
         if not ok:
             return
         try:
-            rename_album(self.project_root, self.test_name, self.album_name, text)
+            rename_album(self.project_root, self.leg_name, self.test_name, old, text)
         except PhotoError as exc:
             QMessageBox.warning(self, "提示", str(exc))
             return
-        self.album_name = text.strip()
-        self.reload()
-        self.changed.emit(True)
+        new = text.strip()
+        self.album_name = new
+        self.chip.setText(new)
+        self.albumRenamed.emit(old, new)
 
     def _delete_folder(self):
         answer = QMessageBox.question(
@@ -604,24 +681,46 @@ class PhotoAlbumRow(QFrame):
         )
         if answer != QMessageBox.Yes:
             return
-        delete_album(self.project_root, self.test_name, self.album_name)
-        self.changed.emit(True)
+        name = self.album_name
+        delete_album(self.project_root, self.leg_name, self.test_name, name)
+        self.albumDeleted.emit(name)
 
-    def dragEnterEvent(self, event):
+    def _accepts_album_reorder(self, mime: QMimeData) -> bool:
+        name = album_name_from_mime(mime)
+        return bool(name) and name != self.album_name
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if self._accepts_album_reorder(event.mimeData()):
+            event.setDropAction(Qt.MoveAction)
+            event.accept()
+            return
         if event.mimeData().hasUrls():
             event.setDropAction(Qt.CopyAction)
             event.accept()
             return
         event.ignore()
 
-    def dragMoveEvent(self, event):
+    def dragMoveEvent(self, event: QDragMoveEvent):
+        if self._accepts_album_reorder(event.mimeData()):
+            event.setDropAction(Qt.MoveAction)
+            event.accept()
+            return
         if event.mimeData().hasUrls():
             event.setDropAction(Qt.CopyAction)
             event.accept()
             return
         event.ignore()
 
-    def dropEvent(self, event):
+    def dropEvent(self, event: QDropEvent):
+        name = album_name_from_mime(event.mimeData())
+        if name and name != self.album_name:
+            event.setDropAction(Qt.MoveAction)
+            event.accept()
+            # Insert before this row if pointer is in the upper half; else after.
+            local_y = event.position().toPoint().y()
+            insert_at = 0 if local_y < self.height() // 2 else 1
+            self.albumReorderDrop.emit(name, insert_at)
+            return
         urls = event.mimeData().urls()
         paths = [Path(url.toLocalFile()) for url in urls if url.isLocalFile()]
         event.setDropAction(Qt.CopyAction)
@@ -638,18 +737,23 @@ class TestPhotosPanel(QWidget):
     def __init__(
         self,
         project_root,
+        leg_name,
         test_name,
         project_id,
         parent=None,
         project_state=None,
         form_scroll=None,
+        node_data=None,
     ):
         super().__init__(parent)
         self.project_root = Path(project_root) if project_root else None
+        self.leg_name = leg_name or ""
         self.test_name = test_name or ""
         self.project_id = project_id or ""
         self.project_state = project_state
+        self.node_data = node_data
         self._form_scroll = form_scroll
+        self._drop_indicator = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -662,7 +766,7 @@ class TestPhotosPanel(QWidget):
 
         toolbar = QHBoxLayout()
         self.btn_template = QPushButton("模版新建")
-        self.btn_template.setToolTip("一次开出：试验前、试验中、试验后、数据（已有的跳过）")
+        self.btn_template.setToolTip("一次开出：试验前、试验中、数据、试验后（已有的跳过）")
         self.btn_custom = QPushButton("自定义新建")
         self.btn_template.clicked.connect(self._add_template)
         self.btn_custom.clicked.connect(self._add_custom)
@@ -672,20 +776,137 @@ class TestPhotosPanel(QWidget):
         layout.addLayout(toolbar)
 
         self.rows_host = QWidget()
+        self.rows_host.setAcceptDrops(True)
+        self.rows_host.dragEnterEvent = self._host_drag_enter
+        self.rows_host.dragMoveEvent = self._host_drag_move
+        self.rows_host.dragLeaveEvent = self._host_drag_leave
+        self.rows_host.dropEvent = self._host_drop
         self.rows_layout = QVBoxLayout(self.rows_host)
         self.rows_layout.setContentsMargins(0, 0, 0, 0)
         self.rows_layout.setSpacing(8)
+        self._drop_indicator = QFrame(self.rows_host)
+        self._drop_indicator.setObjectName("legDropIndicator")
+        self._drop_indicator.setFixedHeight(3)
+        self._drop_indicator.hide()
         layout.addWidget(self.rows_host)
 
         self.reload()
 
+    def _preferred_order(self) -> Optional[List[str]]:
+        if self.node_data is None:
+            return None
+        order = getattr(self.node_data, "photo_album_order", None) or []
+        return list(order) if order else None
+
+    def _seed_order_from_disk(self) -> List[str]:
+        if self.project_root is None:
+            return []
+        return list_albums(self.project_root, self.leg_name, self.test_name, order=None)
+
+    def _write_order(self, names: List[str]) -> None:
+        if self.node_data is None:
+            return
+        self.node_data.photo_album_order = list(names)
+
+    def _row_widgets(self) -> List[PhotoAlbumRow]:
+        rows = []
+        for i in range(self.rows_layout.count()):
+            widget = self.rows_layout.itemAt(i).widget()
+            if isinstance(widget, PhotoAlbumRow):
+                rows.append(widget)
+        return rows
+
+    def current_album_order(self) -> List[str]:
+        return [row.album_name for row in self._row_widgets()]
+
+    def _reorder_album(self, album_name: str, insert_at: int) -> None:
+        names = self.current_album_order()
+        if album_name not in names:
+            return
+        old = names.index(album_name)
+        names.pop(old)
+        if insert_at > old:
+            insert_at -= 1
+        insert_at = max(0, min(insert_at, len(names)))
+        names.insert(insert_at, album_name)
+        self._write_order(names)
+        self._hide_drop_indicator()
+        # Rebuild after QDrag.exec returns; deleting FolderChip mid-drag raises
+        # "Internal C++ object already deleted".
+        QTimer.singleShot(0, self._finish_reorder_ui)
+
+    def _finish_reorder_ui(self) -> None:
+        self._reload_preserve_scroll()
+        self.changed.emit()
+
+    def _host_accepts_reorder(self, mime: QMimeData) -> bool:
+        return bool(album_name_from_mime(mime))
+
+    def _host_drag_enter(self, event: QDragEnterEvent):
+        if self._host_accepts_reorder(event.mimeData()):
+            event.setDropAction(Qt.MoveAction)
+            event.accept()
+            return
+        event.ignore()
+
+    def _host_drag_move(self, event: QDragMoveEvent):
+        if not self._host_accepts_reorder(event.mimeData()):
+            self._hide_drop_indicator()
+            event.ignore()
+            return
+        rows = self._row_widgets()
+        y = event.position().toPoint().y()
+        index = insert_index_for_album_y(self.rows_host, rows, y)
+        self._show_drop_indicator(index, rows)
+        event.setDropAction(Qt.MoveAction)
+        event.accept()
+
+    def _host_drag_leave(self, event: QDragLeaveEvent):
+        self._hide_drop_indicator()
+        event.accept()
+
+    def _host_drop(self, event: QDropEvent):
+        name = album_name_from_mime(event.mimeData())
+        self._hide_drop_indicator()
+        if not name:
+            event.ignore()
+            return
+        rows = self._row_widgets()
+        y = event.position().toPoint().y()
+        insert_at = insert_index_for_album_y(self.rows_host, rows, y)
+        event.setDropAction(Qt.MoveAction)
+        event.accept()
+        self._reorder_album(name, insert_at)
+
+    def _show_drop_indicator(self, index: int, rows: List[PhotoAlbumRow]) -> None:
+        ind = self._drop_indicator
+        if ind is None:
+            return
+        width = max(self.rows_host.width() - 4, 40)
+        if not rows:
+            y = 0
+        elif index <= 0:
+            y = rows[0].mapTo(self.rows_host, QPoint(0, 0)).y()
+        elif index >= len(rows):
+            last = rows[-1]
+            y = last.mapTo(self.rows_host, QPoint(0, last.height())).y()
+        else:
+            y = rows[index].mapTo(self.rows_host, QPoint(0, 0)).y()
+        ind.setGeometry(2, max(y - 1, 0), width, 3)
+        ind.raise_()
+        ind.show()
+
+    def _hide_drop_indicator(self) -> None:
+        if self._drop_indicator is not None:
+            self._drop_indicator.hide()
+
     def counts(self):
         if self.project_root is None or not is_usable_test_name(self.test_name):
             return 0, 0
-        albums = list_albums(self.project_root, self.test_name)
+        albums = list_albums(self.project_root, self.leg_name, self.test_name, order=self._preferred_order())
         photos = 0
         for name in albums:
-            photos += len(list_photos(self.project_root, self.test_name, name))
+            photos += len(list_photos(self.project_root, self.leg_name, self.test_name, name))
         return len(albums), photos
 
     def _ready(self):
@@ -699,7 +920,12 @@ class TestPhotosPanel(QWidget):
 
     def _ensure_unique_test_name(self) -> bool:
         state = self.project_state
-        if state is not None and not state.test_name_is_unique(self.test_name):
+        if state is None or self.node_data is None:
+            return True
+        leg = find_leg_for_node(state, self.node_data)
+        if leg is None:
+            return True
+        if not state.test_name_is_unique_in_leg(leg.leg_id, self.test_name):
             warn_duplicate_test_names(self)
             return False
         return True
@@ -737,16 +963,50 @@ class TestPhotosPanel(QWidget):
             self.lbl_hint.show()
             return
 
-        albums = list_albums(self.project_root, self.test_name)
+        order = self._preferred_order()
+        albums = list_albums(self.project_root, self.leg_name, self.test_name, order=order)
         if albums:
-            self.lbl_hint.setText("把图片或一层文件夹拖到某一行，即拷贝到本地镜像并重命名。")
+            self.lbl_hint.setText(
+                "把图片或一层文件夹拖到某一行即可导入；拖动左侧文件夹可调整贴图顺序。"
+            )
         else:
-            self.lbl_hint.setText("还没有照片文件夹。可用「模版新建」一次开出试验前 / 中 / 后 / 数据。")
+            self.lbl_hint.setText("还没有照片文件夹。可用「模版新建」一次开出试验前 / 中 / 数据 / 后。")
         self.lbl_hint.show()
         for name in albums:
-            row = PhotoAlbumRow(self.project_root, self.test_name, name, self.project_id, self.rows_host)
+            row = PhotoAlbumRow(self.project_root, self.leg_name, self.test_name, name, self.project_id, self.rows_host)
             row.changed.connect(self._on_row_changed)
+            row.albumReorderDrop.connect(self._on_row_relative_reorder)
+            row.albumRenamed.connect(self._on_album_renamed)
+            row.albumDeleted.connect(self._on_album_deleted)
             self.rows_layout.addWidget(row)
+        if self._drop_indicator is not None:
+            self._drop_indicator.setParent(self.rows_host)
+            self._drop_indicator.hide()
+
+    def _on_row_relative_reorder(self, album_name: str, before_or_after: int):
+        sender = self.sender()
+        rows = self._row_widgets()
+        if not isinstance(sender, PhotoAlbumRow) or sender not in rows:
+            return
+        insert_at = rows.index(sender) + before_or_after
+        self._reorder_album(album_name, insert_at)
+
+    def _on_album_renamed(self, old_name: str, new_name: str):
+        order = self._preferred_order()
+        if order:
+            self._write_order(remap_album_order(order, old_name, new_name))
+        else:
+            # Lock current on-screen position (chip already shows new_name).
+            self._write_order(self.current_album_order())
+        self._reload_preserve_scroll()
+        self.changed.emit()
+
+    def _on_album_deleted(self, album_name: str):
+        order = self._preferred_order()
+        if order is not None:
+            self._write_order([n for n in order if n != album_name])
+        self._reload_preserve_scroll()
+        self.changed.emit()
 
     def _on_row_changed(self, rebuild_rows=False):
         if rebuild_rows:
@@ -759,12 +1019,18 @@ class TestPhotosPanel(QWidget):
         if not self._ensure_unique_test_name():
             return
         try:
-            created = create_template_albums(self.project_root, self.test_name)
+            created = create_template_albums(self.project_root, self.leg_name, self.test_name)
         except PhotoError as exc:
             QMessageBox.warning(self, "提示", str(exc))
             return
-        if not created and list_albums(self.project_root, self.test_name):
+        if not created and list_albums(self.project_root, self.leg_name, self.test_name, order=self._preferred_order()):
             QMessageBox.information(self, "提示", "模版四个文件夹都已存在。")
+        if created and self.node_data is not None:
+            order = list(self._preferred_order() or self._seed_order_from_disk())
+            for name in created:
+                if name not in order:
+                    order.append(name)
+            self._write_order(order)
         self._reload_preserve_scroll()
         self.changed.emit()
 
@@ -777,9 +1043,15 @@ class TestPhotosPanel(QWidget):
         if not ok:
             return
         try:
-            create_album(self.project_root, self.test_name, text)
+            create_album(self.project_root, self.leg_name, self.test_name, text)
         except PhotoError as exc:
             QMessageBox.warning(self, "提示", str(exc))
             return
+        name = (text or "").strip()
+        if name and self.node_data is not None:
+            order = list(self._preferred_order() or self._seed_order_from_disk())
+            if name not in order:
+                order.append(name)
+            self._write_order(order)
         self._reload_preserve_scroll()
         self.changed.emit()

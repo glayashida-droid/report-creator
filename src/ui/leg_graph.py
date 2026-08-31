@@ -1,6 +1,6 @@
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QScrollArea, QComboBox, QFrame, QSizePolicy, QMessageBox,
@@ -15,9 +15,13 @@ from src.ui.test_detail_dialog import TestDetailDialog
 from src.io.test_photos import (
     CUSTOM_TEST_NAME,
     PhotoError,
+    RENAME_CONFLICT_MESSAGE,
+    delete_test_dir,
+    hooked_test_dir_key,
     is_usable_test_name,
     rename_test_dir,
     test_dir,
+    test_dir_key,
 )
 from src.io.data_tables import retarget_node_data_tables
 
@@ -91,6 +95,7 @@ class TestNodeWidget(QFrame):
         self.candidate_pool = candidate_pool
         self.db_loader = db_loader
         self._committed_name = self._normalized_test_name(node_data.test_name)
+        self._committed_name_en = (node_data.test_name_en or "").strip()
         self._initializing = True
         self.setObjectName("testNodeCard")
         self.setFrameShape(QFrame.StyledPanel)
@@ -122,7 +127,7 @@ class TestNodeWidget(QFrame):
         le.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         le.setTextMargins(2, 0, 4, 0)
         le.editingFinished.connect(lambda: snap_combo_text_start(self.combo))
-        fill_test_combo(self.combo, self.candidate_pool, self.node_data.test_name)
+        fill_test_combo(self.combo, self.candidate_pool, self._active_display_name())
         self.combo.currentTextChanged.connect(self.on_test_changed)
         self.combo.currentTextChanged.connect(lambda _text: sync_test_combo_tooltip(self.combo))
         self.combo.lineEdit().editingFinished.connect(self.on_test_edit_finished)
@@ -194,8 +199,39 @@ class TestNodeWidget(QFrame):
             self
         )
         if dialog.exec():
+            old_cn = self._committed_name
+            old_en = self._committed_name_en
+            new_cn = (self.node_data.test_name or "").strip()
+            new_en = (self.node_data.test_name_en or "").strip()
+            if new_cn != old_cn:
+                if not self._rename_chinese_test_folder(old_cn, new_cn):
+                    self.node_data.test_name = old_cn
+                    self.node_data.test_name_en = old_en
+                    new_cn = old_cn
+                    new_en = old_en
+            self._committed_name = new_cn
+            self._committed_name_en = new_en
+            self.refresh_edit_language_display()
             self._refresh_complete_mark()
             self.node_updated.emit()
+
+    def _is_english_edit(self) -> bool:
+        state = self._project_state()
+        return state is not None and state._edit_lang() == "英文"
+
+    def _active_display_name(self) -> str:
+        if self._is_english_edit():
+            return self._committed_name_en
+        return self._committed_name
+
+    def refresh_edit_language_display(self) -> None:
+        """Refresh combo text when edit language toggles (CN ↔ EN card label)."""
+        self._initializing = True
+        current = self._active_display_name()
+        fill_test_combo(self.combo, self.candidate_pool, current)
+        self._initializing = False
+        self._sync_detail_button()
+        sync_test_combo_tooltip(self.combo)
 
     def _normalized_test_name(self, text: str) -> str:
         name = (text or "").strip()
@@ -214,13 +250,16 @@ class TestNodeWidget(QFrame):
 
     def resync_from_committed(self) -> None:
         """Restore combo text to the last committed name without touching disk."""
-        if self._normalized_test_name(self.combo.currentText()) == self._committed_name:
+        if self._is_english_edit():
+            self.node_data.test_name_en = self._committed_name_en
+        else:
             self.node_data.test_name = self._committed_name
+        display = self._active_display_name()
+        if self._normalized_test_name(self.combo.currentText()) == display:
             return
         self.combo.blockSignals(True)
-        fill_test_combo(self.combo, self.candidate_pool, self._committed_name)
+        fill_test_combo(self.combo, self.candidate_pool, display)
         self.combo.blockSignals(False)
-        self.node_data.test_name = self._committed_name
         self._refresh_complete_mark()
         self._sync_detail_button()
 
@@ -241,25 +280,64 @@ class TestNodeWidget(QFrame):
         needle = (name or "").strip()
         if not needle:
             return False
-        state = self._project_state()
-        if state is None:
+        leg = self._leg_widget()
+        if leg is None:
             return False
-        for leg in state.legs or []:
-            for node in leg.nodes or []:
-                if node is self.node_data:
-                    continue
-                if (node.test_name or "").strip() == needle:
-                    return True
+        for node in leg.leg_data.nodes or []:
+            if node is self.node_data:
+                continue
+            if (node.test_name or "").strip() == needle:
+                return True
         return False
 
+    def _leg_widget(self):
+        parent = self.parent()
+        while parent is not None:
+            if hasattr(parent, "leg_data"):
+                return parent
+            parent = parent.parent()
+        return None
+
+    def _leg_name(self) -> str:
+        leg = self._leg_widget()
+        return (leg.leg_data.leg_name if leg is not None else "") or ""
+
     def _should_rename_folder(self, old: str, new: str) -> bool:
-        """Only move disk folders when this node uniquely owns the old name."""
+        """Only move disk folders when hooked and this node uniquely owns the old name."""
         if not is_usable_test_name(old) or not is_usable_test_name(new):
             return False
         if old == new:
             return False
         if self._other_nodes_use_name(old):
             return False
+        state = self._project_state()
+        root = Path(state.project_path) if state and getattr(state, "project_path", "") else None
+        if root is None or not root.is_dir():
+            return False
+        return test_dir(root, self._leg_name(), old).is_dir()
+
+    def _rename_chinese_test_folder(self, old: str, new: str) -> bool:
+        """Rename disk folders when the Chinese card name changes. Returns False if blocked."""
+        if old == new:
+            return True
+        state = self._project_state()
+        root = Path(state.project_path) if state and getattr(state, "project_path", "") else None
+        if root is None or not root.is_dir():
+            return True
+        if not self._should_rename_folder(old, new):
+            return True
+        old_key = test_dir_key(self._leg_name(), old)
+        new_key = test_dir_key(self._leg_name(), new)
+        dest = test_dir(root, self._leg_name(), new)
+        if dest.exists():
+            self._warn_rename_failed(RENAME_CONFLICT_MESSAGE, old)
+            return False
+        try:
+            rename_test_dir(root, old_key, new_key)
+        except PhotoError:
+            self._warn_rename_failed(RENAME_CONFLICT_MESSAGE, old)
+            return False
+        retarget_node_data_tables(self.node_data, old_key, new_key)
         return True
 
     def _commit_test_name(self, name):
@@ -269,31 +347,17 @@ class TestNodeWidget(QFrame):
             self._refresh_complete_mark()
             self.node_updated.emit()
             return
-        state = self._project_state()
-        root = Path(state.project_path) if state and getattr(state, "project_path", "") else None
-        retarget_paths = False
-        if (
-            root is not None
-            and root.is_dir()
-            and self._should_rename_folder(old, name)
-        ):
-            dest = test_dir(root, name)
-            if dest.exists():
-                # Temporary duplicate names are allowed while editing; skip move.
-                pass
-            else:
-                try:
-                    rename_test_dir(root, old, name)
-                except PhotoError as exc:
-                    self._warn_rename_failed(str(exc), old)
-                    return
-                retarget_paths = True
-        elif not self._other_nodes_use_name(old):
-            # No shared owner of the old name: keep index paths aligned with the new name.
-            retarget_paths = True
-        if retarget_paths:
-            retarget_node_data_tables(self.node_data, old, name)
+        if not self._rename_chinese_test_folder(old, name):
+            self.node_data.test_name = old
+            return
         self._committed_name = name
+        self._refresh_complete_mark()
+        self._sync_detail_button()
+        self.node_updated.emit()
+
+    def _commit_english_name(self, name: str) -> None:
+        self.node_data.test_name_en = name
+        self._committed_name_en = name
         self._refresh_complete_mark()
         self._sync_detail_button()
         self.node_updated.emit()
@@ -302,9 +366,14 @@ class TestNodeWidget(QFrame):
         if self._initializing or pool_drag_active():
             return
         name = self._normalized_test_name(text)
-        if self.node_data.test_name == name:
-            return
-        self.node_data.test_name = name
+        if self._is_english_edit():
+            if (self.node_data.test_name_en or "").strip() == name:
+                return
+            self.node_data.test_name_en = name
+        else:
+            if self.node_data.test_name == name:
+                return
+            self.node_data.test_name = name
         self._refresh_complete_mark()
         self.node_updated.emit()
 
@@ -312,8 +381,34 @@ class TestNodeWidget(QFrame):
         if self._initializing or pool_drag_active():
             return
         name = self._normalized_test_name(self.combo.currentText())
+        if self._is_english_edit():
+            pool = set(self.candidate_pool or [])
+            if name in pool:
+                # Quote/template pool entries are Chinese; picking one updates CN test_name
+                # (and the hooked trial dir), not the EN card label.
+                if name == self._committed_name:
+                    self.refresh_edit_language_display()
+                    return
+                if self.combo.currentText() != name:
+                    self.combo.blockSignals(True)
+                    self.combo.setEditText(name)
+                    self.combo.blockSignals(False)
+                    snap_combo_text_start(self.combo)
+                self._commit_test_name(name)
+                self.refresh_edit_language_display()
+                return
+            if name == self._committed_name_en:
+                if self.combo.currentText().strip() != name:
+                    self.resync_from_committed()
+                return
+            if self.combo.currentText() != name:
+                self.combo.blockSignals(True)
+                self.combo.setEditText(name)
+                self.combo.blockSignals(False)
+                snap_combo_text_start(self.combo)
+            self._commit_english_name(name)
+            return
         if name == self._committed_name:
-            # Combo may have drifted visually; snap display without a rename.
             if self.combo.currentText().strip() != name:
                 self.resync_from_committed()
             return
@@ -492,7 +587,45 @@ class LegWidget(QFrame):
     def on_add_node(self):
         self.insert_node_at(len(self.leg_data.nodes))
         
+    def _project_state(self):
+        widget = self.parent()
+        while widget is not None:
+            state = getattr(widget, "state", None)
+            if state is not None:
+                return state
+            widget = widget.parent()
+        return None
+
+    def _project_root(self) -> Optional[Path]:
+        state = self._project_state()
+        raw = getattr(state, "project_path", "") if state is not None else ""
+        return Path(raw) if raw else None
+
+    def _hooked_dir_key_for_node(self, nw: TestNodeWidget) -> Optional[str]:
+        root = self._project_root()
+        if root is None or not root.is_dir():
+            return None
+        return hooked_test_dir_key(root, self.leg_data.leg_name, nw.node_data.test_name)
+
     def on_node_deleted(self, nw: TestNodeWidget):
+        key = self._hooked_dir_key_for_node(nw)
+        if key is not None:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle("删除试验")
+            box.setText(
+                f"将同时删除试验目录「{key}」及其中的照片与数据表附件。\n是否继续？"
+            )
+            box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            box.setDefaultButton(QMessageBox.No)
+            if box.exec() != QMessageBox.Yes:
+                return
+            root = self._project_root()
+            if root is not None:
+                delete_test_dir(root, key)
+        self._remove_node_widget(nw)
+
+    def _remove_node_widget(self, nw: TestNodeWidget):
         self.node_widgets.remove(nw)
         self.leg_data.nodes.remove(nw.node_data)
         nw.setParent(None)
@@ -503,7 +636,7 @@ class LegWidget(QFrame):
         self.candidate_pool = new_pool
         for nw in self.node_widgets:
             nw.candidate_pool = new_pool
-            fill_test_combo(nw.combo, new_pool, nw.node_data.test_name)
+            fill_test_combo(nw.combo, new_pool, nw._active_display_name())
 
 from src.parsers.db_loader import BaseDataLoader
 from src.ui.gantt_chart import GanttChartWidget
@@ -687,7 +820,36 @@ class LegGraphArea(QWidget):
         insert_at = max(self.legs_layout.count() - 1, 0)
         self.legs_layout.insertWidget(insert_at, lw, 0, Qt.AlignTop)
         
+    def _hooked_dir_keys_for_leg(self, lw: LegWidget) -> List[str]:
+        raw = getattr(self.state, "project_path", "") or ""
+        root = Path(raw) if raw else None
+        if root is None or not root.is_dir():
+            return []
+        keys: List[str] = []
+        seen = set()
+        for node in lw.leg_data.nodes or []:
+            key = hooked_test_dir_key(root, lw.leg_data.leg_name, node.test_name)
+            if key is None or key in seen:
+                continue
+            keys.append(key)
+            seen.add(key)
+        return keys
+
     def on_leg_deleted(self, lw: LegWidget):
+        keys = self._hooked_dir_keys_for_leg(lw)
+        if keys:
+            listing = "\n".join(f"· {key}" for key in keys)
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle("删除 Leg")
+            box.setText(f"将同时删除以下试验目录：\n{listing}\n\n是否继续？")
+            box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            box.setDefaultButton(QMessageBox.No)
+            if box.exec() != QMessageBox.Yes:
+                return
+            root = Path(self.state.project_path)
+            for key in keys:
+                delete_test_dir(root, key)
         self.leg_widgets.remove(lw)
         self.state.legs.remove(lw.leg_data)
         lw.setParent(None)
@@ -698,3 +860,8 @@ class LegGraphArea(QWidget):
         pool = self._picker_pool()
         for lw in self.leg_widgets:
             lw.update_pool(pool)
+
+    def refresh_edit_language_display(self):
+        for lw in self.leg_widgets:
+            for nw in lw.node_widgets:
+                nw.refresh_edit_language_display()

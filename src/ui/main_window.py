@@ -1,6 +1,7 @@
 import os
 import sys
 import re
+import shutil
 import subprocess
 from typing import Optional
 from pathlib import Path
@@ -22,6 +23,7 @@ from src.application_ingest import apply_application_data
 from application_parser import parse_application, prepare_excel_bytes
 from src.parsers.pdf_parser import QuotationParser
 from src.io.project_mirror import incremental_copy, list_saved_projects, local_project_dir
+from src.io.sample_files import find_sample_files
 from src.io.network_sources import (
     NetworkSourcesConfig,
     ProbeResult,
@@ -43,18 +45,23 @@ from src.ui.load_state_dialog import LoadStateDialog
 from src.ui.leg_template_dialog import ImportTemplateDialog
 from src.ui.save_success_dialog import SaveSuccessDialog
 from src.ui.candidate_pool import CandidatePoolList
-from src.ui.theme import polish_date_edit_calendar, refresh_icon, set_calendar_selectable_range
+from src.ui.theme import polish_date_edit_calendar, plus_icon, refresh_icon, set_calendar_selectable_range
 from src.language_copy import field_label
+from src.sample_columns import ALL_SAMPLE_COLUMNS
 
 
-class _GroupTitleButtonHost(QObject):
-    """Keep a small tool button parked just right of a QGroupBox title."""
+class _GroupTitleToolbarHost(QObject):
+    """Keep tool buttons parked just right of a QGroupBox title."""
 
-    def __init__(self, group: QGroupBox, button: QToolButton, parent=None):
+    def __init__(self, group: QGroupBox, widgets: list, parent=None):
         super().__init__(parent)
         self._group = group
-        self._button = button
+        self._widgets = list(widgets)
         group.installEventFilter(self)
+        self.reposition()
+
+    def set_widgets(self, widgets: list):
+        self._widgets = list(widgets)
         self.reposition()
 
     def eventFilter(self, watched, event):
@@ -68,14 +75,15 @@ class _GroupTitleButtonHost(QObject):
 
     def reposition(self):
         group = self._group
-        btn = self._button
-        btn.adjustSize()
         fm = group.fontMetrics()
-        # Match QGroupBox::title QSS: left 12px, horizontal padding 8px
         x = 12 + 8 + fm.horizontalAdvance(group.title()) + 2
-        y = max(0, (14 - btn.height()) // 2 + 1)
-        btn.move(x, y)
-        btn.raise_()
+        y = max(0, (14 - 16) // 2 + 1)
+        for widget in self._widgets:
+            widget.adjustSize()
+            widget.move(x, y)
+            widget.show()
+            widget.raise_()
+            x += widget.width()
 
 
 class NetworkProbeWorker(QThread):
@@ -86,7 +94,21 @@ class NetworkProbeWorker(QThread):
         self._config = config
 
     def run(self):
-        self.finished.emit(probe_network_sources(self._config))
+        try:
+            self.finished.emit(probe_network_sources(self._config))
+        except Exception as exc:
+            self.finished.emit(
+                ProbeResult(
+                    equipment_ok=False,
+                    standards_ok=False,
+                    templates_ok=False,
+                    equipment_path=None,
+                    standards_path=None,
+                    equipment_error=str(exc),
+                    standards_error=str(exc),
+                    templates_error=str(exc),
+                )
+            )
 
 
 class MirrorWorker(QThread):
@@ -269,9 +291,26 @@ class MainWindow(QMainWindow):
         self.btn_reload_info.setFixedHeight(16)
         self.btn_reload_info.adjustSize()
         self.btn_reload_info.setCursor(Qt.PointingHandCursor)
-        self.btn_reload_info.setToolTip("重载申请单")
-        self.btn_reload_info.clicked.connect(self.restore_excluded_overview_fields)
-        self._info_reload_host = _GroupTitleButtonHost(info_group, self.btn_reload_info, self)
+        self.btn_reload_info.setToolTip("从源项目路径重新读取申请单")
+        self.btn_reload_info.clicked.connect(self.reload_application_from_source)
+        self.btn_add_info = QToolButton(info_group)
+        self.btn_add_info.setObjectName("overviewAdd")
+        self.btn_add_info.setIcon(plus_icon(size=12))
+        self.btn_add_info.setIconSize(QSize(12, 12))
+        self.btn_add_info.setText("Add")
+        self.btn_add_info.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn_add_info.setAutoRaise(True)
+        self.btn_add_info.setFixedHeight(16)
+        self.btn_add_info.adjustSize()
+        self.btn_add_info.setCursor(Qt.PointingHandCursor)
+        self.btn_add_info.setToolTip("添加一行项目信息（标题与内容均可编辑）")
+        self.btn_add_info.clicked.connect(self._add_custom_overview_row)
+        self._sample_column_tab_buttons: list[QToolButton] = []
+        self._sample_column_all_button: QToolButton | None = None
+        self._sample_column_button_group: QButtonGroup | None = None
+        self._info_toolbar_host = _GroupTitleToolbarHost(
+            info_group, [self.btn_add_info, self.btn_reload_info], self
+        )
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -575,14 +614,52 @@ class MainWindow(QMainWindow):
         self._set_path_text(str(path))
         self.load_project_folder(path)
 
-    def restore_excluded_overview_fields(self):
-        """Show overview fields again after ✕ removals (no re-parse)."""
-        if not (self.state.application_fields or self.state.project_id):
+    def _source_project_path(self) -> Optional[Path]:
+        if self._source_path is not None and self._source_path.is_dir():
+            return self._source_path
+        raw = (self.state.source_path or "").strip()
+        if not raw:
+            return None
+        path = Path(raw)
+        return path if path.is_dir() else None
+
+    def _sync_application_excel_to_mirror(self, src_project_path: Path) -> None:
+        if self._local_path is None:
+            return
+        app_excel, _ = find_sample_files(src_project_path, self.state.project_id or "")
+        if app_excel is None:
+            return
+        dest_dir = self._local_path / "1.接样组"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(app_excel, dest_dir / app_excel.name)
+
+    def reload_application_from_source(self):
+        """Re-read 申请单 Excel from the original project folder (network/local source)."""
+        if not self.state.project_id:
             QMessageBox.warning(self, "提示", "请先加载项目")
             return
-        if not self.state.excluded_overview_keys:
+        src = self._source_project_path()
+        if src is None:
+            QMessageBox.warning(
+                self,
+                "提示",
+                "源项目路径不可用，请检查网络连接或重新加载项目。",
+            )
+            return
+        if self._is_dirty:
+            reply = QMessageBox.question(
+                self,
+                "重载申请单",
+                "当前有未保存的修改。重载将覆盖项目信息中的申请单字段，是否继续？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+        if not self._parse_application_only(src):
             return
         self.state.excluded_overview_keys = []
+        self._sync_application_excel_to_mirror(src)
         self.refresh_overview_ui()
         self._mark_dirty()
 
@@ -592,7 +669,9 @@ class MainWindow(QMainWindow):
         while self.info_form.rowCount():
             self.info_form.removeRow(0)
 
-    def _add_info_row(self, key: str, value: str, *, display_label: Optional[str] = None):
+    def _add_info_row(
+        self, key: str, value: str, *, display_label: Optional[str] = None, read_only: bool = False
+    ):
         # Internal key stays Chinese; left text follows edit_language (same FIELD_LABELS as export).
         caption = (display_label if display_label is not None else key) or key
         key_lbl = QLabel(f"{caption}:")
@@ -606,17 +685,91 @@ class MainWindow(QMainWindow):
         edit = QLineEdit(value or "")
         edit.setCursorPosition(0)  # show start of long values, not the tail
         edit.setPlaceholderText("（空）" if self.state._edit_lang() == "英文" else "")
-        edit.editingFinished.connect(
-            lambda k=key, w=edit: self._on_overview_field_edited(k, w)
-        )
+        if read_only:
+            edit.setReadOnly(True)
+            edit.setToolTip("All 合并视图：请切换到单列页签后再编辑")
+        else:
+            edit.editingFinished.connect(
+                lambda k=key, w=edit: self._on_overview_field_edited(k, w)
+            )
         btn = QPushButton("✕")
         btn.setObjectName("fieldRemoveButton")
         btn.setFixedSize(20, 20)
         btn.setToolTip("移除此字段，生成报告时不再写入")
         btn.clicked.connect(lambda _checked=False, k=key: self._exclude_overview_field(k))
+        if read_only:
+            btn.setEnabled(False)
         row_l.addWidget(edit, stretch=1)
         row_l.addWidget(btn, 0, Qt.AlignVCenter)
         self.info_form.addRow(key_lbl, row_w)
+
+    def _add_custom_info_row(
+        self,
+        field_id: str,
+        label: str,
+        value: str,
+        *,
+        read_only: bool = False,
+    ):
+        label_edit = QLineEdit(label or "")
+        label_edit.setPlaceholderText("标题")
+        label_edit.setObjectName("overviewCustomLabel")
+        label_edit.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        value_edit = QLineEdit(value or "")
+        value_edit.setCursorPosition(0)
+        value_edit.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        value_edit.setPlaceholderText("（空）" if self.state._edit_lang() == "英文" else "")
+
+        row_w = QWidget()
+        row_l = QHBoxLayout(row_w)
+        row_l.setContentsMargins(0, 0, 0, 0)
+        row_l.setSpacing(4)
+
+        if read_only:
+            label_edit.setReadOnly(True)
+            value_edit.setReadOnly(True)
+            label_edit.setToolTip("All 合并视图：请切换到单列页签后再编辑")
+            value_edit.setToolTip("All 合并视图：请切换到单列页签后再编辑")
+        else:
+            label_edit.editingFinished.connect(
+                lambda fid=field_id, w=label_edit: self._on_custom_overview_label_edited(fid, w)
+            )
+            value_edit.editingFinished.connect(
+                lambda fid=field_id, w=value_edit: self._on_custom_overview_value_edited(fid, w)
+            )
+
+        btn = QPushButton("✕")
+        btn.setObjectName("fieldRemoveButton")
+        btn.setFixedSize(20, 20)
+        btn.setToolTip("移除此行")
+        btn.clicked.connect(lambda _checked=False, fid=field_id: self._remove_custom_overview_field(fid))
+        if read_only:
+            btn.setEnabled(False)
+
+        row_l.addWidget(value_edit, stretch=1)
+        row_l.addWidget(btn, 0, Qt.AlignVCenter)
+        self.info_form.addRow(label_edit, row_w)
+
+    def _add_custom_overview_row(self):
+        if not self.state.project_id:
+            QMessageBox.warning(self, "提示", "请先加载项目")
+            return
+        self.state.add_custom_overview_field()
+        self.refresh_overview_ui()
+        self._mark_dirty()
+
+    def _on_custom_overview_label_edited(self, field_id: str, edit: QLineEdit):
+        self.state.set_custom_overview_label(field_id, edit.text())
+        self._mark_dirty()
+
+    def _on_custom_overview_value_edited(self, field_id: str, edit: QLineEdit):
+        self.state.set_custom_overview_value(field_id, edit.text())
+        self._mark_dirty()
+
+    def _remove_custom_overview_field(self, field_id: str):
+        self.state.remove_custom_overview_field(field_id)
+        self._mark_dirty()
+        self.refresh_overview_ui()
 
     def _sync_date_bar_labels(self):
         lang = self.state._edit_lang()
@@ -637,6 +790,7 @@ class MainWindow(QMainWindow):
         next_lang = "英文" if self.state._edit_lang() != "英文" else "中文"
         self.state.edit_language = next_lang
         self.refresh_overview_ui()
+        self.leg_graph.refresh_edit_language_display()
 
     def _sync_edit_language_buttons(self):
         lang = self.state._edit_lang()
@@ -647,6 +801,13 @@ class MainWindow(QMainWindow):
         self.btn_edit_lang.blockSignals(False)
 
     def _exclude_overview_field(self, key: str):
+        if ProjectState.is_custom_overview_key(key):
+            field_id = self.state.parse_custom_overview_id(key)
+            if field_id:
+                self.state.remove_custom_overview_field(field_id)
+                self._mark_dirty()
+                self.refresh_overview_ui()
+            return
         excluded = list(self.state.excluded_overview_keys or [])
         if key not in excluded:
             excluded.append(key)
@@ -654,21 +815,101 @@ class MainWindow(QMainWindow):
             self._mark_dirty()
         self.refresh_overview_ui()
 
+    def _make_sample_column_tab_button(self, text: str) -> QToolButton:
+        btn = QToolButton(self._info_group)
+        btn.setObjectName("sampleColumnTab")
+        btn.setText(text)
+        btn.setCheckable(True)
+        btn.setAutoRaise(True)
+        btn.setFixedHeight(16)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.adjustSize()
+        return btn
+
+    def _sync_sample_column_tabs(self):
+        for btn in self._sample_column_tab_buttons:
+            btn.deleteLater()
+        self._sample_column_tab_buttons = []
+        if self._sample_column_all_button is not None:
+            self._sample_column_all_button.deleteLater()
+            self._sample_column_all_button = None
+        if self._sample_column_button_group is not None:
+            self._sample_column_button_group.deleteLater()
+            self._sample_column_button_group = None
+
+        toolbar = [self.btn_add_info, self.btn_reload_info]
+        if not self.state.has_multiple_sample_columns():
+            self._info_toolbar_host.set_widgets(toolbar)
+            return
+
+        group = QButtonGroup(self)
+        group.setExclusive(True)
+        labels = self.state.sample_column_tab_labels or []
+        for i, label in enumerate(labels):
+            btn = self._make_sample_column_tab_button(label)
+            btn.clicked.connect(lambda checked=False, idx=i: self._on_sample_column_tab(idx))
+            group.addButton(btn)
+            self._sample_column_tab_buttons.append(btn)
+            toolbar.append(btn)
+
+        all_btn = self._make_sample_column_tab_button("All")
+        all_btn.setToolTip("合并各列样品信息出报告（相同值去重，不同值用 / 连接）")
+        all_btn.clicked.connect(
+            lambda checked=False: self._on_sample_column_tab(ALL_SAMPLE_COLUMNS)
+        )
+        group.addButton(all_btn)
+        self._sample_column_all_button = all_btn
+        toolbar.append(all_btn)
+        self._sample_column_button_group = group
+        self._info_toolbar_host.set_widgets(toolbar)
+
+        active = self.state.active_sample_column_index
+        if active == ALL_SAMPLE_COLUMNS:
+            all_btn.setChecked(True)
+        elif 0 <= active < len(self._sample_column_tab_buttons):
+            self._sample_column_tab_buttons[active].setChecked(True)
+        else:
+            self._sample_column_tab_buttons[0].setChecked(True)
+
+    def _on_sample_column_tab(self, index: int):
+        if index == self.state.active_sample_column_index:
+            return
+        self.state.set_active_sample_column(index)
+        self.refresh_overview_ui()
+
     def refresh_overview_ui(self):
         self._sync_edit_language_buttons()
         self._sync_date_bar_labels()
+        self._sync_sample_column_tabs()
         self._clear_info_form()
+        read_only = self.state.is_all_sample_columns_active()
         rows = list(self.state.iter_overview_fields())
-        has_fields = bool(self.state.application_fields or self.state.application_fields_en)
+        has_fields = bool(
+            self.state.application_fields
+            or self.state.application_fields_en
+            or self.state.custom_overview_fields
+        )
         lang = self.state._edit_lang()
-        if not rows:
+        if not rows and not (self.state.custom_overview_fields or []):
             hint = QLabel("未加载" if not has_fields else "暂无字段（已全部移除）")
             hint.setObjectName("dimLabel")
             self.info_form.addRow(hint)
         else:
+            imported_keys = set()
             for k, v in rows:
+                if ProjectState.is_custom_overview_key(k):
+                    continue
+                imported_keys.add(k)
                 caption = field_label(k, lang) or k
-                self._add_info_row(k, v, display_label=caption)
+                self._add_info_row(k, v, display_label=caption, read_only=read_only)
+            excluded = set(self.state.excluded_overview_keys or [])
+            for row in self.state.custom_overview_fields or []:
+                key = ProjectState.custom_overview_key(row.id)
+                if key in excluded:
+                    continue
+                label = row.label_en if lang == "英文" else row.label_cn
+                value = row.value_en if lang == "英文" else row.value_cn
+                self._add_custom_info_row(row.id, label, value, read_only=read_only)
 
         self.lbl_project_id.setText(f"项目号: {self.state.project_id or '—'}")
         self.lbl_project_id.setObjectName("dimLabel")
@@ -726,17 +967,8 @@ class MainWindow(QMainWindow):
         self._on_export_mode_changed()
 
     def _find_sample_files(self, project_path: Path):
-        """Locate 申请单 Excel and 报价单 PDF under 1.接样组."""
-        sample_dir = Path(project_path) / "1.接样组"
-        app_excel = None
-        quote_pdf = None
-        if sample_dir.exists():
-            for f in sample_dir.iterdir():
-                if f.name.endswith(".xlsx") and not f.name.startswith("~"):
-                    app_excel = f
-                elif f.name.endswith(".pdf") and "报价单" in f.name:
-                    quote_pdf = f
-        return app_excel, quote_pdf
+        """Locate 申请单 Excel (by project id) and 报价单 PDF under 1.接样组."""
+        return find_sample_files(project_path, self.state.project_id or "")
 
     def _parse_application_only(self, project_path: Path) -> bool:
         """Parse 申请单 into left-panel overview fields. Returns True on success."""

@@ -16,11 +16,13 @@ from PySide6.QtGui import QColor, QCursor, QPainter, QPixmap
 from openpyxl.utils import range_boundaries
 from src.models.project_state import (
     DataTableRef,
+    SampleStandardResult,
     TestNode,
     TestSample,
     TestResult,
     TestEquipment,
     TestStandard,
+    _coerce_test_result,
 )
 from src.parsers.key_params import KeyParamReplaceError, apply_key_params, parse_key_params
 from src.parsers.db_loader import equipment_display_code, equipment_match_codes
@@ -31,9 +33,12 @@ from src.io.data_tables import (
     copy_from_template,
     create_blank_workbook,
     delete_attachment,
+    find_decimal_inconsistencies,
+    find_out_of_range,
     import_sample_ids,
     list_data_table_templates,
     open_attachment,
+    parse_numeric_display,
     read_preview_snapshot,
     resolve_attachment_path,
     upload_existing_xlsx,
@@ -41,6 +46,7 @@ from src.io.data_tables import (
 from src.io.test_photos import is_usable_test_name
 from src.ui.test_photos_panel import TestPhotosPanel, warn_duplicate_test_names
 from src.ui.data_table_template_dialog import DataTableTemplateDialog
+from src.ui.save_success_dialog import SaveSuccessDialog
 from src.ui.theme import default_project_qdate, polish_date_edit_calendar
 from src.ui.gantt_utils import (
     cascade_subsequent_nodes,
@@ -54,6 +60,7 @@ from src.ui.gantt_utils import (
 )
 
 _EQ_EXPIRED_ROLE = Qt.UserRole + 1
+_EQ_PREV_CYCLE_ROLE = Qt.UserRole + 2
 _EXPIRED_RED = QColor("#FF5555")
 _DATE_RE = re.compile(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})")
 
@@ -134,11 +141,37 @@ def _is_equipment_expired(cal_value, end_date):
     return cal < end_date
 
 
+def _equipment_cal_start(data):
+    """Current cycle start from 校准时间; invalid/empty means the row cannot be selected."""
+    return _parse_qdate((data or {}).get("校准时间"))
+
+
+def _is_previous_cal_cycle(cal_start_value, end_date):
+    """True when test end is strictly before the current cycle start (校准时间).
+
+    End date on the calibration day itself counts as inside the current cycle.
+    """
+    cal_start = _parse_qdate(cal_start_value)
+    if not cal_start.isValid() or end_date is None or not end_date.isValid():
+        return False
+    return end_date < cal_start
+
+
+def _equipment_report_valid_date(data, end_date):
+    """Date written to the report for this equipment given the test end date."""
+    data = data or {}
+    if _is_previous_cal_cycle(data.get("校准时间"), end_date):
+        prev = _format_cal_date(data.get("上次校准有效期"))
+        if prev:
+            return prev
+    return _format_cal_date(data.get("计划校准时间"))
+
+
 class ExpiredNameDelegate(QStyledItemDelegate):
-    """Paint equipment names red when the row is marked expired (QSS ignores item foreground)."""
+    """Paint equipment names red when expired or previous-cycle (QSS ignores item foreground)."""
 
     def paint(self, painter, option, index):
-        if not index.data(_EQ_EXPIRED_ROLE):
+        if not (index.data(_EQ_EXPIRED_ROLE) or index.data(_EQ_PREV_CYCLE_ROLE)):
             super().paint(painter, option, index)
             return
         opt = QStyleOptionViewItem(option)
@@ -464,6 +497,8 @@ class TestDetailDialog(QDialog):
         self._eval_drawers = []
         self._result_edits = {}
         self._result_edits_en = {}
+        self._sample_table_slots = []
+        self._sample_id_syncing = False
         self._data_tables = [
             DataTableRef(title=r.title, relative_path=r.relative_path)
             for r in (node_data.data_tables or [])
@@ -776,23 +811,12 @@ class TestDetailDialog(QDialog):
         toolbar.addStretch()
         sample_layout.addLayout(toolbar)
 
-        self.table = ContainedTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["", "样品编号", "结果描述", "测试结果"])
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Fixed)
-        header.setSectionResizeMode(1, QHeaderView.Fixed)
-        header.setSectionResizeMode(2, QHeaderView.Stretch)
-        header.setSectionResizeMode(3, QHeaderView.Fixed)
-        header.setMinimumHeight(32)
-        header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.table.setColumnWidth(0, 28)
-        self.table.setColumnWidth(1, 158)
-        self.table.setColumnWidth(3, 168)
-        self.table.setMinimumHeight(400)
-        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        sample_layout.addWidget(self.table)
-        self._setup_result_header()
-        self._sample_add_header_btn = self._install_sample_add_header_button()
+        self.sample_tables_host = QWidget()
+        self.sample_tables_layout = QVBoxLayout(self.sample_tables_host)
+        self.sample_tables_layout.setContentsMargins(0, 0, 0, 0)
+        self.sample_tables_layout.setSpacing(10)
+        sample_layout.addWidget(self.sample_tables_host)
+        self._rebuild_sample_tables([])
 
         sample_layout.addWidget(QLabel("数据表"))
         self.data_table_host = QWidget()
@@ -810,13 +834,20 @@ class TestDetailDialog(QDialog):
             if raw:
                 project_root = Path(raw)
             project_id = getattr(self._project_state, "project_id", "") or ""
+        leg_name = ""
+        if self._project_state is not None:
+            leg = find_leg_for_node(self._project_state, self.node_data)
+            if leg is not None:
+                leg_name = leg.leg_name or ""
         self.photos_panel = TestPhotosPanel(
             project_root,
+            leg_name,
             self.node_data.test_name,
             project_id,
             self.drawer_photos,
             project_state=self._project_state,
             form_scroll=self._form_scroll,
+            node_data=self.node_data,
         )
         self.photos_panel.changed.connect(self._refresh_photo_summary)
         self.drawer_photos.body_layout.addWidget(self.photos_panel)
@@ -846,8 +877,37 @@ class TestDetailDialog(QDialog):
         self._schedule_result_header_sync()
         self._refresh_import_from_prev_button()
 
-    def _install_sample_add_header_button(self):
-        header = self.table.horizontalHeader()
+    def _clear_sample_tables_host(self):
+        while self.sample_tables_layout.count():
+            item = self.sample_tables_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._sample_table_slots = []
+        self.table = None
+        self.combo_bulk_result = None
+        self._sample_add_header_btn = None
+
+    def _create_sample_table_widget(self, min_height):
+        table = ContainedTableWidget(0, 4)
+        table.setHorizontalHeaderLabels(["", "样品编号", "结果描述", "测试结果"])
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.Fixed)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.Fixed)
+        header.setMinimumHeight(32)
+        header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        table.setColumnWidth(0, 28)
+        table.setColumnWidth(1, 158)
+        table.setColumnWidth(3, 168)
+        table.setMinimumHeight(min_height)
+        table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        return table
+
+    def _install_sample_add_header_button(self, table):
+        header = table.horizontalHeader()
         btn = QPushButton("↓", header.viewport())
         btn.setObjectName("headerAddRowButton")
         btn.setCursor(Qt.PointingHandCursor)
@@ -855,17 +915,20 @@ class TestDetailDialog(QDialog):
         btn.setToolTip("添加样品行")
         btn.clicked.connect(lambda: self.add_sample_row())
 
-        def sync(*_args, b=btn):
-            self._sync_sample_add_header_button(b)
+        def sync(*_args, b=btn, t=table):
+            self._sync_sample_add_header_button(b, t)
 
         header.sectionResized.connect(sync)
         header.geometriesChanged.connect(sync)
-        self.table.horizontalScrollBar().valueChanged.connect(sync)
+        table.horizontalScrollBar().valueChanged.connect(sync)
         QTimer.singleShot(0, sync)
         return btn
 
-    def _sync_sample_add_header_button(self, btn):
-        header = self.table.horizontalHeader()
+    def _sync_sample_add_header_button(self, btn, table=None):
+        table = table or self.table
+        if table is None or btn is None:
+            return
+        header = table.horizontalHeader()
         x = header.sectionViewportPosition(0)
         w = header.sectionSize(0)
         h = header.height()
@@ -873,26 +936,27 @@ class TestDetailDialog(QDialog):
         btn.setGeometry(x + max((w - size) // 2, 1), max((h - size) // 2, 1), size, size)
         btn.raise_()
 
-    def _setup_result_header(self):
-        header = self.table.horizontalHeader()
-        self._header_sync_pending = False
-        self.combo_bulk_result = QComboBox(header.viewport())
-        self.combo_bulk_result.setObjectName("bulkResultCombo")
-        self.combo_bulk_result.setFocusPolicy(Qt.StrongFocus)
-        self.combo_bulk_result.addItem("—")
+    def _setup_result_header(self, table, slot):
+        header = table.horizontalHeader()
+        bulk = QComboBox(header.viewport())
+        bulk.setObjectName("bulkResultCombo")
+        bulk.setFocusPolicy(Qt.StrongFocus)
+        bulk.addItem("—")
         for r in TestResult:
-            self.combo_bulk_result.addItem(self._result_display(r), userData=r)
-        self._expand_result_combo_popup(self.combo_bulk_result)
-        self.combo_bulk_result.activated.connect(self._apply_bulk_result)
+            bulk.addItem(self._result_display(r), userData=r)
+        self._expand_result_combo_popup(bulk)
+        bulk.activated.connect(
+            lambda index, s=slot: self._apply_bulk_result_on_slot(s, index)
+        )
+        slot["bulk"] = bulk
         header.sectionResized.connect(lambda *_: self._schedule_result_header_sync())
         header.geometriesChanged.connect(self._schedule_result_header_sync)
-        self.table.horizontalScrollBar().valueChanged.connect(
+        table.horizontalScrollBar().valueChanged.connect(
             lambda *_: self._schedule_result_header_sync()
         )
-        self.table.verticalScrollBar().rangeChanged.connect(
+        table.verticalScrollBar().rangeChanged.connect(
             lambda *_: self._schedule_result_header_sync()
         )
-        self.drawer_sample.header.clicked.connect(self._schedule_result_header_sync)
 
     def _expand_result_combo_popup(self, combo):
         """Keep Pass/Fail/N/A (and the bulk '—') all visible without scrolling."""
@@ -910,37 +974,45 @@ class TestDetailDialog(QDialog):
 
     def _sync_result_header(self):
         self._header_sync_pending = False
-        if not hasattr(self, "combo_bulk_result"):
-            return
-        header = self.table.horizontalHeader()
-        x = header.sectionViewportPosition(3)
-        section_w = header.sectionSize(3)
-        combo_w = 86
-        combo_h = 24
-        left_pad = 8
-        gap = 6
-        right_margin = 12
-        label = header.model().headerData(3, Qt.Horizontal) or "测试结果"
-        label_w = header.fontMetrics().horizontalAdvance(str(label))
-        cx = x + left_pad + label_w + gap
-        max_cx = x + max(section_w - combo_w - right_margin, 0)
-        cx = min(max(cx, x + left_pad), max_cx)
-        cy = max((header.height() - combo_h) // 2, 2)
-        self.combo_bulk_result.setGeometry(cx, cy, combo_w, combo_h)
-        visible = section_w >= 90
-        self.combo_bulk_result.setVisible(visible)
-        if visible:
-            self.combo_bulk_result.raise_()
-        if hasattr(self, "_sample_add_header_btn"):
-            self._sync_sample_add_header_button(self._sample_add_header_btn)
+        for slot in self._sample_table_slots:
+            table = slot.get("table")
+            bulk = slot.get("bulk")
+            if table is None or bulk is None:
+                continue
+            header = table.horizontalHeader()
+            x = header.sectionViewportPosition(3)
+            section_w = header.sectionSize(3)
+            combo_w = 86
+            combo_h = 24
+            left_pad = 8
+            gap = 6
+            right_margin = 12
+            label = header.model().headerData(3, Qt.Horizontal) or "测试结果"
+            label_w = header.fontMetrics().horizontalAdvance(str(label))
+            cx = x + left_pad + label_w + gap
+            max_cx = x + max(section_w - combo_w - right_margin, 0)
+            cx = min(max(cx, x + left_pad), max_cx)
+            cy = max((header.height() - combo_h) // 2, 2)
+            bulk.setGeometry(cx, cy, combo_w, combo_h)
+            visible = section_w >= 90
+            bulk.setVisible(visible)
+            if visible:
+                bulk.raise_()
+            add_btn = slot.get("add_btn")
+            if add_btn is not None:
+                self._sync_sample_add_header_button(add_btn, table)
 
-    def _apply_bulk_result(self, index):
-        data = self.combo_bulk_result.itemData(index) if index >= 0 else None
-        text = self.combo_bulk_result.itemText(index) if index >= 0 else self.combo_bulk_result.currentText()
+    def _apply_bulk_result_on_slot(self, slot, index):
+        bulk = slot.get("bulk")
+        table = slot.get("table")
+        if bulk is None or table is None:
+            return
+        data = bulk.itemData(index) if index >= 0 else None
+        text = bulk.itemText(index) if index >= 0 else bulk.currentText()
         if text in ("", "—") and data is None:
             return
-        for row in range(self.table.rowCount()):
-            combo = self.table.cellWidget(row, 3)
+        for row in range(table.rowCount()):
+            combo = table.cellWidget(row, 3)
             if combo is None:
                 continue
             if data is not None:
@@ -949,6 +1021,93 @@ class TestDetailDialog(QDialog):
                 pos = combo.findText(text)
             if pos >= 0:
                 combo.setCurrentIndex(pos)
+
+    def _apply_bulk_result(self, index):
+        """Backward-compatible: apply on the primary (first) sample table."""
+        if not self._sample_table_slots:
+            return
+        self._apply_bulk_result_on_slot(self._sample_table_slots[0], index)
+
+    def _snapshot_sample_rows(self):
+        """Capture shared ids + per-standard conclusions before rebuilding tables."""
+        rows = []
+        primary = self._sample_table_slots[0]["table"] if self._sample_table_slots else None
+        if primary is None:
+            return rows
+        n = primary.rowCount()
+        for row in range(n):
+            id_w = primary.cellWidget(row, 1)
+            sample_id = id_w.text().strip() if id_w is not None else ""
+            by_key = {}
+            for slot in self._sample_table_slots:
+                table = slot["table"]
+                if row >= table.rowCount():
+                    continue
+                key = slot.get("key")
+                combo = table.cellWidget(row, 3)
+                result = self._combo_result(combo)
+                desc_w = table.cellWidget(row, 2)
+                desc = desc_w.text().strip() if desc_w is not None else ""
+                by_key[key] = {"result": result, "result_desc": desc or None}
+            rows.append({"sample_id": sample_id, "by_key": by_key})
+        return rows
+
+    def _combo_result(self, combo) -> TestResult:
+        if combo is None:
+            return TestResult.NA
+        raw = combo.currentData()
+        coerced = _coerce_test_result(raw)
+        try:
+            return coerced if isinstance(coerced, TestResult) else TestResult(coerced)
+        except Exception:
+            return TestResult.NA
+
+    def _rebuild_sample_tables(self, picked):
+        """One sample table per selected standard (selection order); one empty table if none."""
+        snapshot = self._snapshot_sample_rows()
+        if getattr(self, "_sample_header_sync_hooked", False):
+            try:
+                self.drawer_sample.header.clicked.disconnect(self._schedule_result_header_sync)
+            except (TypeError, RuntimeError):
+                pass
+            self._sample_header_sync_hooked = False
+        self._clear_sample_tables_host()
+        standards = list(picked or [])
+        multi = len(standards) > 1
+        min_h = 220 if multi else 400
+        if not standards:
+            standards = [None]
+        for std in standards:
+            key = self._std_ref_key(std) if std is not None else None
+            wrap = QWidget()
+            lay = QVBoxLayout(wrap)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(4)
+            if multi and std is not None:
+                title = (std.test_name or std.field_title() or "").strip() or "结果"
+                lay.addWidget(QLabel(title))
+            table = self._create_sample_table_widget(min_h)
+            slot = {"key": key, "table": table, "std": std, "bulk": None, "add_btn": None}
+            self._setup_result_header(table, slot)
+            slot["add_btn"] = self._install_sample_add_header_button(table)
+            lay.addWidget(table)
+            self.sample_tables_layout.addWidget(wrap)
+            self._sample_table_slots.append(slot)
+        self.table = self._sample_table_slots[0]["table"]
+        self.combo_bulk_result = self._sample_table_slots[0]["bulk"]
+        self._sample_add_header_btn = self._sample_table_slots[0]["add_btn"]
+        if hasattr(self, "drawer_sample"):
+            self.drawer_sample.header.clicked.connect(self._schedule_result_header_sync)
+            self._sample_header_sync_hooked = True
+        for row_data in snapshot:
+            results_by_key = row_data.get("by_key") or {}
+            self.add_sample_row(
+                row_data.get("sample_id") or "",
+                results_by_key=results_by_key,
+            )
+        self._apply_result_descs_to_tables()
+        self._schedule_result_header_sync()
+        self._refresh_sample_summary()
 
     def _fill_standards(self):
         self.std_table.blockSignals(True)
@@ -976,20 +1135,26 @@ class TestDetailDialog(QDialog):
         self.eq_table.blockSignals(True)
         self.eq_table.setRowCount(0)
         use_en = self._is_edit_en()
+        end = self._test_end_date()
         for eq in self.equipments:
             code = equipment_display_code(eq)
             name_cn = _cell_text(eq.get("设备名称"))
             name_en = _cell_text(eq.get("Equipment"))
             name = name_en if use_en else name_cn
             model = _cell_text(eq.get("型号"))
-            cal = _format_cal_date(eq.get("计划校准时间"))
+            cal = _equipment_report_valid_date(eq, end)
             if not (code or name_cn or name_en):
                 continue
             row = self.eq_table.rowCount()
             self.eq_table.insertRow(row)
             chk = QTableWidgetItem()
-            chk.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
-            chk.setCheckState(Qt.Unchecked)
+            if _equipment_cal_start(eq).isValid():
+                chk.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+                chk.setCheckState(Qt.Unchecked)
+            else:
+                # 校准时间为空：禁止选用
+                chk.setFlags(Qt.ItemIsEnabled)
+                chk.setCheckState(Qt.Unchecked)
             chk.setData(Qt.UserRole, eq)
             self.eq_table.setItem(row, 0, chk)
             self.eq_table.setItem(row, 1, QTableWidgetItem(code))
@@ -1117,7 +1282,7 @@ class TestDetailDialog(QDialog):
             self._rebuild_cond_drawers([])
             self._rebuild_eval_drawers([])
             self._fill_result_desc_table([])
-            self._apply_result_desc_to_rows("")
+            self._rebuild_sample_tables([])
             return
         refs = [s.ref_label() for s in picked if s.ref_label()]
         preview = "、".join(refs[:4])
@@ -1135,7 +1300,7 @@ class TestDetailDialog(QDialog):
         self._rebuild_cond_drawers(picked)
         self._rebuild_eval_drawers(picked)
         self._fill_result_desc_table(picked)
-        self._apply_result_desc_to_rows(self._current_result_desc())
+        self._rebuild_sample_tables(picked)
 
     def _collect_map_edits(self, editors, dest):
         for key, editor in list(editors.items()):
@@ -1462,17 +1627,18 @@ class TestDetailDialog(QDialog):
         self.result_desc_table.setFixedHeight(min(56 * rows + 36, 220) if rows else 80)
 
     def _on_result_desc_edited(self):
-        self._apply_result_desc_to_rows(self._current_result_desc())
+        self._apply_result_descs_to_tables()
 
-    def _current_result_desc(self):
-        """Joined text from the editable 结果描述 table (selection order)."""
+    def _result_desc_for_key(self, key):
+        """Editable 结果描述 text for one standard key (not joined)."""
         self._collect_result_edits()
         active = self._active_result_edits()
-        parts = []
-        if hasattr(self, "result_desc_table"):
+        if hasattr(self, "result_desc_table") and key is not None:
             for row in range(self.result_desc_table.rowCount()):
                 key_item = self.result_desc_table.item(row, 0)
-                key = key_item.data(Qt.UserRole) if key_item else None
+                row_key = key_item.data(Qt.UserRole) if key_item else None
+                if row_key != key:
+                    continue
                 widget = self.result_desc_table.cellWidget(row, 1)
                 text = ""
                 if widget is not None:
@@ -1480,35 +1646,75 @@ class TestDetailDialog(QDialog):
                         text = widget.toPlainText().strip()
                     except RuntimeError:
                         text = ""
-                if not text and key is not None:
+                if not text:
                     text = (active.get(key) or "").strip()
-                if text:
-                    parts.append(text)
-        if parts:
-            return "\n\n".join(parts)
-        for std in self.node_data.resolved_standards():
-            text = (
-                (std.result_desc_en if self._is_edit_en() else std.result_desc) or ""
-            ).strip()
+                return text
+        if key is not None:
+            text = (active.get(key) or "").strip()
             if text:
-                parts.append(text)
-        if parts:
-            return "\n\n".join(parts)
+                return text
+            for std in self.node_data.resolved_standards():
+                if self._std_ref_key(std) == key:
+                    return (
+                        (std.result_desc_en if self._is_edit_en() else std.result_desc)
+                        or ""
+                    ).strip()
         attr = "result_desc_en" if self._is_edit_en() else "result_desc"
         return _cell_text(getattr(self.node_data, attr, None))
 
+    def _current_result_desc(self):
+        """Primary-table description (first selected standard)."""
+        if self._sample_table_slots:
+            key = self._sample_table_slots[0].get("key")
+            if key is not None:
+                return self._result_desc_for_key(key)
+        parts = []
+        if hasattr(self, "result_desc_table"):
+            self._collect_result_edits()
+            for row in range(self.result_desc_table.rowCount()):
+                key_item = self.result_desc_table.item(row, 0)
+                key = key_item.data(Qt.UserRole) if key_item else None
+                text = self._result_desc_for_key(key) if key is not None else ""
+                if text:
+                    parts.append(text)
+                    break
+        if parts:
+            return parts[0]
+        attr = "result_desc_en" if self._is_edit_en() else "result_desc"
+        return _cell_text(getattr(self.node_data, attr, None))
+
+    def _apply_result_descs_to_tables(self):
+        for slot in self._sample_table_slots:
+            key = slot.get("key")
+            text = self._result_desc_for_key(key) if key is not None else ""
+            table = slot.get("table")
+            if table is None:
+                continue
+            for row in range(table.rowCount()):
+                widget = table.cellWidget(row, 2)
+                if widget is not None:
+                    widget.setText(text)
+                    widget.setCursorPosition(0)
+
     def _apply_result_desc_to_rows(self, text):
+        """Legacy helper: apply one text to the primary sample table."""
         text = text or ""
-        if not hasattr(self, "table"):
+        table = getattr(self, "table", None)
+        if table is None:
             return
-        for row in range(self.table.rowCount()):
-            widget = self.table.cellWidget(row, 2)
+        for row in range(table.rowCount()):
+            widget = table.cellWidget(row, 2)
             if widget is not None:
                 widget.setText(text)
                 widget.setCursorPosition(0)
 
     def _on_eq_item_changed(self, item):
         if item and item.column() == 0:
+            data = item.data(Qt.UserRole) or {}
+            if item.checkState() == Qt.Checked and not _equipment_cal_start(data).isValid():
+                self.eq_table.blockSignals(True)
+                item.setCheckState(Qt.Unchecked)
+                self.eq_table.blockSignals(False)
             self._refresh_eq_summary()
 
     def _on_eq_cell_clicked(self, row, col):
@@ -1516,6 +1722,11 @@ class TestDetailDialog(QDialog):
             return
         chk = self.eq_table.item(row, 0)
         if chk is None:
+            return
+        data = chk.data(Qt.UserRole) or {}
+        if not _equipment_cal_start(data).isValid():
+            return
+        if not (chk.flags() & Qt.ItemIsUserCheckable):
             return
         chk.setCheckState(Qt.Unchecked if chk.checkState() == Qt.Checked else Qt.Checked)
 
@@ -1535,9 +1746,14 @@ class TestDetailDialog(QDialog):
                 chk = self.eq_table.item(row, 0)
                 data = (chk.data(Qt.UserRole) if chk else None) or {}
                 expired = _is_equipment_expired(data.get("计划校准时间"), end)
+                prev_cycle = _is_previous_cal_cycle(data.get("校准时间"), end)
                 name_item = self.eq_table.item(row, 2)
                 if name_item is not None:
                     name_item.setData(_EQ_EXPIRED_ROLE, expired)
+                    name_item.setData(_EQ_PREV_CYCLE_ROLE, prev_cycle and not expired)
+                cal_item = self.eq_table.item(row, 4)
+                if cal_item is not None:
+                    cal_item.setText(_equipment_report_valid_date(data, end))
         finally:
             self.eq_table.blockSignals(False)
         self.eq_table.viewport().update()
@@ -1558,9 +1774,19 @@ class TestDetailDialog(QDialog):
             self._hide_eq_expired_tip()
             return
         name_item = self.eq_table.item(item.row(), 2)
-        if name_item is None or not name_item.data(_EQ_EXPIRED_ROLE):
+        if name_item is None:
             self._hide_eq_expired_tip()
             return
+        if name_item.data(_EQ_EXPIRED_ROLE):
+            tip_text = "已过期"
+        elif name_item.data(_EQ_PREV_CYCLE_ROLE):
+            tip_text = "上个校准周期"
+        else:
+            self._hide_eq_expired_tip()
+            return
+        tip = getattr(self, "_eq_expired_tip", None)
+        if tip is not None:
+            tip.setText(tip_text)
         self._eq_expired_tip.follow(QCursor.pos())
 
     def _hide_eq_expired_tip(self):
@@ -1594,11 +1820,14 @@ class TestDetailDialog(QDialog):
 
     def _selected_equipments(self):
         picked = []
+        end = self._test_end_date()
         for row in range(self.eq_table.rowCount()):
             chk = self.eq_table.item(row, 0)
             if chk is None or chk.checkState() != Qt.Checked:
                 continue
             data = chk.data(Qt.UserRole) or {}
+            if not _equipment_cal_start(data).isValid():
+                continue
             code_item = self.eq_table.item(row, 1)
             cal_item = self.eq_table.item(row, 4)
             picked.append(TestEquipment(
@@ -1608,78 +1837,142 @@ class TestDetailDialog(QDialog):
                 or equipment_display_code(data),
                 model=_cell_text(data.get("型号")),
                 valid_date=(cal_item.text().strip() if cal_item else "")
-                or _format_cal_date(data.get("计划校准时间")),
+                or _equipment_report_valid_date(data, end),
             ))
         return picked
 
-    def add_sample_row(self, sample_id="", result=TestResult.NA, result_desc=None):
+    def add_sample_row(
+        self,
+        sample_id="",
+        result=TestResult.NA,
+        result_desc=None,
+        results_by_key=None,
+        standard_results=None,
+    ):
         if not isinstance(sample_id, str):
             sample_id = ""
-        row = self.table.rowCount()
-        self.table.insertRow(row)
+        if not self._sample_table_slots:
+            self._rebuild_sample_tables(self._selected_standards())
+        by_key = dict(results_by_key or {})
+        if standard_results:
+            for entry in standard_results:
+                by_key[entry.ref_key()] = {
+                    "result": entry.result,
+                    "result_desc": entry.result_desc,
+                }
+        # Shared row index across all tables
+        row = self._sample_table_slots[0]["table"].rowCount()
+        for slot in self._sample_table_slots:
+            table = slot["table"]
+            key = slot.get("key")
+            while table.rowCount() < row:
+                table.insertRow(table.rowCount())
+            table.insertRow(row)
 
-        del_wrap = QWidget()
-        del_lay = QHBoxLayout(del_wrap)
-        del_lay.setContentsMargins(0, 0, 0, 0)
-        del_lay.setAlignment(Qt.AlignCenter)
-        btn_del = QPushButton("✕")
-        btn_del.setObjectName("fieldRemoveButton")
-        btn_del.setFixedSize(20, 20)
-        btn_del.setCursor(Qt.PointingHandCursor)
-        btn_del.setFocusPolicy(Qt.NoFocus)
-        btn_del.setToolTip("删除此行")
-        btn_del.clicked.connect(self._remove_sample_row)
-        del_lay.addWidget(btn_del)
-        self.table.setCellWidget(row, 0, del_wrap)
+            del_wrap = QWidget()
+            del_lay = QHBoxLayout(del_wrap)
+            del_lay.setContentsMargins(0, 0, 0, 0)
+            del_lay.setAlignment(Qt.AlignCenter)
+            btn_del = QPushButton("✕")
+            btn_del.setObjectName("fieldRemoveButton")
+            btn_del.setFixedSize(20, 20)
+            btn_del.setCursor(Qt.PointingHandCursor)
+            btn_del.setFocusPolicy(Qt.NoFocus)
+            btn_del.setToolTip("删除此行")
+            btn_del.clicked.connect(self._remove_sample_row)
+            del_lay.addWidget(btn_del)
+            table.setCellWidget(row, 0, del_wrap)
 
-        txt_id = QLineEdit(sample_id)
-        txt_id.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        txt_id.setStyleSheet("padding: 1px 4px;")
-        self.table.setCellWidget(row, 1, txt_id)
+            txt_id = QLineEdit(sample_id)
+            txt_id.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            txt_id.setStyleSheet("padding: 1px 4px;")
+            txt_id.textChanged.connect(
+                lambda text, r=row, src=table: self._sync_sample_id(r, text, src)
+            )
+            table.setCellWidget(row, 1, txt_id)
 
-        txt_desc = QLineEdit(
-            result_desc if result_desc is not None else self._current_result_desc()
-        )
-        txt_desc.setReadOnly(True)
-        txt_desc.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        txt_desc.setStyleSheet("padding: 1px 4px;")
-        txt_desc.setPlaceholderText("选择标准后自动填入")
-        txt_desc.setCursorPosition(0)
-        self.table.setCellWidget(row, 2, txt_desc)
+            slot_info = by_key.get(key) if key is not None else None
+            if result_desc is not None and (key is None or len(self._sample_table_slots) == 1):
+                desc_text = result_desc
+            elif slot_info and slot_info.get("result_desc") is not None:
+                desc_text = slot_info.get("result_desc") or ""
+            elif key is not None:
+                desc_text = self._result_desc_for_key(key)
+            else:
+                desc_text = self._current_result_desc()
+            txt_desc = QLineEdit(desc_text or "")
+            txt_desc.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            txt_desc.setStyleSheet("padding: 1px 4px;")
+            txt_desc.setPlaceholderText("选择标准后自动填入，可按样品单独修改")
+            txt_desc.setCursorPosition(0)
+            table.setCellWidget(row, 2, txt_desc)
 
-        combo_res = QComboBox()
-        for r in TestResult:
-            combo_res.addItem(self._result_display(r), userData=r)
-        self._expand_result_combo_popup(combo_res)
-        bulk_data = None
-        if hasattr(self, "combo_bulk_result"):
-            bulk_data = self.combo_bulk_result.currentData()
-        if isinstance(bulk_data, TestResult):
-            combo_res.setCurrentIndex(combo_res.findData(bulk_data))
-        else:
-            combo_res.setCurrentIndex(combo_res.findData(result))
-        self.table.setCellWidget(row, 3, combo_res)
+            combo_res = QComboBox()
+            for r in TestResult:
+                combo_res.addItem(self._result_display(r), userData=r)
+            self._expand_result_combo_popup(combo_res)
+            row_result = result
+            if slot_info and isinstance(slot_info.get("result"), TestResult):
+                row_result = slot_info["result"]
+            elif key is None and isinstance(result, TestResult):
+                row_result = result
+            bulk = slot.get("bulk")
+            bulk_data = bulk.currentData() if bulk is not None else None
+            if isinstance(bulk_data, TestResult):
+                combo_res.setCurrentIndex(combo_res.findData(bulk_data))
+            else:
+                combo_res.setCurrentIndex(combo_res.findData(row_result))
+            table.setCellWidget(row, 3, combo_res)
         self._refresh_sample_summary()
         self._schedule_result_header_sync()
+
+    def _sync_sample_id(self, row, text, source_table):
+        if self._sample_id_syncing:
+            return
+        self._sample_id_syncing = True
+        try:
+            for slot in self._sample_table_slots:
+                table = slot["table"]
+                if table is source_table or row >= table.rowCount():
+                    continue
+                widget = table.cellWidget(row, 1)
+                if widget is not None and widget.text() != text:
+                    widget.setText(text)
+        finally:
+            self._sample_id_syncing = False
 
     def _remove_sample_row(self):
         btn = self.sender()
         if btn is None:
             return
-        for row in range(self.table.rowCount()):
-            wrap = self.table.cellWidget(row, 0)
-            if wrap is None:
-                continue
-            if wrap is btn or wrap.findChild(QPushButton) is btn:
-                self.table.removeRow(row)
-                self._refresh_sample_summary()
-                self._schedule_result_header_sync()
-                return
+        target_row = None
+        for slot in self._sample_table_slots:
+            table = slot["table"]
+            for row in range(table.rowCount()):
+                wrap = table.cellWidget(row, 0)
+                if wrap is None:
+                    continue
+                if wrap is btn or wrap.findChild(QPushButton) is btn:
+                    target_row = row
+                    break
+            if target_row is not None:
+                break
+        if target_row is None:
+            return
+        for slot in self._sample_table_slots:
+            table = slot["table"]
+            if target_row < table.rowCount():
+                table.removeRow(target_row)
+        self._refresh_sample_summary()
+        self._schedule_result_header_sync()
 
     def _existing_sample_ids(self):
         ids = []
-        for row in range(self.table.rowCount()):
-            widget = self.table.cellWidget(row, 1)
+        table = self.table
+        if table is None:
+            return ids
+        for row in range(table.rowCount()):
+            widget = table.cellWidget(row, 1)
             if widget is None:
                 continue
             text = widget.text().strip()
@@ -1794,8 +2087,11 @@ class TestDetailDialog(QDialog):
             return
         marker = f"{appno}-"
         changed = 0
-        for row in range(self.table.rowCount()):
-            widget = self.table.cellWidget(row, 1)
+        table = self.table
+        if table is None:
+            return
+        for row in range(table.rowCount()):
+            widget = table.cellWidget(row, 1)
             if widget is None:
                 continue
             text = widget.text().strip()
@@ -1807,8 +2103,10 @@ class TestDetailDialog(QDialog):
             QMessageBox.information(self, "提示", "没有需要添加单号的样品，或已经全部加过。")
 
     def _refresh_sample_summary(self):
-        n = self.table.rowCount() if hasattr(self, "table") else 0
-        self.drawer_sample.set_summary(f"{n} 行" if n else "未添加")
+        table = getattr(self, "table", None)
+        n = table.rowCount() if table is not None else 0
+        if hasattr(self, "drawer_sample"):
+            self.drawer_sample.set_summary(f"{n} 行" if n else "未添加")
 
     def _refresh_photo_summary(self):
         if not hasattr(self, "photos_panel"):
@@ -1844,9 +2142,25 @@ class TestDetailDialog(QDialog):
         if self.node_data.env_condition:
             self.txt_env_condition.setText(self.node_data.env_condition)
 
+        # Standards restore rebuilds sample tables; fill rows afterward.
         for s in self.node_data.samples:
-            self.add_sample_row(s.sample_id, s.result)
-        self._apply_result_desc_to_rows(self._current_result_desc())
+            legacy_by_key = {}
+            if not (s.standard_results or []):
+                for slot in self._sample_table_slots:
+                    key = slot.get("key")
+                    if key is not None:
+                        legacy_by_key[key] = {
+                            "result": s.result,
+                            "result_desc": s.result_desc,
+                        }
+            self.add_sample_row(
+                s.sample_id,
+                s.result,
+                result_desc=s.result_desc,
+                results_by_key=legacy_by_key or None,
+                standard_results=s.standard_results or None,
+            )
+        self._apply_result_descs_to_tables()
         self._refresh_sample_summary()
         self._refresh_data_table_list()
         self._sync_data_table_button()
@@ -1856,6 +2170,12 @@ class TestDetailDialog(QDialog):
         if self._project_state is not None:
             raw = getattr(self._project_state, "project_path", "") or ""
         return Path(raw) if raw else None
+
+    def _leg_name(self) -> str:
+        if self._project_state is None:
+            return ""
+        leg = find_leg_for_node(self._project_state, self.node_data)
+        return (leg.leg_name if leg is not None else "") or ""
 
     def _sync_data_table_button(self):
         ok = is_usable_test_name(self.node_data.test_name) and self._project_root() is not None
@@ -1903,6 +2223,7 @@ class TestDetailDialog(QDialog):
         table.setColumnCount(cols)
         table.setHorizontalHeaderLabels([str(i + 1) for i in range(cols)])
         table.verticalHeader().setVisible(True)
+        table._preview_snap = snap
         for r, row in enumerate(rows):
             for c in range(cols):
                 text = row[c] if c < len(row) else ""
@@ -1926,7 +2247,146 @@ class TestDetailDialog(QDialog):
             col_span = c1 - c0 + 1
             if row_span > 1 or col_span > 1:
                 table.setSpan(r0, c0, row_span, col_span)
+        header = table.horizontalHeader()
+        header.setMinimumHeight(28)
+        header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        header.setMinimumSectionSize(72)
+        header.setDefaultSectionSize(88)
         table.resizeColumnsToContents()
+        for c in range(cols):
+            if table.columnWidth(c) < 80:
+                table.setColumnWidth(c, 80)
+        self._apply_preview_validation_colors(table, snap)
+        self._install_data_table_col_validate_buttons(table)
+
+    def _apply_preview_validation_colors(
+        self,
+        table: QTableWidget,
+        snap: PreviewSnapshot,
+        *,
+        range_cells=None,
+    ):
+        red = QColor("#FF4D6A")
+        decimal_set = set(find_decimal_inconsistencies(snap))
+        range_set = set(range_cells or [])
+        for r in range(table.rowCount()):
+            for c in range(table.columnCount()):
+                item = table.item(r, c)
+                if item is None:
+                    continue
+                item.setData(Qt.ForegroundRole, None)
+                item.setToolTip("")
+        for r, c in decimal_set | range_set:
+            item = table.item(r, c)
+            if item is None:
+                continue
+            reasons = []
+            if (r, c) in decimal_set:
+                reasons.append("小数位数不一致")
+            if (r, c) in range_set:
+                reasons.append("数据超限")
+            item.setForeground(red)
+            item.setToolTip("；".join(reasons))
+
+    def _install_data_table_col_validate_buttons(self, table: QTableWidget):
+        old = getattr(table, "_col_validate_buttons", None) or []
+        for _c, btn in old:
+            btn.setParent(None)
+            btn.deleteLater()
+        header = table.horizontalHeader()
+        buttons = []
+        # Skip sample column (index 0); only data columns get 校验.
+        for c in range(1, table.columnCount()):
+            btn = QPushButton("校验", header.viewport())
+            btn.setObjectName("dataTableColValidate")
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFocusPolicy(Qt.NoFocus)
+            btn.setToolTip(f"校验第 {c + 1} 列数据上下限")
+            btn.clicked.connect(
+                lambda _=False, col=c, t=table: self._validate_data_table_range(
+                    t, col=col
+                )
+            )
+            buttons.append((c, btn))
+        table._col_validate_buttons = buttons
+
+        def sync(*_args, t=table):
+            self._sync_data_table_col_validate_buttons(t)
+
+        header.sectionResized.connect(sync)
+        header.geometriesChanged.connect(sync)
+        table.horizontalScrollBar().valueChanged.connect(sync)
+        QTimer.singleShot(0, sync)
+
+    def _sync_data_table_col_validate_buttons(self, table: QTableWidget):
+        header = table.horizontalHeader()
+        buttons = getattr(table, "_col_validate_buttons", None) or []
+        for c, btn in buttons:
+            if c >= table.columnCount():
+                btn.hide()
+                continue
+            x = header.sectionViewportPosition(c)
+            w = header.sectionSize(c)
+            h = header.height()
+            bw = 36
+            bh = 18
+            # Sit just after the column number; clamp so the border stays inside the section.
+            bx = x + 18
+            if bx + bw > x + w - 2:
+                bx = max(x + 2, x + w - bw - 2)
+            btn.setGeometry(bx, max((h - bh) // 2, 2), bw, bh)
+            btn.setVisible(w >= 48)
+            btn.raise_()
+
+    def _prompt_data_range_limits(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("数据范围校验")
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel("请输入数据的有效范围（上下限）："))
+        row = QHBoxLayout()
+        lo_edit = QLineEdit()
+        lo_edit.setPlaceholderText("下限")
+        hi_edit = QLineEdit()
+        hi_edit.setPlaceholderText("上限")
+        row.addWidget(QLabel("下限"))
+        row.addWidget(lo_edit)
+        row.addWidget(QLabel("上限"))
+        row.addWidget(hi_edit)
+        layout.addLayout(row)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        lo = parse_numeric_display(lo_edit.text())
+        hi = parse_numeric_display(hi_edit.text())
+        if lo is None or hi is None:
+            QMessageBox.warning(self, "提示", "请输入有效的数字上下限")
+            return None
+        return lo, hi
+
+    def _validate_data_table_range(self, table: QTableWidget, *, col=None):
+        limits = self._prompt_data_range_limits()
+        if limits is None:
+            return
+        lo, hi = limits
+        snap = getattr(table, "_preview_snap", None)
+        if snap is None:
+            QMessageBox.warning(self, "提示", "暂无预览数据")
+            return
+        flagged = find_out_of_range(snap, lo, hi, col=col)
+        self._apply_preview_validation_colors(table, snap, range_cells=flagged)
+        if not flagged:
+            SaveSuccessDialog(self, seconds=3, message="✌️ 数据校验通过").exec()
+            return
+        rows = sorted({r + 1 for r, _c in flagged})
+        row_txt = "，".join(str(r) for r in rows)
+        SaveSuccessDialog(
+            self,
+            message=f"😭 第{row_txt}行数据超限，请确认",
+            auto_close=False,
+        ).exec()
 
     def _refresh_data_table_list(self):
         keep = {ref.relative_path for ref in self._data_tables}
@@ -1961,6 +2421,10 @@ class TestDetailDialog(QDialog):
                 lambda _=False, r=ref: self._refresh_data_table_preview(r)
             )
             bar.addWidget(btn_refresh)
+            btn_validate = QPushButton("整表数据校验")
+            btn_validate.setObjectName("accentButton")
+            btn_validate.setToolTip("输入上下限，校验本表全部数据列是否超限")
+            bar.addWidget(btn_validate)
             btn_delete = QPushButton("删除")
             btn_delete.setToolTip("从列表移除并删除本地附件文件")
             btn_delete.clicked.connect(
@@ -1971,19 +2435,18 @@ class TestDetailDialog(QDialog):
 
             preview = ContainedTableWidget(0, 0)
             preview.setObjectName("dataTablePreview")
+            preview._data_table_rel = ref.relative_path
             preview.setEditTriggers(QAbstractItemView.NoEditTriggers)
             preview.setSelectionMode(QAbstractItemView.NoSelection)
             preview.setFocusPolicy(Qt.NoFocus)
-            preview.setMinimumHeight(120)
-            preview.setMaximumHeight(220)
+            preview.setMinimumHeight(140)
+            preview.setMaximumHeight(260)
             preview.horizontalHeader().setStretchLastSection(False)
             snap = self._load_preview_for_ref(ref, force=False)
             self._fill_preview_table(preview, snap)
-            if snap.merges:
-                merge_lbl = QLabel("合并：" + "、".join(snap.merges))
-                merge_lbl.setObjectName("dimLabel")
-                merge_lbl.setWordWrap(True)
-                drawer.body_layout.addWidget(merge_lbl)
+            btn_validate.clicked.connect(
+                lambda _=False, t=preview: self._validate_data_table_range(t, col=None)
+            )
             drawer.body_layout.addWidget(preview)
             drawer.header.clicked.connect(
                 lambda _=False, d=drawer, bank=self._data_table_drawers: self._accordion(d, bank)
@@ -2013,7 +2476,12 @@ class TestDetailDialog(QDialog):
             QMessageBox.warning(self, "提示", "请先加载项目以确定本地镜像路径")
             return
         state = self._project_state
-        if state is not None and not state.test_name_is_unique(self.node_data.test_name):
+        leg = find_leg_for_node(state, self.node_data) if state is not None else None
+        if (
+            leg is not None
+            and state is not None
+            and not state.test_name_is_unique_in_leg(leg.leg_id, self.node_data.test_name)
+        ):
             warn_duplicate_test_names(self)
             return
 
@@ -2063,7 +2531,7 @@ class TestDetailDialog(QDialog):
             return
         root = self._project_root()
         try:
-            ref = upload_existing_xlsx(root, self.node_data.test_name, Path(path))
+            ref = upload_existing_xlsx(root, self._leg_name(), self.node_data.test_name, Path(path))
         except DataTableError as exc:
             QMessageBox.warning(self, "提示", str(exc))
             return
@@ -2083,7 +2551,7 @@ class TestDetailDialog(QDialog):
             return
         root = self._project_root()
         try:
-            ref = create_blank_workbook(root, self.node_data.test_name, title)
+            ref = create_blank_workbook(root, self._leg_name(), self.node_data.test_name, title)
         except DataTableError as exc:
             QMessageBox.warning(self, "提示", str(exc))
             return
@@ -2114,7 +2582,7 @@ class TestDetailDialog(QDialog):
         added = 0
         for src in paths:
             try:
-                ref = copy_from_template(root, self.node_data.test_name, src)
+                ref = copy_from_template(root, self._leg_name(), self.node_data.test_name, src)
             except DataTableError as exc:
                 QMessageBox.warning(self, "提示", str(exc))
                 continue
@@ -2263,7 +2731,8 @@ class TestDetailDialog(QDialog):
             data = chk.data(Qt.UserRole) if chk else {}
             code = _cell_text((data or {}).get("设备编号"))
             name = _cell_text((data or {}).get("设备名称"))
-            checked = equipment_should_restore(
+            can_select = _equipment_cal_start(data).isValid()
+            checked = can_select and equipment_should_restore(
                 code,
                 name,
                 saved,
@@ -2273,6 +2742,7 @@ class TestDetailDialog(QDialog):
             if chk is not None:
                 chk.setCheckState(Qt.Checked if checked else Qt.Unchecked)
         self.eq_table.blockSignals(False)
+        self._refresh_eq_expiry()
         self._refresh_eq_summary()
 
     @staticmethod
@@ -2370,6 +2840,7 @@ class TestDetailDialog(QDialog):
             return
 
         self.node_data.apply_standards(self._selected_standards())
+        self.node_data.sync_card_names_from_standards()
 
         picked = self._selected_equipments()
         self.node_data.equipments = picked
@@ -2381,21 +2852,67 @@ class TestDetailDialog(QDialog):
             self.node_data.equipment_name = None
 
         samples = []
-        for row in range(self.table.rowCount()):
-            id_widget = self.table.cellWidget(row, 1)
+        primary = self.table
+        if primary is None:
+            self.node_data.samples = []
+            self.node_data.data_tables = list(self._data_tables)
+            if hasattr(self, "photos_panel"):
+                order = self.photos_panel.current_album_order()
+                if order:
+                    self.node_data.photo_album_order = list(order)
+            self.accept()
+            return
+        for row in range(primary.rowCount()):
+            id_widget = primary.cellWidget(row, 1)
             if id_widget is None:
                 continue
             txt_id = id_widget.text().strip()
-            if txt_id:
-                desc_w = self.table.cellWidget(row, 2)
-                combo_res = self.table.cellWidget(row, 3)
-                res = combo_res.currentData()
+            if not txt_id:
+                continue
+            std_results = []
+            for slot in self._sample_table_slots:
+                table = slot["table"]
+                key = slot.get("key")
+                if key is None or row >= table.rowCount():
+                    continue
+                combo_res = table.cellWidget(row, 3)
+                desc_w = table.cellWidget(row, 2)
+                res = self._combo_result(combo_res)
                 desc = desc_w.text().strip() if desc_w else ""
-                samples.append(TestSample(
-                    sample_id=txt_id,
-                    result=res,
-                    result_desc=desc or None,
-                ))
+                std_results.append(
+                    SampleStandardResult(
+                        standard_id=key[0] or "",
+                        chapter=key[1] or "",
+                        result=res,
+                        result_desc=desc or None,
+                    )
+                )
+            if std_results:
+                first = std_results[0]
+                samples.append(
+                    TestSample(
+                        sample_id=txt_id,
+                        result=first.result,
+                        result_desc=first.result_desc,
+                        standard_results=std_results,
+                    )
+                )
+            else:
+                desc_w = primary.cellWidget(row, 2)
+                combo_res = primary.cellWidget(row, 3)
+                res = self._combo_result(combo_res)
+                desc = desc_w.text().strip() if desc_w else ""
+                samples.append(
+                    TestSample(
+                        sample_id=txt_id,
+                        result=res,
+                        result_desc=desc or None,
+                    )
+                )
         self.node_data.samples = samples
         self.node_data.data_tables = list(self._data_tables)
+        if hasattr(self, "photos_panel"):
+            order = self.photos_panel.current_album_order()
+            if order:
+                self.node_data.photo_album_order = list(order)
         self.accept()

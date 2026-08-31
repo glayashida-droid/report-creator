@@ -18,8 +18,24 @@ def test_save_success_dialog_shows_message_and_countdown():
     _app()
     dlg = SaveSuccessDialog(seconds=3)
     assert dlg.windowTitle() == "提示"
+    assert dlg.message_label.text() == "项目已保存"
     assert dlg.countdown_label.text() == "3秒"
     assert dlg.btn_ok.text() == "确定"
+
+
+def test_save_success_dialog_accepts_custom_message():
+    _app()
+    dlg = SaveSuccessDialog(seconds=3, message="✌️ 数据校验通过")
+    assert dlg.message_label.text() == "✌️ 数据校验通过"
+    assert dlg.countdown_label.text() == "3秒"
+
+
+def test_save_success_dialog_manual_close_hides_countdown():
+    _app()
+    dlg = SaveSuccessDialog(message="😭 超限", auto_close=False)
+    assert dlg.message_label.text() == "😭 超限"
+    assert not dlg.countdown_label.isVisible()
+    assert not dlg._timer.isActive()
 
 
 def test_save_success_dialog_confirm_closes_immediately():
@@ -61,6 +77,8 @@ def test_save_detail_button_shows_success_dialog():
 
 if __name__ == "__main__":
     test_save_success_dialog_shows_message_and_countdown()
+    test_save_success_dialog_accepts_custom_message()
+    test_save_success_dialog_manual_close_hides_countdown()
     test_save_success_dialog_confirm_closes_immediately()
     test_save_success_dialog_auto_closes_after_countdown()
     test_save_detail_button_shows_success_dialog()
