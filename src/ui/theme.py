@@ -95,7 +95,17 @@ QGroupBox#overviewGroup {{
 QToolButton#overviewReload {{
     background: transparent;
     border: none;
-    padding: 0 3px 0 1px;
+    padding: 0 1px;
+    margin: 0;
+    color: {CYAN};
+    font-size: 11px;
+    font-weight: 500;
+}}
+
+QToolButton#overviewAdd {{
+    background: transparent;
+    border: none;
+    padding: 0 1px;
     margin: 0;
     color: {CYAN};
     font-size: 11px;
@@ -107,8 +117,39 @@ QToolButton#overviewReload:hover {{
     border-radius: 4px;
 }}
 
+QToolButton#overviewAdd:hover {{
+    background-color: {BG_HOVER};
+    border-radius: 4px;
+}}
+
 QToolButton#overviewReload:pressed {{
     background-color: {BORDER};
+}}
+
+QToolButton#overviewAdd:pressed {{
+    background-color: {BORDER};
+}}
+
+QToolButton#sampleColumnTab {{
+    background: transparent;
+    border: none;
+    padding: 0 4px;
+    margin: 0;
+    color: {CYAN_DIM};
+    font-size: 11px;
+    font-weight: 500;
+}}
+
+QToolButton#sampleColumnTab:hover {{
+    background-color: {BG_HOVER};
+    border-radius: 4px;
+    color: {CYAN};
+}}
+
+QToolButton#sampleColumnTab:checked {{
+    color: {CYAN};
+    font-weight: 600;
+    border-bottom: 1px solid {CYAN};
 }}
 
 QGroupBox#overviewGroup QLineEdit,
@@ -863,6 +904,29 @@ QHeaderView::section {{
     padding: 6px 8px;
 }}
 
+QTableWidget#dataTablePreview QHeaderView::section {{
+    padding: 4px 6px;
+    min-height: 28px;
+}}
+
+QPushButton#dataTableColValidate {{
+    padding: 0px 4px;
+    margin: 0px;
+    min-height: 18px;
+    max-height: 20px;
+    min-width: 34px;
+    max-width: 40px;
+    font-size: 12px;
+    font-weight: 600;
+    border-radius: 4px;
+    border: 1px solid {CYAN_DIM};
+}}
+
+QPushButton#dataTableColValidate:hover {{
+    color: {CYAN};
+    border: 1px solid {CYAN};
+}}
+
 QComboBox#bulkResultCombo {{
     background-color: {BG_INPUT};
     color: {TEXT};
@@ -979,6 +1043,28 @@ def refresh_icon(color: str = CYAN, size: int = 14):
             ]
         )
     )
+    painter.end()
+    return QIcon(pm)
+
+
+def plus_icon(color: str = CYAN, size: int = 14):
+    """Cyan plus for compact overview Add button (matches refresh_icon style)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.Antialiasing)
+    c = QColor(color)
+    stroke = max(1.2, size * 0.14)
+    pen = QPen(c, stroke)
+    pen.setCapStyle(Qt.RoundCap)
+    painter.setPen(pen)
+    m = size * 0.22
+    mid = size / 2
+    painter.drawLine(int(mid), int(m), int(mid), int(size - m))
+    painter.drawLine(int(m), int(mid), int(size - m), int(mid))
     painter.end()
     return QIcon(pm)
 
