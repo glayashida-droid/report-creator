@@ -1,8 +1,10 @@
 import sys
+from unittest.mock import patch
 
 from PySide6.QtCore import QDate, QPoint
-from PySide6.QtWidgets import QApplication, QComboBox
+from PySide6.QtWidgets import QApplication, QComboBox, QMessageBox
 
+from src.io.test_photos import test_dir_key as leg_test_dir_key
 from src.models.project_state import ProjectState, TestEquipment, TestLeg, TestNode, TestResult, TestSample, TestStandard
 from src.ui.leg_graph import (
     LEG_CARD_WIDTH,
@@ -20,6 +22,10 @@ def _app():
     if app is None:
         app = QApplication(sys.argv)
     return app
+
+
+def _test_dir(root, leg_name: str, test_name: str):
+    return root / "3.测试组" / leg_test_dir_key(leg_name, test_name)
 
 
 def test_reloaded_nodes_get_db_loader():
@@ -273,8 +279,8 @@ def test_insert_node_at_middle_and_end():
 def test_pool_drop_insert_keeps_sibling_committed_names(tmp_path):
     _app()
     root = tmp_path / "proj"
-    (root / "3.测试组" / "振动").mkdir(parents=True)
-    (root / "3.测试组" / "湿热循环").mkdir(parents=True)
+    _test_dir(root, "Leg 1", "振动").mkdir(parents=True)
+    _test_dir(root, "Leg 1", "湿热循环").mkdir(parents=True)
     state = ProjectState(
         project_id="P1",
         project_path=str(root),
@@ -304,8 +310,8 @@ def test_pool_drop_insert_keeps_sibling_committed_names(tmp_path):
     assert [n.test_name for n in leg.leg_data.nodes] == ["振动", "湿热循环", "湿热循环"]
     assert sibling._committed_name == "湿热循环"
     assert sibling.node_data.test_name == "湿热循环"
-    assert (root / "3.测试组" / "湿热循环").is_dir()
-    assert (root / "3.测试组" / "振动").is_dir()
+    assert _test_dir(root, "Leg 1", "湿热循环").is_dir()
+    assert _test_dir(root, "Leg 1", "振动").is_dir()
 
 
 def test_node_combo_rejects_drops_so_leg_owns_before_after():
@@ -330,12 +336,12 @@ def test_node_combo_rejects_drops_so_leg_owns_before_after():
     assert not combo.lineEdit().acceptDrops()
 
 
-def test_commit_allows_temp_duplicate_name_without_dialog(tmp_path):
-    """Rename to an existing folder name: commit UI name, skip disk move, no popup."""
+def test_commit_rollback_when_target_dir_exists(tmp_path):
+    """Hooked rename to an existing trial dir: rollback card name, keep source dir."""
     _app()
     root = tmp_path / "proj"
-    (root / "3.测试组" / "湿热循环" / "试验前").mkdir(parents=True)
-    (root / "3.测试组" / "振动").mkdir(parents=True)
+    (_test_dir(root, "Leg 1", "湿热循环") / "试验前").mkdir(parents=True)
+    _test_dir(root, "Leg 1", "振动").mkdir(parents=True)
     state = ProjectState(
         project_id="P1",
         project_path=str(root),
@@ -351,17 +357,65 @@ def test_commit_allows_temp_duplicate_name_without_dialog(tmp_path):
     area.reload_from_state()
     nw = area.leg_widgets[0].node_widgets[0]
     nw._commit_test_name("振动")
-    assert nw._committed_name == "振动"
-    assert nw.node_data.test_name == "振动"
-    assert (root / "3.测试组" / "湿热循环" / "试验前").is_dir()
-    assert (root / "3.测试组" / "振动").is_dir()
-    assert state.duplicate_test_names() == []  # only one node named 振动 in this fixture
+    assert nw._committed_name == "湿热循环"
+    assert nw.node_data.test_name == "湿热循环"
+    assert (_test_dir(root, "Leg 1", "湿热循环") / "试验前").is_dir()
+    assert _test_dir(root, "Leg 1", "振动").is_dir()
+    assert not (_test_dir(root, "Leg 1", "振动") / "试验前").exists()
+
+
+def test_unhooked_rename_does_not_create_test_dir(tmp_path):
+    _app()
+    root = tmp_path / "proj"
+    root.mkdir()
+    state = ProjectState(
+        project_id="P1",
+        project_path=str(root),
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[TestNode(test_name="试验A")],
+            )
+        ],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    nw = area.leg_widgets[0].node_widgets[0]
+    nw._commit_test_name("试验B")
+    assert nw._committed_name == "试验B"
+    assert nw.node_data.test_name == "试验B"
+    assert not (root / "3.测试组").exists()
+
+
+def test_standard_override_rename_follows_hooked_dir(tmp_path):
+    """Same rename path as manual commit after detail save overwrites Chinese name."""
+    _app()
+    root = tmp_path / "proj"
+    (_test_dir(root, "Leg 1", "湿热循环") / "试验前").mkdir(parents=True)
+    state = ProjectState(
+        project_id="P1",
+        project_path=str(root),
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[TestNode(test_name="湿热循环")],
+            )
+        ],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    nw = area.leg_widgets[0].node_widgets[0]
+    assert nw._rename_chinese_test_folder("湿热循环", "标准覆盖名")
+    assert (_test_dir(root, "Leg 1", "标准覆盖名") / "试验前").is_dir()
+    assert not _test_dir(root, "Leg 1", "湿热循环").exists()
 
 
 def test_commit_skips_rename_when_sibling_still_uses_old_name(tmp_path):
     _app()
     root = tmp_path / "proj"
-    (root / "3.测试组" / "湿热循环" / "试验前").mkdir(parents=True)
+    (_test_dir(root, "Leg 1", "湿热循环") / "试验前").mkdir(parents=True)
     state = ProjectState(
         project_id="P1",
         project_path=str(root),
@@ -382,8 +436,8 @@ def test_commit_skips_rename_when_sibling_still_uses_old_name(tmp_path):
     nw._commit_test_name("盐雾腐蚀")
     assert nw._committed_name == "盐雾腐蚀"
     assert area.leg_widgets[0].node_widgets[1]._committed_name == "湿热循环"
-    assert (root / "3.测试组" / "湿热循环" / "试验前").is_dir()
-    assert not (root / "3.测试组" / "盐雾腐蚀").exists()
+    assert (_test_dir(root, "Leg 1", "湿热循环") / "试验前").is_dir()
+    assert not _test_dir(root, "Leg 1", "盐雾腐蚀").exists()
 
 
 def test_commit_rename_retargets_data_table_paths(tmp_path):
@@ -391,10 +445,12 @@ def test_commit_rename_retargets_data_table_paths(tmp_path):
     from src.models.project_state import DataTableRef
 
     root = tmp_path / "proj"
-    attach = root / "3.测试组" / "湿热循环" / "数据表附件"
+    attach = _test_dir(root, "Leg 1", "湿热循环") / "数据表附件"
     attach.mkdir(parents=True)
     xlsx = attach / "工况.xlsx"
     xlsx.write_bytes(b"PK")
+    old_key = leg_test_dir_key("Leg 1", "湿热循环")
+    new_key = leg_test_dir_key("Leg 1", "前湿热循环")
     state = ProjectState(
         project_id="P1",
         project_path=str(root),
@@ -408,7 +464,7 @@ def test_commit_rename_retargets_data_table_paths(tmp_path):
                         data_tables=[
                             DataTableRef(
                                 title="工况.xlsx",
-                                relative_path="3.测试组/湿热循环/数据表附件/工况.xlsx",
+                                relative_path=f"3.测试组/{old_key}/数据表附件/工况.xlsx",
                             )
                         ],
                     )
@@ -421,10 +477,10 @@ def test_commit_rename_retargets_data_table_paths(tmp_path):
     nw = area.leg_widgets[0].node_widgets[0]
     nw._commit_test_name("前湿热循环")
     assert nw._committed_name == "前湿热循环"
-    assert (root / "3.测试组" / "前湿热循环" / "数据表附件" / "工况.xlsx").is_file()
-    assert not (root / "3.测试组" / "湿热循环").exists()
+    assert (_test_dir(root, "Leg 1", "前湿热循环") / "数据表附件" / "工况.xlsx").is_file()
+    assert not _test_dir(root, "Leg 1", "湿热循环").exists()
     assert nw.node_data.data_tables[0].relative_path == (
-        "3.测试组/前湿热循环/数据表附件/工况.xlsx"
+        f"3.测试组/{new_key}/数据表附件/工况.xlsx"
     )
 
 
@@ -462,6 +518,163 @@ def test_leg_cards_share_fixed_width():
     widths = [lw.width() for lw in area.leg_widgets]
     assert all(w == LEG_CARD_WIDTH for w in widths)
     assert widths[0] == widths[1]
+
+
+def test_delete_unhooked_card_removes_node_without_confirm(tmp_path):
+    _app()
+    root = tmp_path / "proj"
+    root.mkdir()
+    state = ProjectState(
+        project_id="P1",
+        project_path=str(root),
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[TestNode(test_name="未挂钩"), TestNode(test_name="保留")],
+            )
+        ],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    leg = area.leg_widgets[0]
+    with patch.object(QMessageBox, "exec") as mock_exec:
+        leg.on_node_deleted(leg.node_widgets[0])
+        mock_exec.assert_not_called()
+    assert len(leg.node_widgets) == 1
+    assert leg.leg_data.nodes[0].test_name == "保留"
+    assert not (root / "3.测试组").exists()
+
+
+@patch.object(QMessageBox, "exec", return_value=QMessageBox.Yes)
+def test_delete_hooked_card_confirmed_removes_dir(mock_exec, tmp_path):
+    _app()
+    root = tmp_path / "proj"
+    (_test_dir(root, "Leg 1", "湿热循环") / "试验前").mkdir(parents=True)
+    state = ProjectState(
+        project_id="P1",
+        project_path=str(root),
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[TestNode(test_name="湿热循环")],
+            )
+        ],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    leg = area.leg_widgets[0]
+    leg.on_node_deleted(leg.node_widgets[0])
+    mock_exec.assert_called_once()
+    assert leg.node_widgets == []
+    assert leg.leg_data.nodes == []
+    assert not _test_dir(root, "Leg 1", "湿热循环").exists()
+
+
+@patch.object(QMessageBox, "exec", return_value=QMessageBox.No)
+def test_delete_hooked_card_cancelled_keeps_card_and_dir(mock_exec, tmp_path):
+    _app()
+    root = tmp_path / "proj"
+    (_test_dir(root, "Leg 1", "湿热循环") / "试验前").mkdir(parents=True)
+    state = ProjectState(
+        project_id="P1",
+        project_path=str(root),
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[TestNode(test_name="湿热循环")],
+            )
+        ],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    leg = area.leg_widgets[0]
+    leg.on_node_deleted(leg.node_widgets[0])
+    mock_exec.assert_called_once()
+    assert len(leg.node_widgets) == 1
+    assert leg.leg_data.nodes[0].test_name == "湿热循环"
+    assert (_test_dir(root, "Leg 1", "湿热循环") / "试验前").is_dir()
+
+
+@patch.object(QMessageBox, "exec", return_value=QMessageBox.Yes)
+def test_delete_leg_with_hooked_nodes_removes_dirs(mock_exec, tmp_path):
+    _app()
+    root = tmp_path / "proj"
+    (_test_dir(root, "Leg 1", "A") / "试验前").mkdir(parents=True)
+    (_test_dir(root, "Leg 1", "B") / "数据表附件").mkdir(parents=True)
+    state = ProjectState(
+        project_id="P1",
+        project_path=str(root),
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[TestNode(test_name="A"), TestNode(test_name="B")],
+            )
+        ],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    leg = area.leg_widgets[0]
+    area.on_leg_deleted(leg)
+    mock_exec.assert_called_once()
+    assert area.leg_widgets == []
+    assert state.legs == []
+    assert not _test_dir(root, "Leg 1", "A").exists()
+    assert not _test_dir(root, "Leg 1", "B").exists()
+
+
+def test_delete_unhooked_leg_without_confirm(tmp_path):
+    _app()
+    root = tmp_path / "proj"
+    root.mkdir()
+    state = ProjectState(
+        project_id="P1",
+        project_path=str(root),
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[TestNode(test_name="未挂钩")],
+            )
+        ],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    leg = area.leg_widgets[0]
+    with patch.object(QMessageBox, "exec") as mock_exec:
+        area.on_leg_deleted(leg)
+        mock_exec.assert_not_called()
+    assert area.leg_widgets == []
+    assert state.legs == []
+
+
+@patch.object(QMessageBox, "exec", return_value=QMessageBox.No)
+def test_delete_leg_cancelled_keeps_structure(mock_exec, tmp_path):
+    _app()
+    root = tmp_path / "proj"
+    (_test_dir(root, "Leg 1", "湿热循环") / "试验前").mkdir(parents=True)
+    state = ProjectState(
+        project_id="P1",
+        project_path=str(root),
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[TestNode(test_name="湿热循环")],
+            )
+        ],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    leg = area.leg_widgets[0]
+    area.on_leg_deleted(leg)
+    mock_exec.assert_called_once()
+    assert len(area.leg_widgets) == 1
+    assert len(state.legs) == 1
+    assert (_test_dir(root, "Leg 1", "湿热循环") / "试验前").is_dir()
 
 
 def test_complete_mark_reserves_width_without_changing_leg_width():
@@ -506,6 +719,59 @@ def test_test_combo_tooltip_shows_full_name():
     fill_test_combo(combo, [], "")
     assert combo.toolTip() == ""
     assert combo.lineEdit().toolTip() == ""
+
+
+def test_english_edit_does_not_rename_hooked_dir(tmp_path):
+    _app()
+    state = ProjectState(
+        project_id="P1",
+        project_path=str(tmp_path),
+        edit_language="英文",
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[TestNode(test_name="高温试验", test_name_en="High temp")],
+            )
+        ],
+    )
+    hooked = _test_dir(tmp_path, "Leg 1", "高温试验")
+    hooked.mkdir(parents=True)
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    nw = area.leg_widgets[0].node_widgets[0]
+    nw._commit_english_name("Heat test")
+    assert nw.node_data.test_name_en == "Heat test"
+    assert nw.node_data.test_name == "高温试验"
+    assert hooked.is_dir()
+    assert not _test_dir(tmp_path, "Leg 1", "Heat test").exists()
+
+
+def test_english_edit_pool_pick_updates_chinese_name_and_dir(tmp_path):
+    _app()
+    state = ProjectState(
+        project_id="P1",
+        project_path=str(tmp_path),
+        edit_language="英文",
+        candidate_pool=["振动试验"],
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[TestNode(test_name="高温试验", test_name_en="High temp")],
+            )
+        ],
+    )
+    old_dir = _test_dir(tmp_path, "Leg 1", "高温试验")
+    old_dir.mkdir(parents=True)
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    nw = area.leg_widgets[0].node_widgets[0]
+    nw.combo.setEditText("振动试验")
+    nw.on_test_edit_finished()
+    assert nw.node_data.test_name == "振动试验"
+    assert not old_dir.exists()
+    assert _test_dir(tmp_path, "Leg 1", "振动试验").is_dir()
 
 
 if __name__ == "__main__":

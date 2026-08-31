@@ -5,32 +5,43 @@ from openpyxl import Workbook, load_workbook
 
 from src.io.data_tables import (
     DataTableError,
+    PreviewSnapshot,
     attachment_dir,
     copy_from_template,
     create_blank_workbook,
+    decimal_places,
     delete_attachment,
+    find_decimal_inconsistencies,
+    find_out_of_range,
     import_sample_ids,
     infer_header_row_count,
     list_data_table_templates,
     open_attachment,
+    parse_numeric_display,
     read_preview_snapshot,
     resolve_open_argv,
     retarget_node_data_tables,
     rewrite_test_dir_in_relative_path,
     upload_existing_xlsx,
 )
+from src.io.test_photos import test_dir_key as leg_test_dir_key
 from src.models.project_state import DataTableRef, ProjectState, TestLeg, TestNode
+
+LEG = "Leg 1"
 
 
 def test_create_blank_workbook_writes_xlsx_and_returns_ref():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        ref = create_blank_workbook(root, "高温试验", "工况记录")
+        ref = create_blank_workbook(root, LEG, "高温试验", "工况记录")
         assert ref.title == "工况记录"
         path = root / ref.relative_path
         assert path.is_file()
         assert path.suffix.lower() == ".xlsx"
-        assert path.parent == attachment_dir(root, "高温试验")
+        assert path.parent == attachment_dir(root, LEG, "高温试验")
+        assert ref.relative_path == (
+            f"3.测试组/{leg_test_dir_key(LEG, '高温试验')}/数据表附件/工况记录.xlsx"
+        )
         wb = load_workbook(path)
         assert wb.sheetnames
         wb.close()
@@ -40,7 +51,7 @@ def test_create_blank_rejects_unusable_test_name():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         try:
-            create_blank_workbook(root, "请选择试验...", "表")
+            create_blank_workbook(root, LEG, "请选择试验...", "表")
             raise AssertionError("expected DataTableError")
         except DataTableError:
             pass
@@ -50,8 +61,8 @@ def test_create_blank_rejects_unusable_test_name():
 def test_create_blank_unique_filename_does_not_overwrite():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        first = create_blank_workbook(root, "高温试验", "表A")
-        second = create_blank_workbook(root, "高温试验", "表A")
+        first = create_blank_workbook(root, LEG, "高温试验", "表A")
+        second = create_blank_workbook(root, LEG, "高温试验", "表A")
         assert first.relative_path != second.relative_path
         assert (root / first.relative_path).is_file()
         assert (root / second.relative_path).is_file()
@@ -62,7 +73,10 @@ def test_data_table_index_round_trips_in_project_json():
     node = TestNode(
         test_name="高温试验",
         data_tables=[
-            DataTableRef(title="工况记录", relative_path="3.测试组/高温试验/数据表附件/工况记录.xlsx")
+            DataTableRef(
+                title="工况记录",
+                relative_path="3.测试组/Leg 1-高温试验/数据表附件/工况记录.xlsx",
+            )
         ],
     )
     state.legs.append(TestLeg(leg_id="L1", leg_name="Leg 1", nodes=[node]))
@@ -73,7 +87,7 @@ def test_data_table_index_round_trips_in_project_json():
         refs = loaded.legs[0].nodes[0].data_tables
         assert len(refs) == 1
         assert refs[0].title == "工况记录"
-        assert refs[0].relative_path == "3.测试组/高温试验/数据表附件/工况记录.xlsx"
+        assert refs[0].relative_path == "3.测试组/Leg 1-高温试验/数据表附件/工况记录.xlsx"
     finally:
         if path.exists():
             path.unlink()
@@ -102,11 +116,11 @@ def test_upload_copies_xlsx_and_titles_from_filename():
         src = Path(tmp) / "outside" / "工况记录表.xlsx"
         src.parent.mkdir()
         _write_bbox_fixture(src)
-        ref = upload_existing_xlsx(root, "高温试验", src)
+        ref = upload_existing_xlsx(root, LEG, "高温试验", src)
         assert ref.title == "工况记录表"
         dest = root / ref.relative_path
         assert dest.is_file()
-        assert dest.parent == attachment_dir(root, "高温试验")
+        assert dest.parent == attachment_dir(root, LEG, "高温试验")
         assert dest.name == "工况记录表.xlsx"
         assert dest.read_bytes() == src.read_bytes()
 
@@ -117,8 +131,8 @@ def test_upload_same_name_gets_suffix_not_overwrite():
         src = Path(tmp) / "outside" / "同名.xlsx"
         src.parent.mkdir()
         _write_bbox_fixture(src)
-        first = upload_existing_xlsx(root, "高温试验", src)
-        second = upload_existing_xlsx(root, "高温试验", src)
+        first = upload_existing_xlsx(root, LEG, "高温试验", src)
+        second = upload_existing_xlsx(root, LEG, "高温试验", src)
         assert first.title == "同名"
         assert second.title == "同名"
         assert first.relative_path != second.relative_path
@@ -132,7 +146,7 @@ def test_upload_then_preview_snapshot_keeps_bbox_empties():
         src = Path(tmp) / "outside" / "夹具.xlsx"
         src.parent.mkdir()
         _write_bbox_fixture(src)
-        ref = upload_existing_xlsx(root, "高温试验", src)
+        ref = upload_existing_xlsx(root, LEG, "高温试验", src)
         snap = read_preview_snapshot(root / ref.relative_path)
         assert snap.values == [
             ["列甲", "列乙", "列丙"],
@@ -185,7 +199,7 @@ def test_import_sample_ids_empty_col1_writes_from_row2():
         import_sample_ids(path, ["A01", "A02", "A03"])
         wb = load_workbook(path)
         ws = wb.active
-        assert ws["A1"].value in (None, "")
+        assert ws["A1"].value == "样品编号\nSample No."
         assert ws["A2"].value == "A01"
         assert ws["A3"].value == "A02"
         assert ws["A4"].value == "A03"
@@ -204,6 +218,7 @@ def test_import_sample_ids_inserts_col_when_col1_has_content():
         import_sample_ids(path, ["S1", "S2"])
         wb = load_workbook(path)
         ws = wb.active
+        assert ws["A1"].value == "样品编号\nSample No."
         assert ws["A2"].value == "S1"
         assert ws["A3"].value == "S2"
         assert ws["B1"].value == "结果"
@@ -226,12 +241,30 @@ def test_import_sample_ids_starts_below_multi_row_header():
         import_sample_ids(path, ["A01", "A02", "A03"])
         wb = load_workbook(path)
         ws = wb.active
-        assert ws["A2"].value in (None, "")
+        assert ws["A1"].value == "样品编号\nSample No."
         assert ws["A3"].value == "A01"
         assert ws["A4"].value == "A02"
         assert ws["A5"].value == "A03"
         assert ws["B1"].value == "试验后 after test"
         assert ws["B2"].value == "桥路电阻"
+        wb.close()
+
+
+def test_import_sample_ids_skips_header_when_already_present():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "labeled.xlsx"
+        wb = Workbook()
+        ws = wb.active
+        ws["A1"] = "样品编号 Sample No."
+        ws.merge_cells("A1:A2")
+        ws["B1"] = "值"
+        wb.save(path)
+        wb.close()
+        import_sample_ids(path, ["X1"])
+        wb = load_workbook(path)
+        ws = wb.active
+        assert ws["A1"].value == "样品编号 Sample No."
+        assert ws["A3"].value == "X1"
         wb.close()
 
 
@@ -376,11 +409,11 @@ def test_copy_from_template_copies_and_titles_from_filename():
         templates.mkdir()
         src = templates / "高温记录.xlsx"
         _write_bbox_fixture(src)
-        ref = copy_from_template(root, "高温试验", src)
+        ref = copy_from_template(root, LEG, "高温试验", src)
         assert ref.title == "高温记录"
         dest = root / ref.relative_path
         assert dest.is_file()
-        assert dest.parent == attachment_dir(root, "高温试验")
+        assert dest.parent == attachment_dir(root, LEG, "高温试验")
         assert dest.read_bytes() == src.read_bytes()
 
 
@@ -398,7 +431,7 @@ def test_list_templates_returns_xlsx_sorted_by_name():
 def test_delete_attachment_removes_file_missing_is_noop():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        ref = create_blank_workbook(root, "高温试验", "待删")
+        ref = create_blank_workbook(root, LEG, "高温试验", "待删")
         path = root / ref.relative_path
         assert path.is_file()
         delete_attachment(path)
@@ -407,32 +440,105 @@ def test_delete_attachment_removes_file_missing_is_noop():
 
 
 def test_rewrite_test_dir_in_relative_path():
+    old_key = leg_test_dir_key(LEG, "湿热循环")
+    new_key = leg_test_dir_key(LEG, "前湿热循环")
     assert (
         rewrite_test_dir_in_relative_path(
-            "3.测试组/湿热循环/数据表附件/工况.xlsx", "湿热循环", "前湿热循环"
+            f"3.测试组/{old_key}/数据表附件/工况.xlsx", old_key, new_key
         )
-        == "3.测试组/前湿热循环/数据表附件/工况.xlsx"
+        == f"3.测试组/{new_key}/数据表附件/工况.xlsx"
     )
     assert (
         rewrite_test_dir_in_relative_path(
-            "3.测试组/其他/数据表附件/a.xlsx", "湿热循环", "前湿热循环"
+            "3.测试组/Leg 2-其他/数据表附件/a.xlsx", old_key, new_key
         )
-        == "3.测试组/其他/数据表附件/a.xlsx"
+        == "3.测试组/Leg 2-其他/数据表附件/a.xlsx"
     )
 
 
 def test_retarget_node_data_tables():
+    old_key = leg_test_dir_key(LEG, "湿热循环")
+    new_key = leg_test_dir_key(LEG, "前湿热循环")
     node = TestNode(
         test_name="前湿热循环",
         data_tables=[
             DataTableRef(
                 title="工况.xlsx",
-                relative_path="3.测试组/湿热循环/数据表附件/工况.xlsx",
+                relative_path=f"3.测试组/{old_key}/数据表附件/工况.xlsx",
             )
         ],
     )
-    retarget_node_data_tables(node, "湿热循环", "前湿热循环")
-    assert node.data_tables[0].relative_path == "3.测试组/前湿热循环/数据表附件/工况.xlsx"
+    retarget_node_data_tables(node, old_key, new_key)
+    assert node.data_tables[0].relative_path == (
+        f"3.测试组/{new_key}/数据表附件/工况.xlsx"
+    )
+
+
+def test_decimal_places_from_display_string():
+    assert decimal_places("1.20") == 2
+    assert decimal_places("1.2") == 1
+    assert decimal_places("2") == 0
+    assert decimal_places("-1.50") == 2
+    assert decimal_places("") is None
+    assert decimal_places("A01") is None
+    assert decimal_places("1.2Ω") is None
+
+
+def test_parse_numeric_display():
+    assert parse_numeric_display("1.20") == 1.2
+    assert parse_numeric_display("-3") == -3.0
+    assert parse_numeric_display("样品") is None
+
+
+def test_find_decimal_inconsistencies_flags_minority_in_column():
+    snap = PreviewSnapshot(
+        sheet_name="Sheet",
+        values=[
+            ["样品编号", "桥路", "短路"],
+            ["A01", "1.20", "2.5"],
+            ["A02", "1.2", "2.50"],
+            ["A03", "1.21", "2.5"],
+        ],
+        merges=[],
+    )
+    # Header inferred as 1 (sample label in A1); col1 mode is 2 decimals → flag 1.2
+    flagged = find_decimal_inconsistencies(snap)
+    assert (2, 1) in flagged
+    assert (1, 1) not in flagged
+    assert (3, 1) not in flagged
+    # col2 mode is 1 decimal → flag 2.50
+    assert (2, 2) in flagged
+    assert (1, 2) not in flagged
+
+
+def test_find_decimal_inconsistencies_skips_sample_col_and_consistent():
+    snap = PreviewSnapshot(
+        sheet_name="Sheet",
+        values=[
+            ["样品编号", "值"],
+            ["A01", "1.0"],
+            ["A02", "2.0"],
+        ],
+        merges=[],
+    )
+    assert find_decimal_inconsistencies(snap) == []
+
+
+def test_find_out_of_range_whole_table_and_column():
+    snap = PreviewSnapshot(
+        sheet_name="Sheet",
+        values=[
+            ["样品编号", "桥路", "短路"],
+            ["A01", "1.2", "9.0"],
+            ["A02", "5.0", "2.5"],
+        ],
+        merges=[],
+    )
+    all_hit = find_out_of_range(snap, 0.0, 3.0)
+    assert set(all_hit) == {(1, 2), (2, 1)}
+    col_hit = find_out_of_range(snap, 0.0, 3.0, col=1)
+    assert col_hit == [(2, 1)]
+    assert find_out_of_range(snap, 0.0, 3.0, col=0) == []
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from src.generators.word_engine import (
     _WIDTHS_SAMPLE_LIST,
     _WIDTHS_SUMMARY,
 )
+from src.io.test_photos import test_dir_key as leg_test_dir_key
 from src.models.project_state import (
     DataTableRef,
     ProjectState,
@@ -297,7 +298,7 @@ def test_word_engine_data_table_merges(tmp_path):
     from openpyxl import Workbook
 
     project = Path(tmp_path) / "proj"
-    attach = project / "3.测试组" / "冲击" / "数据表附件"
+    attach = project / "3.测试组" / leg_test_dir_key("L1", "冲击") / "数据表附件"
     attach.mkdir(parents=True)
     xlsx = attach / "resist.xlsx"
     wb = Workbook()
@@ -395,7 +396,7 @@ def test_word_engine_data_table_two_row_header_by_sample_id(tmp_path):
     from openpyxl import Workbook
 
     project = Path(tmp_path) / "proj"
-    attach = project / "3.测试组" / "冲击" / "数据表附件"
+    attach = project / "3.测试组" / leg_test_dir_key("L1", "冲击") / "数据表附件"
     attach.mkdir(parents=True)
     xlsx = attach / "after.xlsx"
     wb = Workbook()

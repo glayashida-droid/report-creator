@@ -1,4 +1,4 @@
-"""Manage data-table xlsx attachments under 3.测试组/{试验名}/数据表附件/."""
+"""Manage data-table xlsx attachments under 3.测试组/{Leg名}-{试验名}/数据表附件/."""
 
 from __future__ import annotations
 
@@ -15,8 +15,15 @@ from openpyxl.utils.cell import range_boundaries
 
 from application_parser.sample_id_labels import is_sample_id_column_key
 
+from src.language_copy import table_header_label
 from src.io.network_sources import data_table_templates_directory
-from src.io.test_photos import TEST_GROUP_DIR, is_usable_test_name, test_dir
+from src.io.test_photos import (
+    PhotoError,
+    TEST_GROUP_DIR,
+    require_leg_name as require_photo_leg_name,
+    require_usable_test_name as require_photo_test_name,
+    test_dir,
+)
 from src.models.project_state import DataTableRef, TestNode
 
 ATTACHMENT_DIR = "数据表附件"
@@ -36,11 +43,11 @@ class DataTableError(Exception):
 
 
 def rewrite_test_dir_in_relative_path(
-    relative_path: str, old_name: str, new_name: str
+    relative_path: str, old_dir_key: str, new_dir_key: str
 ) -> str:
     """Rewrite 3.测试组/{old}/… → 3.测试组/{new}/… in a stored attachment path."""
-    old = (old_name or "").strip()
-    new = (new_name or "").strip()
+    old = (old_dir_key or "").strip()
+    new = (new_dir_key or "").strip()
     rel = (relative_path or "").replace("\\", "/")
     if not old or not new or old == new or not rel:
         return relative_path or ""
@@ -50,7 +57,7 @@ def rewrite_test_dir_in_relative_path(
     return rel
 
 
-def retarget_node_data_tables(node: TestNode, old_name: str, new_name: str) -> None:
+def retarget_node_data_tables(node: TestNode, old_dir_key: str, new_dir_key: str) -> None:
     """Update data_tables relative_path prefixes after a trial folder rename."""
     refs = list(getattr(node, "data_tables", None) or [])
     if not refs:
@@ -59,7 +66,7 @@ def retarget_node_data_tables(node: TestNode, old_name: str, new_name: str) -> N
         DataTableRef(
             title=ref.title,
             relative_path=rewrite_test_dir_in_relative_path(
-                ref.relative_path, old_name, new_name
+                ref.relative_path, old_dir_key, new_dir_key
             ),
         )
         for ref in refs
@@ -78,15 +85,22 @@ class PreviewSnapshot:
     origin_col: int = 1
 
 
-def attachment_dir(project_root: Path, test_name: str) -> Path:
-    return test_dir(project_root, test_name) / ATTACHMENT_DIR
+def attachment_dir(project_root: Path, leg_name: str, test_name: str) -> Path:
+    return test_dir(project_root, leg_name, test_name) / ATTACHMENT_DIR
+
+
+def _require_leg_name(leg_name: str) -> str:
+    try:
+        return require_photo_leg_name(leg_name)
+    except PhotoError as exc:
+        raise DataTableError(str(exc)) from exc
 
 
 def _require_usable_test_name(test_name: str) -> str:
-    name = (test_name or "").strip()
-    if not is_usable_test_name(name):
-        raise DataTableError("请先选择试验名称")
-    return name
+    try:
+        return require_photo_test_name(test_name)
+    except PhotoError as exc:
+        raise DataTableError(str(exc)) from exc
 
 
 def sanitize_filename_stem(title: str) -> str:
@@ -109,14 +123,15 @@ def unique_xlsx_path(folder: Path, stem: str) -> Path:
 
 
 def create_blank_workbook(
-    project_root: Path, test_name: str, title: str
+    project_root: Path, leg_name: str, test_name: str, title: str
 ) -> DataTableRef:
     """Create an empty xlsx in the attachment folder; return an index ref."""
+    leg = _require_leg_name(leg_name)
     test = _require_usable_test_name(test_name)
     name = (title or "").strip()
     if not name:
         raise DataTableError("请输入数据表标题")
-    folder = attachment_dir(project_root, test)
+    folder = attachment_dir(project_root, leg, test)
     stem = sanitize_filename_stem(name)
     dest = unique_xlsx_path(folder, stem)
     wb = Workbook()
@@ -127,16 +142,17 @@ def create_blank_workbook(
 
 
 def upload_existing_xlsx(
-    project_root: Path, test_name: str, source: Path
+    project_root: Path, leg_name: str, test_name: str, source: Path
 ) -> DataTableRef:
     """Copy an existing .xlsx into the attachment folder; title is the filename stem."""
+    leg = _require_leg_name(leg_name)
     test = _require_usable_test_name(test_name)
     src = Path(source)
     if not src.is_file():
         raise DataTableError("找不到所选 Excel 文件")
     if src.suffix.lower() != ".xlsx":
         raise DataTableError("仅支持 .xlsx 文件")
-    folder = attachment_dir(project_root, test)
+    folder = attachment_dir(project_root, leg, test)
     stem = sanitize_filename_stem(src.stem)
     dest = unique_xlsx_path(folder, stem)
     shutil.copy2(src, dest)
@@ -157,10 +173,10 @@ def list_data_table_templates(templates_dir: Path | None = None) -> List[Path]:
 
 
 def copy_from_template(
-    project_root: Path, test_name: str, template_path: Path
+    project_root: Path, leg_name: str, test_name: str, template_path: Path
 ) -> DataTableRef:
     """Copy a template .xlsx into the attachment folder (same semantics as upload)."""
-    return upload_existing_xlsx(project_root, test_name, template_path)
+    return upload_existing_xlsx(project_root, leg_name, test_name, template_path)
 
 
 def _col1_has_content(ws) -> bool:
@@ -171,12 +187,58 @@ def _col1_has_content(ws) -> bool:
     return False
 
 
+def _sample_id_col_merge_bottom(ws) -> dict[int, int]:
+    """Row index in column A -> bottom row of its vertical merge (or itself)."""
+    out: dict[int, int] = {}
+    for rng in ws.merged_cells.ranges:
+        if rng.min_col > 1 or rng.max_col < 1:
+            continue
+        for r in range(rng.min_row, rng.max_row + 1):
+            out[r] = max(out.get(r, r), rng.max_row)
+    return out
+
+
 def _sample_id_start_row(ws) -> int:
     """First row below existing sheet content; empty sheet starts at row 2."""
     bbox = _used_bbox(ws)
     if bbox is None:
         return 2
-    return bbox[2] + 1
+    default_start = bbox[2] + 1
+    merge_bottom = _sample_id_col_merge_bottom(ws)
+    header_end = max(1, default_start - 1)
+    for r in range(1, header_end + 1):
+        val = ws.cell(row=r, column=1).value
+        if is_sample_id_column_key(str(val or "").strip()):
+            return max(default_start, merge_bottom.get(r, r) + 1)
+    return default_start
+
+
+def _sample_id_column_header_text() -> str:
+    return table_header_label("样品编号", "Sample No.", "中英文")
+
+
+def _col1_has_sample_id_header(ws, header_end_row: int) -> bool:
+    for r in range(1, header_end_row + 1):
+        if is_sample_id_column_key(str(ws.cell(row=r, column=1).value or "").strip()):
+            return True
+    return False
+
+
+def _write_sample_id_column_header(ws, header_end_row: int) -> None:
+    """Write bilingual 样品编号 / Sample No. into column A for the header band."""
+    if header_end_row < 1 or _col1_has_sample_id_header(ws, header_end_row):
+        return
+    ws.cell(row=1, column=1, value=_sample_id_column_header_text())
+    if header_end_row > 1:
+        ws.merge_cells(start_row=1, start_column=1, end_row=header_end_row, end_column=1)
+
+
+def _should_insert_sample_id_column(ws, start_row: int) -> bool:
+    """Left-insert only when col 1 holds non-sample-id content."""
+    header_end_row = max(1, start_row - 1)
+    if _col1_has_sample_id_header(ws, header_end_row):
+        return False
+    return _col1_has_content(ws)
 
 
 def import_sample_ids(path: Path, sample_ids: Sequence[str]) -> None:
@@ -188,9 +250,12 @@ def import_sample_ids(path: Path, sample_ids: Sequence[str]) -> None:
     wb = load_workbook(xlsx)
     try:
         ws = wb.worksheets[0]
-        if _col1_has_content(ws):
-            ws.insert_cols(1)
         start_row = _sample_id_start_row(ws)
+        if _should_insert_sample_id_column(ws, start_row):
+            ws.insert_cols(1)
+            start_row = _sample_id_start_row(ws)
+        header_end_row = max(1, start_row - 1)
+        _write_sample_id_column_header(ws, header_end_row)
         for i, sid in enumerate(ids):
             ws.cell(row=start_row + i, column=1, value=sid)
         wb.save(xlsx)
@@ -398,6 +463,109 @@ def infer_header_row_count(snap: PreviewSnapshot) -> int:
     if sample_count is not None:
         return max(merge_count, sample_count, 1)
     return max(merge_count, 1)
+
+
+# Display-string number: optional sign, digits, optional fractional part (no sci notation).
+_NUMERIC_DISPLAY_RE = re.compile(r"^[+-]?(?:\d+\.?\d*|\.\d+)$")
+
+
+def decimal_places(text: str) -> int | None:
+    """Decimal digits after '.' in a display string, or None if not a plain number."""
+    s = (text or "").strip()
+    if not s or not _NUMERIC_DISPLAY_RE.match(s):
+        return None
+    if "." in s:
+        return len(s.split(".", 1)[1])
+    return 0
+
+
+def parse_numeric_display(text: str) -> float | None:
+    """Parse a plain numeric display string; None if not parseable as a number."""
+    s = (text or "").strip()
+    if not s or not _NUMERIC_DISPLAY_RE.match(s):
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _data_region(snap: PreviewSnapshot) -> tuple[int, int, int]:
+    """Return (header_rows, nrows, ncols) for the preview grid."""
+    values = snap.values or []
+    nrows = len(values)
+    ncols = max((len(r) for r in values), default=0)
+    header_rows = infer_header_row_count(snap) if values else 0
+    return header_rows, nrows, ncols
+
+
+def find_decimal_inconsistencies(
+    snap: PreviewSnapshot, *, sample_col: int = 0
+) -> List[Tuple[int, int]]:
+    """Cells (r,c) whose decimal places differ from the column mode.
+
+    Skips sample column, header rows, empty/non-numeric cells. Compares preview
+    display strings as-is (text-filled Excel cells).
+    """
+    values = snap.values or []
+    header_rows, nrows, ncols = _data_region(snap)
+    flagged: List[Tuple[int, int]] = []
+    for c in range(ncols):
+        if c == sample_col:
+            continue
+        places_by_row: List[Tuple[int, int]] = []
+        for r in range(header_rows, nrows):
+            row = values[r] if r < len(values) else []
+            text = row[c] if c < len(row) else ""
+            places = decimal_places(text)
+            if places is None:
+                continue
+            places_by_row.append((r, places))
+        if len(places_by_row) < 2:
+            continue
+        counts: dict[int, int] = {}
+        for _, p in places_by_row:
+            counts[p] = counts.get(p, 0) + 1
+        if len(counts) < 2:
+            continue
+        mode = max(counts.items(), key=lambda kv: (kv[1], -kv[0]))[0]
+        for r, p in places_by_row:
+            if p != mode:
+                flagged.append((r, c))
+    return flagged
+
+
+def find_out_of_range(
+    snap: PreviewSnapshot,
+    lo: float,
+    hi: float,
+    *,
+    col: int | None = None,
+    sample_col: int = 0,
+) -> List[Tuple[int, int]]:
+    """Cells (r,c) whose numeric display value is outside [lo, hi].
+
+    Skips sample column, header rows, empty/non-numeric. If ``col`` is set, only
+    that column is checked (still skips sample_col).
+    """
+    if lo > hi:
+        lo, hi = hi, lo
+    values = snap.values or []
+    header_rows, nrows, ncols = _data_region(snap)
+    cols = range(ncols) if col is None else [col]
+    flagged: List[Tuple[int, int]] = []
+    for c in cols:
+        if c == sample_col or c < 0 or c >= ncols:
+            continue
+        for r in range(header_rows, nrows):
+            row = values[r] if r < len(values) else []
+            text = row[c] if c < len(row) else ""
+            val = parse_numeric_display(text)
+            if val is None:
+                continue
+            if val < lo or val > hi:
+                flagged.append((r, c))
+    return flagged
 
 
 def read_preview_snapshot(path: Path) -> PreviewSnapshot:

@@ -5,7 +5,7 @@ from pathlib import Path
 from docx import Document
 
 from src.generators.word_engine import WordGenerator
-from src.io.test_photos import create_album, copy_into_album
+from src.io.test_photos import create_album, copy_into_album, test_dir_key as leg_test_dir_key
 from src.models.project_state import (
     ProjectState,
     TestEquipment,
@@ -24,8 +24,10 @@ def _png(path: Path):
 
 def _engine_state(tmp_path) -> tuple[ProjectState, Path, Path]:
     project = Path(tmp_path) / "proj"
-    (project / "3.测试组" / "高温试验").mkdir(parents=True)
-    album = create_album(project, "高温试验", "试验前")
+    leg_name = "Leg 1"
+    test_name = "高温"
+    (project / "3.测试组" / leg_test_dir_key(leg_name, test_name)).mkdir(parents=True)
+    album = create_album(project, leg_name, test_name, "试验前")
     src = Path(tmp_path) / "a.png"
     _png(src)
     copy_into_album(album, [src], "试验前")
@@ -81,6 +83,7 @@ def _engine_state(tmp_path) -> tuple[ProjectState, Path, Path]:
         samples=[TestSample(sample_id="A01", result=TestResult.PASS)],
     )
     node.apply_standards(node.standards)
+    node.sync_card_names_from_standards()
     leg = TestLeg(leg_id="L1", leg_name="Leg 1", nodes=[node])
     state.legs.append(leg)
     return state, project, Path("templates/template_en.docx")
@@ -133,7 +136,7 @@ def test_bilingual_export_join_and_zh_only_when_en_missing(tmp_path):
 
     assert "合格/Pass" in blob
     assert "试验前 / Before test" in blob
-    assert "高温试验 / High temperature" in blob or "High temperature" in blob
+    assert "高温 / High temperature" in blob or "High temperature" in blob
     assert "中文条件正文" in blob
     assert " / " not in "中文条件正文"  # bare zh condition present; no empty slash pair alone
     assert WordGenerator.default_report_no(state, "中英文").endswith("E")

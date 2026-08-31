@@ -7,8 +7,11 @@ from PySide6.QtWidgets import QApplication
 from src.models.project_state import TestEquipment, TestNode
 from src.ui.test_detail_dialog import (
     _EQ_EXPIRED_ROLE,
+    _EQ_PREV_CYCLE_ROLE,
+    _equipment_report_valid_date,
     _format_cal_date,
     _is_equipment_expired,
+    _is_previous_cal_cycle,
     _parse_qdate,
     TestDetailDialog,
     equipment_should_restore,
@@ -53,6 +56,26 @@ def test_expired_only_when_cal_before_test_end():
     assert not _is_equipment_expired(datetime(2026, 8, 1), QDate())
 
 
+def test_previous_cycle_only_when_end_before_cal_start():
+    cal_start = datetime(2026, 5, 2)
+    assert _is_previous_cal_cycle(cal_start, QDate(2026, 4, 26))
+    assert not _is_previous_cal_cycle(cal_start, QDate(2026, 5, 2))
+    assert not _is_previous_cal_cycle(cal_start, QDate(2026, 8, 31))
+    assert not _is_previous_cal_cycle("", QDate(2026, 4, 26))
+    assert not _is_previous_cal_cycle(cal_start, QDate())
+
+
+def test_report_valid_date_uses_previous_expiry_outside_cycle():
+    data = {
+        "上次校准有效期": datetime(2026, 5, 1),
+        "校准时间": datetime(2026, 5, 2),
+        "计划校准时间": datetime(2027, 5, 1),
+    }
+    assert _equipment_report_valid_date(data, QDate(2026, 8, 31)) == "2027-05-01"
+    assert _equipment_report_valid_date(data, QDate(2026, 5, 2)) == "2027-05-01"
+    assert _equipment_report_valid_date(data, QDate(2026, 4, 26)) == "2026-05-01"
+
+
 def test_equipment_table_shows_cal_date_and_marks_expired():
     _app()
     node = TestNode(test_name="振动", start_date="2026-08-10", end_date="2026-08-17")
@@ -61,12 +84,14 @@ def test_equipment_table_shows_cal_date_and_marks_expired():
             "设备编号": "SHAED-A050",
             "设备名称": "电子万能试验机",
             "型号": "E43.104",
+            "校准时间": datetime(2025, 8, 1),
             "计划校准时间": datetime(2026, 8, 1),
         },
         {
             "设备编号": "SHAED-A051",
             "设备名称": "温湿度环境箱",
             "型号": "C7",
+            "校准时间": datetime(2025, 12, 1),
             "计划校准时间": datetime(2026, 12, 1),
         },
     ]
@@ -85,6 +110,70 @@ def test_equipment_table_shows_cal_date_and_marks_expired():
         dlg.close()
 
 
+def test_equipment_marks_previous_cycle_and_saves_prior_expiry():
+    _app()
+    node = TestNode(test_name="振动", start_date="2026-04-20", end_date="2026-04-26")
+    equipments = [
+        {
+            "设备编号": "SHAED-X001",
+            "设备名称": "试验箱",
+            "型号": "M1",
+            "上次校准有效期": datetime(2026, 5, 1),
+            "校准时间": datetime(2026, 5, 2),
+            "计划校准时间": datetime(2027, 5, 1),
+        },
+    ]
+    dlg = TestDetailDialog(node, [], equipments)
+    try:
+        assert dlg.eq_table.item(0, 4).text() == "2026-05-01"
+        assert dlg.eq_table.item(0, 2).data(_EQ_PREV_CYCLE_ROLE) is True
+        assert dlg.eq_table.item(0, 2).data(_EQ_EXPIRED_ROLE) is False
+        dlg.eq_table.item(0, 0).setCheckState(Qt.Checked)
+        picked = dlg._selected_equipments()
+        assert picked[0].valid_date == "2026-05-01"
+
+        dlg.date_end.setDate(QDate(2026, 5, 2))
+        assert dlg.eq_table.item(0, 4).text() == "2027-05-01"
+        assert dlg.eq_table.item(0, 2).data(_EQ_PREV_CYCLE_ROLE) is False
+        picked = dlg._selected_equipments()
+        assert picked[0].valid_date == "2027-05-01"
+    finally:
+        dlg.close()
+
+
+def test_equipment_without_cal_start_cannot_be_selected():
+    _app()
+    node = TestNode(test_name="振动", start_date="2026-08-10", end_date="2026-08-17")
+    equipments = [
+        {
+            "设备编号": "SHAED-NOCAL",
+            "设备名称": "无校准时间",
+            "型号": "M",
+            "计划校准时间": datetime(2027, 1, 1),
+        },
+        {
+            "设备编号": "SHAED-OK",
+            "设备名称": "有校准时间",
+            "型号": "M",
+            "校准时间": datetime(2026, 1, 1),
+            "计划校准时间": datetime(2027, 1, 1),
+        },
+    ]
+    dlg = TestDetailDialog(node, [], equipments)
+    try:
+        no_cal = dlg.eq_table.item(0, 0)
+        ok = dlg.eq_table.item(1, 0)
+        assert not (no_cal.flags() & Qt.ItemIsUserCheckable)
+        assert ok.flags() & Qt.ItemIsUserCheckable
+        no_cal.setCheckState(Qt.Checked)
+        assert no_cal.checkState() == Qt.Unchecked
+        dlg._on_eq_cell_clicked(0, 1)
+        assert no_cal.checkState() == Qt.Unchecked
+        assert dlg._selected_equipments() == []
+    finally:
+        dlg.close()
+
+
 def test_header_clear_unchecks_multiselect():
     _app()
     node = TestNode(test_name="振动")
@@ -93,8 +182,20 @@ def test_header_clear_unchecks_multiselect():
         {"标准号": "S2", "章节号": "2", "试验名称": "t2"},
     ]
     equipments = [
-        {"设备编号": "A", "设备名称": "n1", "型号": "m", "计划校准时间": ""},
-        {"设备编号": "B", "设备名称": "n2", "型号": "m", "计划校准时间": ""},
+        {
+            "设备编号": "A",
+            "设备名称": "n1",
+            "型号": "m",
+            "校准时间": datetime(2026, 1, 1),
+            "计划校准时间": "",
+        },
+        {
+            "设备编号": "B",
+            "设备名称": "n2",
+            "型号": "m",
+            "校准时间": datetime(2026, 1, 1),
+            "计划校准时间": "",
+        },
     ]
     dlg = TestDetailDialog(node, standards, equipments)
     try:
@@ -126,10 +227,34 @@ def test_restore_equipments_matches_code_not_shared_name():
     _app()
     node = TestNode(test_name="冲击", equipments=saved)
     catalog = [
-        {"设备编号": "SHAED-A050", "设备名称": "电子万能试验机", "型号": "x", "计划校准时间": ""},
-        {"设备编号": "SHAED-A051", "设备名称": "电子万能试验机", "型号": "x", "计划校准时间": ""},
-        {"设备编号": "SHAED-C001", "设备名称": "温湿度环境箱", "型号": "x", "计划校准时间": ""},
-        {"设备编号": "SHAED-C002", "设备名称": "温湿度环境箱", "型号": "x", "计划校准时间": ""},
+        {
+            "设备编号": "SHAED-A050",
+            "设备名称": "电子万能试验机",
+            "型号": "x",
+            "校准时间": datetime(2026, 1, 1),
+            "计划校准时间": "",
+        },
+        {
+            "设备编号": "SHAED-A051",
+            "设备名称": "电子万能试验机",
+            "型号": "x",
+            "校准时间": datetime(2026, 1, 1),
+            "计划校准时间": "",
+        },
+        {
+            "设备编号": "SHAED-C001",
+            "设备名称": "温湿度环境箱",
+            "型号": "x",
+            "校准时间": datetime(2026, 1, 1),
+            "计划校准时间": "",
+        },
+        {
+            "设备编号": "SHAED-C002",
+            "设备名称": "温湿度环境箱",
+            "型号": "x",
+            "校准时间": datetime(2026, 1, 1),
+            "计划校准时间": "",
+        },
     ]
     dlg = TestDetailDialog(node, [], catalog)
     try:
@@ -158,6 +283,7 @@ def test_equipment_displays_tte_and_saves_valid_date():
             "内部编号": "TTE20236127",
             "设备名称": "水平冲击试验台",
             "型号": "SY12-100A",
+            "校准时间": datetime(2026, 1, 22),
             "计划校准时间": datetime(2027, 1, 22),
         },
         {
@@ -165,6 +291,7 @@ def test_equipment_displays_tte_and_saves_valid_date():
             "内部编号": "",
             "设备名称": "单轴加速度传感器",
             "型号": "BW23108",
+            "校准时间": datetime(2026, 3, 9),
             "计划校准时间": datetime(2027, 3, 9),
         },
     ]
@@ -200,7 +327,11 @@ if __name__ == "__main__":
     test_parse_missing_or_note_is_invalid()
     test_format_prefers_iso_date()
     test_expired_only_when_cal_before_test_end()
+    test_previous_cycle_only_when_end_before_cal_start()
+    test_report_valid_date_uses_previous_expiry_outside_cycle()
     test_equipment_table_shows_cal_date_and_marks_expired()
+    test_equipment_marks_previous_cycle_and_saves_prior_expiry()
+    test_equipment_without_cal_start_cannot_be_selected()
     test_header_clear_unchecks_multiselect()
     test_restore_equipments_matches_code_not_shared_name()
     test_equipment_displays_tte_and_saves_valid_date()
