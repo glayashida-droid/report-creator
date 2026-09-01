@@ -392,6 +392,49 @@ def test_word_engine_data_table_merges(tmp_path):
     assert title_para.alignment == WD_ALIGN_PARAGRAPH.CENTER
 
 
+def test_word_engine_data_table_scans_folder_without_index(tmp_path):
+    """Dropped xlsx in 数据表附件 is exported even when node.data_tables is empty."""
+    from openpyxl import Workbook
+
+    project = Path(tmp_path) / "proj"
+    attach = project / "3.测试组" / leg_test_dir_key("L1", "冲击") / "数据表附件"
+    attach.mkdir(parents=True)
+    xlsx = attach / "三路电阻.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws["A1"] = "样品编号"
+    ws["B1"] = "阻值"
+    ws["A2"] = "A01"
+    ws["B2"] = "1.2"
+    wb.save(xlsx)
+    wb.close()
+
+    state = ProjectState(
+        project_id="T1",
+        application_fields={"申请单号": "T1", "样品名称": "S"},
+    )
+    node = TestNode(
+        test_name="冲击",
+        samples=[TestSample(sample_id="A01", result=TestResult.PASS)],
+        data_tables=[],
+    )
+    leg = TestLeg(leg_id="L1", leg_name="L1")
+    leg.nodes.append(node)
+    state.legs.append(leg)
+
+    template_path = Path("templates/template_zh.docx")
+    if not template_path.exists():
+        template_path = Path("templates/template_raw.docx")
+    out_path = Path(tmp_path) / "scan.docx"
+    WordGenerator(str(template_path)).generate(
+        state, str(out_path), project_path=str(project), report_language="中文"
+    )
+
+    doc = Document(str(out_path))
+    assert any(p.text.strip() == "试验数据" for p in doc.paragraphs)
+    assert any(p.text.strip() == "三路电阻" for p in doc.paragraphs)
+
+
 def test_word_engine_data_table_two_row_header_by_sample_id(tmp_path):
     from openpyxl import Workbook
 

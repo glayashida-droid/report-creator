@@ -15,6 +15,7 @@ from src.io.data_tables import (
     find_out_of_range,
     import_sample_ids,
     infer_header_row_count,
+    list_attachment_refs,
     list_data_table_templates,
     open_attachment,
     parse_numeric_display,
@@ -66,6 +67,53 @@ def test_create_blank_unique_filename_does_not_overwrite():
         assert first.relative_path != second.relative_path
         assert (root / first.relative_path).is_file()
         assert (root / second.relative_path).is_file()
+
+
+def test_list_attachment_refs_scans_sorted_by_filename_skips_temp():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        folder = attachment_dir(root, LEG, "高温试验")
+        folder.mkdir(parents=True)
+        (folder / "zeta.xlsx").write_bytes(b"PK")
+        (folder / "Alpha.xlsx").write_bytes(b"PK")
+        (folder / "~$Alpha.xlsx").write_bytes(b"PK")
+        (folder / "notes.txt").write_text("x", encoding="utf-8")
+        # Valid minimal xlsx via create for one; others are fake but list only checks suffix
+        create_blank_workbook(root, LEG, "高温试验", "中间表")
+
+        refs = list_attachment_refs(root, LEG, "高温试验")
+        titles = [r.title for r in refs]
+        assert titles == sorted(titles, key=lambda t: t.casefold())
+        assert "Alpha" in titles
+        assert "zeta" in titles
+        assert "中间表" in titles
+        assert "~$Alpha" not in titles
+        assert all(r.relative_path.endswith(".xlsx") for r in refs)
+        assert all("/数据表附件/" in r.relative_path for r in refs)
+
+
+def test_list_attachment_refs_empty_or_missing_folder():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        assert list_attachment_refs(root, LEG, "高温试验") == []
+        assert list_attachment_refs(root, "", "高温试验") == []
+        assert list_attachment_refs(root, LEG, "请选择试验...") == []
+
+
+def test_list_attachment_refs_picks_up_manually_dropped_file():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        # Stale index path would not matter — scan finds the real file.
+        folder = attachment_dir(root, LEG, "高温试验")
+        folder.mkdir(parents=True)
+        dest = folder / "三路电阻.xlsx"
+        wb = Workbook()
+        wb.save(dest)
+        wb.close()
+        refs = list_attachment_refs(root, LEG, "高温试验")
+        assert len(refs) == 1
+        assert refs[0].title == "三路电阻"
+        assert (root / refs[0].relative_path).is_file()
 
 
 def test_data_table_index_round_trips_in_project_json():
@@ -545,6 +593,9 @@ if __name__ == "__main__":
     test_create_blank_workbook_writes_xlsx_and_returns_ref()
     test_create_blank_rejects_unusable_test_name()
     test_create_blank_unique_filename_does_not_overwrite()
+    test_list_attachment_refs_scans_sorted_by_filename_skips_temp()
+    test_list_attachment_refs_empty_or_missing_folder()
+    test_list_attachment_refs_picks_up_manually_dropped_file()
     test_data_table_index_round_trips_in_project_json()
     test_upload_copies_xlsx_and_titles_from_filename()
     test_upload_same_name_gets_suffix_not_overwrite()

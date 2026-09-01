@@ -531,3 +531,139 @@ def test_legacy_scalar_result_fills_all_tables_on_load():
     assert dlg._sample_table_slots[0]["table"].cellWidget(0, 2).text() == "冲击描述"
     assert dlg._sample_table_slots[1]["table"].cellWidget(0, 2).text() == "湿热描述"
     dlg.close()
+
+
+def test_omit_result_table_keeps_standard_and_conditions():
+    _app()
+    standards = [
+        {
+            "标准号": "S1",
+            "章节号": "1",
+            "试验名称": "机械冲击试验",
+            "标准描述": "冲击条件",
+            "结果描述": "冲击描述",
+            "评价要求": "冲击评价",
+        },
+        {
+            "标准号": "S2",
+            "章节号": "2",
+            "试验名称": "湿热老化试验",
+            "标准描述": "湿热条件",
+            "结果描述": "湿热描述",
+            "评价要求": "湿热评价",
+        },
+    ]
+    dlg = TestDetailDialog(TestNode(test_name="组合"), standards, [])
+    _check_standards(dlg, 0, 1)
+    assert len(dlg._sample_table_slots) == 2
+    assert len(dlg._cond_drawers) == 2
+    assert len(dlg._eval_drawers) == 2
+    assert dlg.result_desc_table.rowCount() == 2
+    assert dlg.std_table.item(0, 0).checkState() == Qt.Checked
+    assert dlg.std_table.item(1, 0).checkState() == Qt.Checked
+
+    dlg._omit_sample_result_table(("S1", "1"))
+
+    assert len(dlg._sample_table_slots) == 1
+    assert dlg._sample_table_slots[0]["key"] == ("S2", "2")
+    assert dlg.std_table.item(0, 0).checkState() == Qt.Checked
+    assert dlg.std_table.item(1, 0).checkState() == Qt.Checked
+    assert len(dlg._cond_drawers) == 2
+    assert len(dlg._eval_drawers) == 2
+    assert dlg.result_desc_table.rowCount() == 2
+    assert ("S1", "1") in dlg._omitted_result_keys
+    dlg.close()
+
+
+def test_omit_result_table_restored_by_uncheck_recheck():
+    _app()
+    standards = [
+        {
+            "标准号": "S1",
+            "章节号": "1",
+            "试验名称": "机械冲击试验",
+            "结果描述": "冲击描述",
+        },
+        {
+            "标准号": "S2",
+            "章节号": "2",
+            "试验名称": "湿热老化试验",
+            "结果描述": "湿热描述",
+        },
+    ]
+    dlg = TestDetailDialog(TestNode(test_name="组合"), standards, [])
+    _check_standards(dlg, 0, 1)
+    dlg._omit_sample_result_table(("S1", "1"))
+    assert len(dlg._sample_table_slots) == 1
+
+    dlg.std_table.item(0, 0).setCheckState(Qt.Unchecked)
+    assert ("S1", "1") not in dlg._omitted_result_keys
+    dlg.std_table.item(0, 0).setCheckState(Qt.Checked)
+
+    assert len(dlg._sample_table_slots) == 2
+    keys = [slot["key"] for slot in dlg._sample_table_slots]
+    assert ("S1", "1") in keys
+    assert ("S2", "2") in keys
+    dlg.close()
+
+
+def test_omit_result_table_persists_and_skips_word_export(tmp_path):
+    from docx import Document
+
+    _app()
+    standards = [
+        {
+            "标准号": "S1",
+            "章节号": "1",
+            "试验名称": "机械冲击试验",
+            "结果描述": "冲击描述",
+        },
+        {
+            "标准号": "S2",
+            "章节号": "2",
+            "试验名称": "湿热老化试验",
+            "结果描述": "湿热描述",
+        },
+    ]
+    dlg = TestDetailDialog(TestNode(test_name="组合"), standards, [])
+    _check_standards(dlg, 0, 1)
+    dlg.add_sample_row("A01", TestResult.PASS)
+    dlg._omit_sample_result_table(("S2", "2"))
+    dlg.save_and_close()
+
+    assert dlg.node_data.result_table_omissions == [("S2", "2")]
+    assert len(dlg.node_data.standards) == 2
+    assert len(dlg.node_data.samples[0].standard_results) == 1
+    assert dlg.node_data.samples[0].standard_results[0].ref_key() == ("S1", "1")
+
+    dlg2 = TestDetailDialog(dlg.node_data, standards, [])
+    assert len(dlg2._sample_table_slots) == 1
+    assert dlg2._sample_table_slots[0]["key"] == ("S1", "1")
+    assert dlg2.std_table.item(0, 0).checkState() == Qt.Checked
+    assert dlg2.std_table.item(1, 0).checkState() == Qt.Checked
+    assert len(dlg2._cond_drawers) == 2
+    dlg2.close()
+
+    template = tmp_path / "t.docx"
+    Document().save(template)
+    gen = WordGenerator(str(template))
+    doc = Document()
+    anchor = doc.add_paragraph("ANCHOR")
+    gen._insert_sample_result_table(doc, anchor, dlg.node_data)
+    assert len(doc.tables) == 1
+    assert [c.text for c in doc.tables[0].rows[1].cells] == [
+        "A01",
+        "冲击描述",
+        "合格",
+    ]
+
+
+def test_result_table_omissions_roundtrip_json():
+    node = TestNode(
+        test_name="组合",
+        result_table_omissions=[("S1", "1"), ("S2", "2")],
+    )
+    data = node.model_dump()
+    restored = TestNode.model_validate(data)
+    assert restored.result_table_omissions == [("S1", "1"), ("S2", "2")]
+    assert restored.omitted_result_key_set() == {("S1", "1"), ("S2", "2")}

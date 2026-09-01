@@ -169,6 +169,35 @@ def test_probe_network_sources_with_local_files(tmp_path: Path):
     assert result.standards_path.endswith("标准库.xlsx")
 
 
+def test_probe_network_sources_does_not_auto_mount(tmp_path: Path):
+    cfg_path = _write_config(
+        tmp_path,
+        network_sources={
+            "equipment_list": {
+                "directory": "smb://10.10.31.8/材料实验室a/01-E&E/D01 设备信息",
+                "file_prefix": "01-设备清单",
+                "extension": ".xlsx",
+            },
+            "standards_library": {
+                "file": "smb://10.10.31.8/材料实验室b/车载电子/report_creator/standard sheet/标准库.xlsx"
+            },
+            "leg_templates": {
+                "directory": "smb://10.10.31.8/材料实验室b/车载电子/report_creator/leg_templates"
+            },
+            "report_templates": {
+                "directory": "smb://10.10.31.8/材料实验室b/车载电子/report_creator/report_templates"
+            },
+            "data_tables": {
+                "directory": "smb://10.10.31.8/材料实验室b/车载电子/report_creator/data_tables"
+            },
+        },
+    )
+    config = load_network_sources_config(cfg_path)
+    with patch("src.io.network_sources.attempt_mount_network_shares") as mount_mock:
+        probe_network_sources(config)
+        mount_mock.assert_not_called()
+
+
 def test_probe_templates_fails_when_report_template_missing(tmp_path: Path):
     cfg_path = _write_config(tmp_path)
     config = load_network_sources_config(cfg_path)

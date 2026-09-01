@@ -36,6 +36,7 @@ from src.io.data_tables import (
     find_decimal_inconsistencies,
     find_out_of_range,
     import_sample_ids,
+    list_attachment_refs,
     list_data_table_templates,
     open_attachment,
     parse_numeric_display,
@@ -499,6 +500,7 @@ class TestDetailDialog(QDialog):
         self._result_edits_en = {}
         self._sample_table_slots = []
         self._sample_id_syncing = False
+        self._omitted_result_keys = set(node_data.omitted_result_key_set())
         self._data_tables = [
             DataTableRef(title=r.title, relative_path=r.relative_path)
             for r in (node_data.data_tables or [])
@@ -1062,8 +1064,19 @@ class TestDetailDialog(QDialog):
         except Exception:
             return TestResult.NA
 
+    def _omit_sample_result_table(self, key):
+        """Remove one sample-result table; keep the standard checked (条件等不变)."""
+        if key is None:
+            return
+        self._omitted_result_keys.add(key)
+        self._rebuild_sample_tables(self._selected_standards())
+
     def _rebuild_sample_tables(self, picked):
-        """One sample table per selected standard (selection order); one empty table if none."""
+        """One sample table per selected standard with a visible result table.
+
+        Standards in ``_omitted_result_keys`` keep 条件/评价/结果描述 but get no
+        sample table. Uncheck→recheck clears the omission and restores the table.
+        """
         snapshot = self._snapshot_sample_rows()
         if getattr(self, "_sample_header_sync_hooked", False):
             try:
@@ -1072,7 +1085,11 @@ class TestDetailDialog(QDialog):
                 pass
             self._sample_header_sync_hooked = False
         self._clear_sample_tables_host()
-        standards = list(picked or [])
+        standards = [
+            s
+            for s in (picked or [])
+            if self._std_ref_key(s) not in self._omitted_result_keys
+        ]
         multi = len(standards) > 1
         min_h = 220 if multi else 400
         if not standards:
@@ -1085,7 +1102,22 @@ class TestDetailDialog(QDialog):
             lay.setSpacing(4)
             if multi and std is not None:
                 title = (std.test_name or std.field_title() or "").strip() or "结果"
-                lay.addWidget(QLabel(title))
+                title_row = QWidget()
+                title_lay = QHBoxLayout(title_row)
+                title_lay.setContentsMargins(0, 0, 0, 0)
+                title_lay.setSpacing(6)
+                title_lay.addWidget(QLabel(title), stretch=1)
+                btn_omit = QPushButton("✕")
+                btn_omit.setObjectName("fieldRemoveButton")
+                btn_omit.setFixedSize(20, 20)
+                btn_omit.setCursor(Qt.PointingHandCursor)
+                btn_omit.setFocusPolicy(Qt.NoFocus)
+                btn_omit.setToolTip("删除此结果表（标准与条件保留；取消勾选后再勾选可恢复）")
+                btn_omit.clicked.connect(
+                    lambda _=False, k=key: self._omit_sample_result_table(k)
+                )
+                title_lay.addWidget(btn_omit)
+                lay.addWidget(title_row)
             table = self._create_sample_table_widget(min_h)
             slot = {"key": key, "table": table, "std": std, "bulk": None, "add_btn": None}
             self._setup_result_header(table, slot)
@@ -1194,10 +1226,13 @@ class TestDetailDialog(QDialog):
         if item.checkState() == Qt.Checked:
             if key not in self._std_pick_order:
                 self._std_pick_order.append(key)
+            # Uncheck→recheck restores a previously deleted result table.
+            self._omitted_result_keys.discard(key)
         elif key in self._std_pick_order:
             # Keep in-session edits / key-param confirm so uncheck→recheck
             # restores the same state (and the detail-complete mark stays).
             self._std_pick_order.remove(key)
+            self._omitted_result_keys.discard(key)
         self._refresh_std_summary()
 
     def _on_std_cell_clicked(self, row, col):
@@ -2162,6 +2197,7 @@ class TestDetailDialog(QDialog):
             )
         self._apply_result_descs_to_tables()
         self._refresh_sample_summary()
+        self._sync_data_tables_from_disk()
         self._refresh_data_table_list()
         self._sync_data_table_button()
 
@@ -2177,6 +2213,16 @@ class TestDetailDialog(QDialog):
         leg = find_leg_for_node(self._project_state, self.node_data)
         return (leg.leg_name if leg is not None else "") or ""
 
+    def _sync_data_tables_from_disk(self) -> bool:
+        """Replace index with a filename-sorted scan of 数据表附件. No-op without mirror."""
+        root = self._project_root()
+        leg = self._leg_name()
+        test = self.node_data.test_name
+        if root is None or not leg or not is_usable_test_name(test):
+            return False
+        self._data_tables = list_attachment_refs(root, leg, test)
+        return True
+
     def _sync_data_table_button(self):
         ok = is_usable_test_name(self.node_data.test_name) and self._project_root() is not None
         self.btn_add_data_table.setEnabled(ok)
@@ -2185,7 +2231,7 @@ class TestDetailDialog(QDialog):
         elif self._project_root() is None:
             self.btn_add_data_table.setToolTip("请先加载项目以确定本地镜像路径")
         else:
-            self.btn_add_data_table.setToolTip("上传 Excel / 自由编辑 / 模版")
+            self.btn_add_data_table.setToolTip("上传 Excel / 自由编辑 / 模版（也可直接放入数据表附件文件夹）")
 
     def _clear_data_table_drawers(self):
         while self.data_table_layout.count():
@@ -2388,6 +2434,14 @@ class TestDetailDialog(QDialog):
             auto_close=False,
         ).exec()
 
+    def _expand_data_table_rel(self, relative_path: str):
+        for d in self._data_table_drawers:
+            if getattr(d, "_data_table_rel", "") == relative_path:
+                d.set_expanded(True)
+                return
+        if self._data_table_drawers:
+            self._data_table_drawers[-1].set_expanded(True)
+
     def _refresh_data_table_list(self):
         keep = {ref.relative_path for ref in self._data_tables}
         self._data_table_preview_cache = {
@@ -2416,7 +2470,7 @@ class TestDetailDialog(QDialog):
             btn_open.clicked.connect(lambda _=False, r=ref: self._open_data_table(r))
             bar.addWidget(btn_open)
             btn_refresh = QPushButton("刷新")
-            btn_refresh.setToolTip("从磁盘重新读取预览（外部改过文件后点这里）")
+            btn_refresh.setToolTip("重新扫描数据表附件文件夹并读取预览")
             btn_refresh.clicked.connect(
                 lambda _=False, r=ref: self._refresh_data_table_preview(r)
             )
@@ -2458,14 +2512,18 @@ class TestDetailDialog(QDialog):
             self._data_table_drawers[0].set_expanded(True)
 
     def _refresh_data_table_preview(self, ref: DataTableRef):
-        self._load_preview_for_ref(ref, force=True)
+        focus = ref.relative_path
+        self._sync_data_tables_from_disk()
         expanded_paths = {
             getattr(d, "_data_table_rel", ""): d._expanded for d in self._data_table_drawers
         }
+        for r in self._data_tables:
+            self._data_table_preview_cache.pop(r.relative_path, None)
+            self._load_preview_for_ref(r, force=True)
         self._refresh_data_table_list()
         for d in self._data_table_drawers:
             rel = getattr(d, "_data_table_rel", "")
-            if expanded_paths.get(rel) or rel == ref.relative_path:
+            if expanded_paths.get(rel) or rel == focus:
                 d.set_expanded(True)
 
     def _on_add_data_table(self):
@@ -2535,11 +2593,10 @@ class TestDetailDialog(QDialog):
         except DataTableError as exc:
             QMessageBox.warning(self, "提示", str(exc))
             return
-        self._data_tables.append(ref)
+        self._sync_data_tables_from_disk()
         self._load_preview_for_ref(ref, force=True)
         self._refresh_data_table_list()
-        if self._data_table_drawers:
-            self._data_table_drawers[-1].set_expanded(True)
+        self._expand_data_table_rel(ref.relative_path)
 
     def _add_free_edit_data_table(self):
         title, ok = QInputDialog.getText(self, "自由编辑", "数据表标题：")
@@ -2555,11 +2612,10 @@ class TestDetailDialog(QDialog):
         except DataTableError as exc:
             QMessageBox.warning(self, "提示", str(exc))
             return
-        self._data_tables.append(ref)
+        self._sync_data_tables_from_disk()
         self._load_preview_for_ref(ref, force=True)
         self._refresh_data_table_list()
-        if self._data_table_drawers:
-            self._data_table_drawers[-1].set_expanded(True)
+        self._expand_data_table_rel(ref.relative_path)
 
     def _add_template_data_table(self):
         templates = list_data_table_templates()
@@ -2580,6 +2636,7 @@ class TestDetailDialog(QDialog):
         root = self._project_root()
         sample_ids = self._existing_sample_ids()
         added = 0
+        last_rel = ""
         for src in paths:
             try:
                 ref = copy_from_template(root, self._leg_name(), self.node_data.test_name, src)
@@ -2591,14 +2648,14 @@ class TestDetailDialog(QDialog):
                     import_sample_ids(resolve_attachment_path(root, ref), sample_ids)
                 except DataTableError as exc:
                     QMessageBox.warning(self, "提示", str(exc))
-            self._data_tables.append(ref)
+            last_rel = ref.relative_path
             self._load_preview_for_ref(ref, force=True)
             added += 1
         if not added:
             return
+        self._sync_data_tables_from_disk()
         self._refresh_data_table_list()
-        if self._data_table_drawers:
-            self._data_table_drawers[-1].set_expanded(True)
+        self._expand_data_table_rel(last_rel)
 
     def _open_data_table(self, ref: DataTableRef):
         root = self._project_root()
@@ -2624,10 +2681,11 @@ class TestDetailDialog(QDialog):
         root = self._project_root()
         if root is not None:
             delete_attachment(resolve_attachment_path(root, ref))
-        self._data_tables = [
-            r for r in self._data_tables if r.relative_path != ref.relative_path
-        ]
         self._data_table_preview_cache.pop(ref.relative_path, None)
+        if not self._sync_data_tables_from_disk():
+            self._data_tables = [
+                r for r in self._data_tables if r.relative_path != ref.relative_path
+            ]
         self._refresh_data_table_list()
 
     def _import_sample_ids_to_data_table(self, ref: DataTableRef):
@@ -2841,6 +2899,10 @@ class TestDetailDialog(QDialog):
 
         self.node_data.apply_standards(self._selected_standards())
         self.node_data.sync_card_names_from_standards()
+        selected_keys = {s.ref_key() for s in self.node_data.resolved_standards()}
+        self.node_data.result_table_omissions = [
+            key for key in sorted(self._omitted_result_keys) if key in selected_keys
+        ]
 
         picked = self._selected_equipments()
         self.node_data.equipments = picked

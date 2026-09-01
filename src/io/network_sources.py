@@ -246,7 +246,11 @@ def _needs_smb_mount(config: NetworkSourcesConfig) -> bool:
 
 
 def attempt_mount_network_shares(config: NetworkSourcesConfig) -> None:
-    """On macOS, ask Finder to mount configured SMB shares when they are missing or stale."""
+    """On macOS, ask Finder to mount configured SMB shares when they are missing or stale.
+
+    Not used by background probes — those only check path readability so offline
+    editing is not interrupted by Finder/SMB mount dialogs stealing focus.
+    """
     if sys.platform != "darwin":
         return
     global _last_mount_attempt_monotonic
@@ -424,8 +428,8 @@ def probe_template_sources(config: NetworkSourcesConfig) -> Tuple[bool, str]:
 
 
 def probe_network_sources(config: Optional[NetworkSourcesConfig] = None) -> ProbeResult:
+    """Probe configured paths for readability only — no Finder/SMB open (avoids focus steal)."""
     cfg = config or load_network_sources_config()
-    attempt_mount_network_shares(cfg)
     equipment_path = resolve_equipment_list_file(cfg.equipment_list)
     standards_path = resolve_standards_library_file(cfg.standards_library)
     equipment_ok, equipment_error = probe_readable_file(equipment_path)

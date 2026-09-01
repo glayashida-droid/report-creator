@@ -89,6 +89,35 @@ def attachment_dir(project_root: Path, leg_name: str, test_name: str) -> Path:
     return test_dir(project_root, leg_name, test_name) / ATTACHMENT_DIR
 
 
+def list_attachment_refs(
+    project_root: Path, leg_name: str, test_name: str
+) -> List[DataTableRef]:
+    """Scan 数据表附件 for .xlsx files; title = stem; sorted by filename."""
+    try:
+        leg = _require_leg_name(leg_name)
+        test = _require_usable_test_name(test_name)
+    except DataTableError:
+        return []
+    folder = attachment_dir(project_root, leg, test)
+    if not folder.is_dir():
+        return []
+    root = Path(project_root)
+    refs: List[DataTableRef] = []
+    for path in sorted(folder.iterdir(), key=lambda p: p.name.casefold()):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() != ".xlsx":
+            continue
+        if path.name.startswith("~$"):
+            continue
+        try:
+            rel = path.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        refs.append(DataTableRef(title=path.stem, relative_path=rel))
+    return refs
+
+
 def _require_leg_name(leg_name: str) -> str:
     try:
         return require_photo_leg_name(leg_name)

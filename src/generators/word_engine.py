@@ -17,7 +17,12 @@ from docx.shared import Inches, Pt, Twips
 from docx.text.paragraph import Paragraph
 from openpyxl.utils.cell import range_boundaries
 
-from src.io.data_tables import infer_header_row_count, read_preview_snapshot, resolve_attachment_path
+from src.io.data_tables import (
+    infer_header_row_count,
+    list_attachment_refs,
+    read_preview_snapshot,
+    resolve_attachment_path,
+)
 from src.io.test_photos import list_albums, list_photos, uses_data_photo_layout
 from src.language_copy import (
     field_label,
@@ -27,7 +32,14 @@ from src.language_copy import (
     photo_caption,
     table_header_label,
 )
-from src.models.project_state import ProjectState, TestLeg, TestNode, TestResult, TestSample
+from src.models.project_state import (
+    DataTableRef,
+    ProjectState,
+    TestLeg,
+    TestNode,
+    TestResult,
+    TestSample,
+)
 
 # Fixed section-(1) text kept in the Chinese template contract
 ENV_CONDITION_TEXT = "（23±5）℃，（50±25）%RH"
@@ -1103,7 +1115,7 @@ class WordGenerator:
             doc, anchor, f"（7）{self._L('检测结果', 'Test result')}：", size=SIZE_BODY
         )
         self._insert_sample_result_table(doc, anchor, node)
-        self._insert_data_tables(doc, anchor, node, project_path)
+        self._insert_data_tables(doc, anchor, node, project_path, leg.leg_name)
 
         conclusion = self._node_conclusion(node)
         self._add_para_before(
@@ -1227,11 +1239,11 @@ class WordGenerator:
     def _result_desc_texts(self, node: TestNode) -> List[str]:
         """One 试验结果 text per result table, in selection order.
 
-        Multi-standard → one entry per standard's result_desc.
+        Multi-standard → one entry per standard that still has a result table.
         Single / legacy → sample or node fallback handled by the caller per row.
         """
         lang = self._lang()
-        stds = node.resolved_standards()
+        stds = node.result_table_standards()
 
         def side_text(std) -> str:
             zh = (std.result_desc or "").strip()
@@ -1250,8 +1262,15 @@ class WordGenerator:
         return [""]
 
     def _insert_sample_result_table(self, doc: Document, anchor: Paragraph, node: TestNode):
-        """One 样品编号/试验结果/试验结论 table per selected standard; blank line between."""
+        """One 样品编号/试验结果/试验结论 table per visible result-table standard."""
         samples = [s for s in (node.samples or []) if s.sample_id]
+        stds = node.result_table_standards()
+        if not stds:
+            if not samples:
+                self._add_para_before(
+                    doc, anchor, self._L("无结果记录", "No result recorded"), size=SIZE_BODY
+                )
+            return
         if not samples:
             self._add_para_before(
                 doc, anchor, self._L("无结果记录", "No result recorded"), size=SIZE_BODY
@@ -1264,7 +1283,6 @@ class WordGenerator:
             (getattr(node, "result_desc_en", None) or "").strip(),
             lang,
         )
-        stds = node.resolved_standards()
         multi = len(descs) > 1
         headers = [
             self._H("样品编号", "Sample No."),
@@ -1302,10 +1320,20 @@ class WordGenerator:
                     self._set_cell_text(table.rows[idx].cells[i], v)
 
     def _insert_data_tables(
-        self, doc: Document, anchor: Paragraph, node: TestNode, project_path: Optional[str]
+        self,
+        doc: Document,
+        anchor: Paragraph,
+        node: TestNode,
+        project_path: Optional[str],
+        leg_name: str = "",
     ):
-        refs = list(getattr(node, "data_tables", None) or [])
-        if not refs or not project_path:
+        root = Path(project_path) if project_path else None
+        refs: List[DataTableRef] = []
+        if root is not None and leg_name and node.test_name:
+            refs = list_attachment_refs(root, leg_name, node.test_name)
+        if not refs:
+            refs = list(getattr(node, "data_tables", None) or [])
+        if not refs or root is None:
             return
         self._add_para_before(
             doc,
@@ -1314,7 +1342,6 @@ class WordGenerator:
             size=SIZE_BODY,
             align=WD_ALIGN_PARAGRAPH.CENTER,
         )
-        root = Path(project_path)
         for ref in refs:
             try:
                 path = resolve_attachment_path(root, ref)

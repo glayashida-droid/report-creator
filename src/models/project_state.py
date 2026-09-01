@@ -206,10 +206,36 @@ class TestNode(BaseModel):
     data_tables: List[DataTableRef] = Field(default_factory=list)
     # Manual order of photo album folders under 3.测试组/{Leg名}-{试验名}/; empty → default sort.
     photo_album_order: List[str] = Field(default_factory=list)
+    # Selected standards whose sample-result tables were removed (条件等仍保留).
+    # Each entry is (标准号, 章节号). Uncheck then re-check restores the table.
+    result_table_omissions: List[Tuple[str, str]] = Field(default_factory=list)
+
+    @field_validator("result_table_omissions", mode="before")
+    @classmethod
+    def _coerce_result_table_omissions(cls, value):
+        if not value:
+            return []
+        out = []
+        for item in value:
+            if isinstance(item, dict):
+                out.append(
+                    (str(item.get("standard_id") or ""), str(item.get("chapter") or ""))
+                )
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                out.append((str(item[0] or ""), str(item[1] or "")))
+        return out
 
     @staticmethod
     def _has_text(value) -> bool:
         return bool(value and str(value).strip())
+
+    def omitted_result_key_set(self) -> set:
+        return {(a or "", b or "") for a, b in (self.result_table_omissions or [])}
+
+    def result_table_standards(self) -> List[TestStandard]:
+        """Standards that still have a sample-result table (excludes UI omissions)."""
+        omitted = self.omitted_result_key_set()
+        return [s for s in self.resolved_standards() if s.ref_key() not in omitted]
 
     def resolved_standards(self) -> List[TestStandard]:
         """Checked standards in selection order; falls back to legacy scalar fields."""
