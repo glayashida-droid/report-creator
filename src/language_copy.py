@@ -138,6 +138,7 @@ def english_from_application(cn_value: str, en_value: str = "") -> str:
 # Phrasing matches 申请单英文行 / report sample-info table (same seam for edit UI + export).
 FIELD_LABELS = {
     "申请单号": ("申请单号", "Application No."),
+    "TO号": ("TO号", "TO No."),
     "申请公司": ("申请公司", "Applicant Name"),
     "申请公司地址": ("申请公司地址", "Applicant Address"),
     "报告抬头公司": ("报告抬头公司", "Company shown on report"),

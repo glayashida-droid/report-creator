@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QPushButton, QGroupBox, QSplitter, QComboBox, QMessageBox,
     QDateEdit, QFileDialog, QFormLayout, QScrollArea, QSizePolicy, QFrame,
     QInputDialog, QButtonGroup, QToolButton, QDialog, QCheckBox,
+    QStackedWidget,
 )
 from PySide6.QtCore import Qt, QDate, QThread, Signal, QEvent, QObject, QSize, QTimer
 
@@ -20,6 +21,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 from src.models.project_state import ProjectState
 from src.ui.test_photos_panel import warn_duplicate_test_names
 from src.application_ingest import apply_application_data
+from src.io.to_numbers import apply_autoliv_to_numbers
 from application_parser import parse_application, prepare_excel_bytes
 from src.parsers.pdf_parser import QuotationParser
 from src.io.project_mirror import incremental_copy, list_saved_projects, local_project_dir
@@ -46,6 +48,8 @@ from src.parsers.db_loader import DuplicateStandardError, duplicate_standard_mes
 from src.ui.leg_graph import LegGraphArea
 from src.ui.load_state_dialog import LoadStateDialog
 from src.ui.tester_name_dialog import TesterNameDialog
+from src.ui.board_gate_dialog import BoardGateDialog
+from src.ui.project_board import ClickableLabel, ProjectBoardPage
 from src.ui.leg_template_dialog import ImportTemplateDialog
 from src.ui.save_success_dialog import SaveSuccessDialog
 from src.ui.candidate_pool import CandidatePoolList
@@ -169,7 +173,7 @@ class MirrorWorker(QThread):
             self.failed.emit(self._generation, str(e))
 
 
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.3.3"
 # Calendar popup floor. Dates before this are treated as "no end date"
 # because QDateEdit may clamp the blank sentinel to 1752-09-14.
 _EARLIEST_REAL_YEAR = 1990
@@ -251,9 +255,12 @@ class MainWindow(QMainWindow):
         self._schedule_network_probe()
 
     def init_ui(self):
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
+        self._stack = QStackedWidget()
+        self.setCentralWidget(self._stack)
+
+        report_page = QWidget()
+        self._report_page = report_page
+        main_layout = QVBoxLayout(report_page)
         main_layout.setSpacing(8)
 
         # 1. Project Locator (compact)
@@ -550,8 +557,9 @@ class MainWindow(QMainWindow):
         splitter.addWidget(left_panel)
 
         self.right_panel = QGroupBox("项目明细")
-        self.lbl_tester_title = QLabel("", self.right_panel)
+        self.lbl_tester_title = ClickableLabel("", self.right_panel)
         self.lbl_tester_title.setObjectName("groupTitleSuffix")
+        self.lbl_tester_title.clicked.connect(self._on_tester_title_clicked)
         self.lbl_tester_title.hide()
         self._detail_title_host = _GroupTitleRightLabelHost(
             self.right_panel, self.lbl_tester_title, self
@@ -579,6 +587,12 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(splitter, stretch=1)
 
         self._on_export_mode_changed()
+
+        self._stack.addWidget(report_page)
+        self._board_page = ProjectBoardPage()
+        self._board_page.leave_requested.connect(self._hide_project_board)
+        self._stack.addWidget(self._board_page)
+        self._stack.setCurrentWidget(report_page)
 
     def _apply_golden_split(self):
         splitter = getattr(self, "_main_splitter", None)
@@ -631,6 +645,23 @@ class MainWindow(QMainWindow):
         host = getattr(self, "_detail_title_host", None)
         if host is not None:
             host.reposition()
+
+    def _on_tester_title_clicked(self):
+        dialog = BoardGateDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self._unlock_project_board()
+
+    def _unlock_project_board(self) -> bool:
+        self._show_project_board()
+        return True
+
+    def _show_project_board(self):
+        self._board_page.reload()
+        self._stack.setCurrentWidget(self._board_page)
+
+    def _hide_project_board(self):
+        self._stack.setCurrentWidget(self._report_page)
 
     def _mount_tester_on_project(self):
         if not (self.state.tester_name or "").strip():
@@ -1126,6 +1157,7 @@ class MainWindow(QMainWindow):
             clean, name = prepare_excel_bytes(raw, app_excel.name)
             data = parse_application(clean, name)
             apply_application_data(self.state, data)
+            apply_autoliv_to_numbers(self.state, clean)
             self.refresh_overview_ui()
             return True
         except Exception as e:

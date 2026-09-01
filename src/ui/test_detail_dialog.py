@@ -674,18 +674,38 @@ class TestDetailDialog(QDialog):
         date_group, date_layout = self._make_group("")
         date_row = QHBoxLayout()
         date_row.setContentsMargins(12, 0, 0, 0)
+        date_row.setSpacing(8)
         self.date_start = self._make_calendar_date_edit()
         self.date_end = self._make_calendar_date_edit()
-        self.txt_env_condition = QLineEdit()
-        self.txt_env_condition.setPlaceholderText("选择标准后自动填入")
+        for date_edit in (self.date_start, self.date_end):
+            date_edit.setMaximumWidth(148)
+            date_edit.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         date_row.addWidget(QLabel("开始日期:"))
         date_row.addWidget(self.date_start)
         date_row.addWidget(QLabel("结束日期:"))
         date_row.addWidget(self.date_end)
+        self.lbl_to = QLabel("TO:")
+        self.cmb_to = QComboBox()
+        self.cmb_to.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.cmb_to.setMinimumWidth(100)
+        self.cmb_to.setMaximumWidth(200)
+        date_row.addWidget(self.lbl_to)
+        date_row.addWidget(self.cmb_to)
         date_row.addStretch(1)
-        date_row.addWidget(QLabel("检测环境:"))
-        date_row.addWidget(self.txt_env_condition, stretch=1)
         date_layout.addLayout(date_row)
+
+        env_row = QHBoxLayout()
+        env_row.setContentsMargins(12, 0, 0, 0)
+        env_row.setSpacing(8)
+        self.lbl_env = QLabel("检测环境:")
+        self.txt_env_condition = QLineEdit()
+        self.txt_env_condition.setPlaceholderText("选择标准后自动填入")
+        self.txt_env_condition.setMinimumWidth(200)
+        self.txt_env_condition.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        env_row.addWidget(self.lbl_env)
+        env_row.addWidget(self.txt_env_condition, stretch=1)
+        date_layout.addLayout(env_row)
+        self._fill_to_combo()
         self._updating_dates = False
         self.date_start.dateChanged.connect(self._on_node_dates_changed)
         self.date_end.dateChanged.connect(self._on_node_dates_changed)
@@ -893,6 +913,35 @@ class TestDetailDialog(QDialog):
         self._fill_equipments()
         self._schedule_result_header_sync()
         self._refresh_import_from_prev_button()
+
+    def _project_to_numbers(self):
+        state = self._project_state
+        if state is None:
+            return []
+        return [str(item).strip() for item in (getattr(state, "to_numbers", None) or []) if str(item).strip()]
+
+    def _fill_to_combo(self):
+        tos = self._project_to_numbers()
+        self.cmb_to.clear()
+        self.cmb_to.addItem("未选择", "")
+        for item in tos:
+            self.cmb_to.addItem(item, item)
+        visible = bool(tos)
+        self.lbl_to.setVisible(visible)
+        self.cmb_to.setVisible(visible)
+
+    def _restore_selected_to(self):
+        wanted = str(getattr(self.node_data, "selected_to", None) or "").strip()
+        if not wanted:
+            self.cmb_to.setCurrentIndex(0)
+            return
+        idx = self.cmb_to.findData(wanted)
+        if idx < 0:
+            idx = self.cmb_to.findText(wanted)
+        if idx < 0:
+            self.cmb_to.addItem(wanted, wanted)
+            idx = self.cmb_to.findData(wanted)
+        self.cmb_to.setCurrentIndex(max(idx, 0))
 
     def _clear_sample_tables_host(self):
         while self.sample_tables_layout.count():
@@ -2189,6 +2238,7 @@ class TestDetailDialog(QDialog):
         self._restore_equipments()
         if self.node_data.env_condition:
             self.txt_env_condition.setText(self.node_data.env_condition)
+        self._restore_selected_to()
 
         # Standards restore rebuilds sample tables; fill rows afterward.
         for s in self.node_data.samples:
@@ -2904,6 +2954,9 @@ class TestDetailDialog(QDialog):
         self.node_data.end_date = end.toString("yyyy-MM-dd")
         env = self.txt_env_condition.text().strip()
         self.node_data.env_condition = env or None
+        if self._project_to_numbers():
+            picked = str(self.cmb_to.currentData() or "").strip()
+            self.node_data.selected_to = picked or None
         return True
 
     def save_and_close(self):

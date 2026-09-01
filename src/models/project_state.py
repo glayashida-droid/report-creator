@@ -202,6 +202,7 @@ class TestNode(BaseModel):
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     env_condition: Optional[str] = None  # test environment; from standard library or user edit
+    selected_to: Optional[str] = None  # Autoliv TO picked on the detail card
     samples: List[TestSample] = Field(default_factory=list)
     data_tables: List[DataTableRef] = Field(default_factory=list)
     # Manual order of photo album folders under 3.测试组/{Leg名}-{试验名}/; empty → default sort.
@@ -407,6 +408,8 @@ class ProjectState(BaseModel):
     test_end_date: str = ""
     tester_name: str = ""
     special_profile: SpecialReportProfile = Field(default_factory=SpecialReportProfile)
+    to_numbers: List[str] = Field(default_factory=list)
+    to_numbers_display: str = ""
     # 申请单首页全部字段（含主机厂、生产商等）
     application_fields: Dict[str, str] = Field(default_factory=dict)
     application_fields_en: Dict[str, str] = Field(default_factory=dict)
@@ -545,6 +548,7 @@ class ProjectState(BaseModel):
 
     _OVERVIEW_HEAD: ClassVar[tuple] = (
         "申请单号",
+        "TO号",
         "申请公司",
         "申请公司地址",
         "报告抬头公司",
@@ -704,12 +708,22 @@ class ProjectState(BaseModel):
                 val = (getattr(self, attr, None) or "").strip()
                 if val:
                     fields[key] = val
+            display = (self.to_numbers_display or "").strip()
+            if display:
+                fields["TO号"] = display
+            else:
+                fields.pop("TO号", None)
             return fields
         fields = dict(self.application_fields or {})
         for key, attr in self._OVERVIEW_ATTR.items():
             val = (getattr(self, attr, None) or "").strip()
             if val:
                 fields[key] = val
+        display = (self.to_numbers_display or "").strip()
+        if display:
+            fields["TO号"] = display
+        else:
+            fields.pop("TO号", None)
         return fields
 
     def iter_overview_fields(self, language: Optional[str] = None):
@@ -773,6 +787,9 @@ class ProjectState(BaseModel):
             field_id = self.parse_custom_overview_id(key)
             if field_id:
                 self.set_custom_overview_value(field_id, value)
+            return
+        if key == "TO号":
+            self.to_numbers_display = value
             return
         if self._edit_lang() == "英文":
             attr = self._OVERVIEW_ATTR_EN.get(key)

@@ -12,6 +12,7 @@ MAGENTA = "#FF00FF"
 BORDER = "#1F2A37"
 CYAN_DIM = "rgba(0, 255, 255, 0.35)"
 MAGENTA_DIM = "rgba(255, 0, 255, 0.35)"
+OVERDUE = "#FF6B6B"
 
 CYBERPUNK_QSS = f"""
 /* ---- Global ---- */
@@ -955,8 +956,53 @@ QTableWidget {{
     alternate-background-color: {BG_PANEL};
 }}
 
-QTableWidget::item:selected {{
+QTableWidget::item:selected,
+QTreeWidget::item:selected {{
     background-color: rgba(255, 0, 255, 0.25);
+}}
+
+QTableWidget#projectBoardTable,
+QTreeWidget#projectBoardTable {{
+    padding: 0px;
+}}
+
+QTableWidget#projectBoardTable QLabel,
+QTreeWidget#projectBoardTable QLabel {{
+    background: transparent;
+    font-weight: 400;
+    color: {TEXT};
+}}
+
+QTreeWidget#projectBoardTable QLabel#projectIdLink {{
+    color: {CYAN};
+    text-decoration: underline;
+}}
+
+QTreeWidget#projectBoardTable::item:selected {{
+    background-color: rgba(255, 0, 255, 0.25);
+}}
+
+QProgressBar {{
+    background-color: {BG_INPUT};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    text-align: center;
+    color: #0A0E14;
+    min-height: 16px;
+    max-height: 18px;
+}}
+
+QProgressBar::chunk {{
+    background-color: {CYAN};
+    border-radius: 5px;
+}}
+
+QProgressBar#overdueProgress {{
+    color: {TEXT};
+}}
+
+QProgressBar#overdueProgress::chunk {{
+    background-color: {OVERDUE};
 }}
 
 QInputDialog, QFileDialog {{
