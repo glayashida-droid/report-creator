@@ -92,6 +92,13 @@ QGroupBox#overviewGroup {{
     margin-top: 14px;
 }}
 
+QLabel#groupTitleSuffix {{
+    color: {CYAN};
+    font-weight: 600;
+    background-color: {BG_PANEL};
+    padding: 0 12px 0 8px;
+}}
+
 QToolButton#overviewReload {{
     background: transparent;
     border: none;

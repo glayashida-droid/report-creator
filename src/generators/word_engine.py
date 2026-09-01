@@ -32,9 +32,15 @@ from src.language_copy import (
     photo_caption,
     table_header_label,
 )
+from src.io.special_rules import (
+    DEFAULT_LAB_ADDRESS_CN,
+    DEFAULT_LAB_ADDRESS_EN,
+    profile_from_state,
+)
 from src.models.project_state import (
     DataTableRef,
     ProjectState,
+    SpecialReportProfile,
     TestLeg,
     TestNode,
     TestResult,
@@ -72,6 +78,8 @@ _CONTENT_WIDTH_DXA = 8802
 _WIDTHS_COVER_INFO = (3423, 5292)  # ~39:61, not 50:50
 _WIDTHS_SAMPLE_LIST = (704, 1697, 1276, 1236, 1980)
 _WIDTHS_SUMMARY = (704, 2090, 1690, 1400, 1500, 1418)
+# 5-col summary without optional 检测时间 / 检测人员
+_WIDTHS_SUMMARY_BASE = (704, 2400, 2000, 2200, 1498)
 _WIDTHS_EQUIPMENT = (704, 2693, 1843, 2126, 1418)
 _WIDTHS_SAMPLE_RESULT = (1523, 6269, 1353)
 
@@ -120,7 +128,7 @@ class WordGenerator:
             doc, "{{样品清单表}}", lambda d, p: self._insert_sample_list_table(d, p, state, [n for _, n in nodes])
         )
         self._replace_marker_with_table(
-            doc, "{{结果汇总表}}", lambda d, p: self._insert_summary_table(d, p, [n for _, n in nodes])
+            doc, "{{结果汇总表}}", lambda d, p: self._insert_summary_table(d, p, [n for _, n in nodes], state)
         )
         self._replace_marker_with_blocks(
             doc,
@@ -222,6 +230,9 @@ class WordGenerator:
                 name_fallback = title_name
             if title_addr:
                 addr_fallback = title_addr
+        profile = profile_from_state(state)
+        lab_cn = (profile.lab_address_cn or "").strip() or DEFAULT_LAB_ADDRESS_CN
+        lab_en = (profile.lab_address_en or "").strip() or DEFAULT_LAB_ADDRESS_EN
         placeholders = {
             "{{委托方名称}}": visible.get("申请公司", "") or name_fallback or "",
             "{{委托方地址}}": visible.get("申请公司地址", "") or addr_fallback or "",
@@ -233,6 +244,8 @@ class WordGenerator:
             "{{报告抬头公司}}": visible.get("报告抬头公司", ""),
             "{{报告抬头地址}}": visible.get("报告抬头地址", ""),
             "{{报告编号}}": report_no,
+            "{{实验室地址_cn}}": lab_cn,
+            "{{实验室地址_en}}": lab_en,
         }
         for key, val in visible.items():
             ph_key = (
@@ -935,30 +948,68 @@ class WordGenerator:
         for i, v in enumerate(values):
             self._set_cell_text(table.rows[1].cells[i], v)
 
-    def _insert_summary_table(self, doc: Document, anchor: Paragraph, nodes: List[TestNode]):
-        table = self._add_table_before(doc, anchor, max(len(nodes), 0) + 1, 6)
-        self._set_col_widths(table, _WIDTHS_SUMMARY)
-        headers = [
-            self._H("序号", "No."),
-            self._H("检测项目", "Test Item"),
-            self._H("检测方法", "Test Method"),
-            self._H("检测时间", "Testing Period"),
-            self._H("样品编号", "Sample No."),
-            self._H("结论", "Conclusion"),
+    def _summary_table_layout(self, profile: SpecialReportProfile):
+        """Column order follows golden bilingual summary (Fig. 3)."""
+        cols = [
+            ("序号", "No."),
+            ("检测项目", "Test Item"),
         ]
+        if profile.show_test_period:
+            cols.append(("检测时间", "Testing Period"))
+        cols.append(("检测方法", "Test Method"))
+        if profile.show_tester:
+            cols.append(("检测人员", "Tester"))
+        cols.extend(
+            [
+                ("样品编号", "Sample No."),
+                ("结论", "Conclusion"),
+            ]
+        )
+        return cols
+
+    @staticmethod
+    def _distribute_summary_widths(count: int) -> Tuple[int, ...]:
+        if count == 5:
+            return _WIDTHS_SUMMARY_BASE
+        total = sum(_WIDTHS_SUMMARY)
+        base = total // count
+        widths = [base] * count
+        widths[0] = 704
+        widths[-1] = 1418
+        remainder = total - sum(widths)
+        if remainder and count > 2:
+            widths[1] += remainder
+        return tuple(widths)
+
+    def _insert_summary_table(
+        self,
+        doc: Document,
+        anchor: Paragraph,
+        nodes: List[TestNode],
+        state: ProjectState,
+    ):
+        profile = profile_from_state(state)
+        layout = self._summary_table_layout(profile)
+        col_count = len(layout)
+        table = self._add_table_before(doc, anchor, max(len(nodes), 0) + 1, col_count)
+        self._set_col_widths(table, self._distribute_summary_widths(col_count))
+        headers = [self._H(zh, en) for zh, en in layout]
         for i, h in enumerate(headers):
             self._set_cell_text(table.rows[0].cells[i], h)
+        tester = (state.tester_name or "").strip() or "/"
         for idx, node in enumerate(nodes, 1):
             ids = [s.sample_id for s in node.samples if s.sample_id]
             conclusion = self._node_conclusion(node)
-            vals = [
-                str(idx),
-                self._test_item_label(node) or "/",
-                self._format_method(node) or "/",
-                self._fmt_period(node.start_date, node.end_date) or "/",
-                self._format_id_range(ids) if ids else "/",
-                conclusion,
-            ]
+            values_by_key = {
+                "序号": str(idx),
+                "检测项目": self._test_item_label(node) or "/",
+                "检测时间": self._fmt_period(node.start_date, node.end_date) or "/",
+                "检测方法": self._format_method(node) or "/",
+                "检测人员": tester,
+                "样品编号": self._format_id_range(ids) if ids else "/",
+                "结论": conclusion,
+            }
+            vals = [values_by_key[zh] for zh, _ in layout]
             for i, v in enumerate(vals):
                 self._set_cell_text(table.rows[idx].cells[i], v)
 

@@ -375,6 +375,17 @@ def _usable_test_name(name: str) -> bool:
     return bool(text) and text not in _USABLE_TEST_NAME_BLOCKLIST
 
 
+class SpecialReportProfile(BaseModel):
+    """OEM/customer-specific export rules resolved from special.xlsx."""
+
+    show_test_period: bool = False
+    show_tester: bool = False
+    use_4sign: bool = False
+    forbid_na: bool = False
+    lab_address_cn: str = ""
+    lab_address_en: str = ""
+
+
 class ProjectState(BaseModel):
     project_id: str = ""
     source_path: str = ""
@@ -394,6 +405,8 @@ class ProjectState(BaseModel):
     sample_receive_date: str = ""
     test_start_date: str = ""
     test_end_date: str = ""
+    tester_name: str = ""
+    special_profile: SpecialReportProfile = Field(default_factory=SpecialReportProfile)
     # 申请单首页全部字段（含主机厂、生产商等）
     application_fields: Dict[str, str] = Field(default_factory=dict)
     application_fields_en: Dict[str, str] = Field(default_factory=dict)

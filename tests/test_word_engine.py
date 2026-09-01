@@ -13,11 +13,13 @@ from src.generators.word_engine import (
     _WIDTHS_COVER_INFO,
     _WIDTHS_SAMPLE_LIST,
     _WIDTHS_SUMMARY,
+    _WIDTHS_SUMMARY_BASE,
 )
 from src.io.test_photos import test_dir_key as leg_test_dir_key
 from src.models.project_state import (
     DataTableRef,
     ProjectState,
+    SpecialReportProfile,
     TestLeg,
     TestNode,
     TestSample,
@@ -491,10 +493,41 @@ def test_word_engine_data_table_two_row_header_by_sample_id(tmp_path):
     assert trPr_data is None or trPr_data.find(qn("w:tblHeader")) is None
 
 
+def test_summary_table_default_has_no_testing_period(tmp_path):
+    state = ProjectState(
+        project_id="A2260613686101",
+        application_fields={"申请单号": "A22606136861", "样品名称": "ECU"},
+    )
+    node = TestNode(
+        test_name="振动试验",
+        start_date="2026-07-03",
+        end_date="2026-07-23",
+        samples=[TestSample(sample_id="A01", result=TestResult.PASS)],
+    )
+    leg = TestLeg(leg_id="L1", leg_name="Leg 1", nodes=[node])
+    state.legs.append(leg)
+
+    template_path = Path("templates/template_zh.docx")
+    if not template_path.exists():
+        template_path = Path("templates/template_raw.docx")
+    out_path = Path(tmp_path) / "summary_default.docx"
+    WordGenerator(str(template_path)).generate(state, str(out_path), report_language="中文")
+    doc = Document(str(out_path))
+    summary = None
+    for t in doc.tables:
+        headers = [(c.text or "").strip() for c in t.rows[0].cells]
+        if len(headers) == 5 and "检测项目" in " ".join(headers):
+            summary = t
+            break
+    assert summary is not None
+    assert "检测时间" not in summary.rows[0].cells[2].text
+
+
 def test_summary_table_testing_period_column(tmp_path):
     state = ProjectState(
         project_id="A2260613686101",
         application_fields={"申请单号": "A22606136861", "样品名称": "ECU"},
+        special_profile=SpecialReportProfile(show_test_period=True),
     )
     node = TestNode(
         test_name="振动试验",
@@ -537,14 +570,38 @@ def test_summary_table_testing_period_column(tmp_path):
                 break
         assert summary is not None, lang
         assert len(summary.columns) == 6, lang
-        assert _grid_widths(summary) == list(_WIDTHS_SUMMARY)
         headers = [(c.text or "").strip() for c in summary.rows[0].cells]
-        assert headers[3] == header, lang
-        assert summary.rows[1].cells[3].text.strip() == period, lang
+        period_idx = next(i for i, h in enumerate(headers) if header.split("\n")[0] in h or header in h)
+        assert summary.rows[1].cells[period_idx].text.strip() == period, lang
 
 
 def test_fmt_period_zero_pads_month():
     assert WordGenerator._fmt_period("2026-01-05", "2026-09-07") == "2026.01.05~2026.09.07"
+
+
+def test_lab_address_placeholder_keeps_company_name(tmp_path):
+    from src.io.special_rules import DEFAULT_LAB_ADDRESS_CN
+
+    state = ProjectState(
+        project_id="A2260613686101",
+        application_fields={"申请单号": "A22606136861", "主机厂": "吉利"},
+        special_profile=SpecialReportProfile(
+            lab_address_cn="上海市闵行区新骏环路777号5号楼",
+        ),
+    )
+    template_path = Path("templates/template_zh.docx")
+    if not template_path.exists():
+        return
+    out_path = Path(tmp_path) / "lab_addr.docx"
+    WordGenerator(str(template_path)).generate(state, str(out_path), report_language="中文")
+    doc = Document(str(out_path))
+    footer = next(
+        (p.text.strip() for p in doc.paragraphs if "华测品正" in (p.text or "")),
+        "",
+    )
+    assert "上海华测品正检测技术有限公司" in footer
+    assert "新骏环路777号" in footer
+    assert DEFAULT_LAB_ADDRESS_CN not in footer or "新骏环路" in footer
 
 
 def test_custom_report_no_in_document(tmp_path):

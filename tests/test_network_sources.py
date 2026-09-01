@@ -215,6 +215,19 @@ def test_resolve_report_template_for_language(tmp_path: Path):
     assert zh.name == "template_zh.docx"
 
 
+def test_resolve_report_template_4sign_fallback(tmp_path: Path):
+    cfg_path = _write_config(tmp_path)
+    config = load_network_sources_config(cfg_path)
+    missing = resolve_report_template_for_language("中文", config, use_4sign=True)
+    assert missing is not None
+    assert missing.name == "template_zh.docx"
+    four = tmp_path / "report_templates" / "template_zh_4sign.docx"
+    four.write_bytes(b"4")
+    picked = resolve_report_template_for_language("中文", config, use_4sign=True)
+    assert picked is not None
+    assert picked.name == "template_zh_4sign.docx"
+
+
 def test_db_loader_network_mode_requires_probe(tmp_path: Path):
     standards = tmp_path / "标准库.xlsx"
     equipment = tmp_path / "01-设备清单.xlsx"

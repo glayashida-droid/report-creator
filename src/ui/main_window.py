@@ -31,6 +31,8 @@ from src.io.network_sources import (
     probe_network_sources,
     resolve_report_template_for_language,
 )
+from src.io.special_rules import profile_from_state, refresh_special_profile, state_has_forbidden_na
+from src.io.user_prefs import default_tester_name, save_default_tester_name
 from src.io.leg_templates import (
     TemplateExistsError,
     TemplateNameError,
@@ -42,6 +44,7 @@ from src.io.leg_templates import (
 from src.parsers.db_loader import DuplicateStandardError, duplicate_standard_message
 from src.ui.leg_graph import LegGraphArea
 from src.ui.load_state_dialog import LoadStateDialog
+from src.ui.tester_name_dialog import TesterNameDialog
 from src.ui.leg_template_dialog import ImportTemplateDialog
 from src.ui.save_success_dialog import SaveSuccessDialog
 from src.ui.candidate_pool import CandidatePoolList
@@ -84,6 +87,38 @@ class _GroupTitleToolbarHost(QObject):
             widget.show()
             widget.raise_()
             x += widget.width()
+
+
+class _GroupTitleRightLabelHost(QObject):
+    """Keep a label parked at the top-right of a QGroupBox title bar."""
+
+    def __init__(self, group: QGroupBox, widget: QWidget, parent=None):
+        super().__init__(parent)
+        self._group = group
+        self._widget = widget
+        group.installEventFilter(self)
+        self.reposition()
+
+    def eventFilter(self, watched, event):
+        if watched is self._group and event.type() in (
+            QEvent.Resize,
+            QEvent.Show,
+            QEvent.LayoutRequest,
+        ):
+            self.reposition()
+        return False
+
+    def reposition(self):
+        group = self._group
+        widget = self._widget
+        widget.adjustSize()
+        inset = 12
+        x = max(0, group.width() - widget.width() - inset)
+        y = max(0, (14 - widget.height()) // 2 + 1)
+        widget.move(x, y)
+        if widget.text():
+            widget.show()
+            widget.raise_()
 
 
 class NetworkProbeWorker(QThread):
@@ -133,7 +168,7 @@ class MirrorWorker(QThread):
             self.failed.emit(self._generation, str(e))
 
 
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 # Calendar popup floor. Dates before this are treated as "no end date"
 # because QDateEdit may clamp the blank sentinel to 1752-09-14.
 _EARLIEST_REAL_YEAR = 1990
@@ -163,6 +198,8 @@ class MainWindow(QMainWindow):
         self._network_all_connected = False
         self._connection_timer = QTimer(self)
         self._connection_timer.timeout.connect(self._start_network_probe)
+        self._session_tester_name = ""
+        self._tester_prompt_pending = True
 
         self.init_ui()
         self._start_network_probe()
@@ -459,6 +496,12 @@ class MainWindow(QMainWindow):
         splitter.addWidget(left_panel)
 
         self.right_panel = QGroupBox("项目明细")
+        self.lbl_tester_title = QLabel("", self.right_panel)
+        self.lbl_tester_title.setObjectName("groupTitleSuffix")
+        self.lbl_tester_title.hide()
+        self._detail_title_host = _GroupTitleRightLabelHost(
+            self.right_panel, self.lbl_tester_title, self
+        )
         right_layout = QVBoxLayout(self.right_panel)
         self.leg_graph = LegGraphArea(self.state)
         # clicked(bool) must not map to save_state(show_success=…)
@@ -497,6 +540,50 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         self._apply_golden_split()
         self.list_candidates.fit_grid()
+        if self._tester_prompt_pending:
+            self._tester_prompt_pending = False
+            QTimer.singleShot(0, self._prompt_tester_name)
+
+    def _prompt_tester_name(self, *, mount_project: bool = False) -> bool:
+        """Confirm session tester name; optionally write into current project."""
+        preset = self._session_tester_name or default_tester_name()
+        dialog = TesterNameDialog(preset, self)
+        if dialog.exec() != QDialog.Accepted:
+            if not self._session_tester_name and not default_tester_name():
+                QMessageBox.warning(self, "提示", "请填写测试员姓名后再使用程序")
+                QTimer.singleShot(0, lambda: setattr(self, "_tester_prompt_pending", True))
+            return False
+        name = dialog.tester_name()
+        if not name:
+            QMessageBox.warning(self, "提示", "测试员姓名不能为空")
+            QTimer.singleShot(0, self._prompt_tester_name)
+            return False
+        self._session_tester_name = name
+        save_default_tester_name(name)
+        if mount_project or not (self.state.tester_name or "").strip():
+            self.state.tester_name = name
+            self._is_dirty = True
+        self._refresh_tester_title_label()
+        return True
+
+    def _refresh_tester_title_label(self):
+        name = (self._session_tester_name or self.state.tester_name or "").strip()
+        if name:
+            self.lbl_tester_title.setText(f"测试员：{name}")
+            self.lbl_tester_title.show()
+        else:
+            self.lbl_tester_title.clear()
+            self.lbl_tester_title.hide()
+        host = getattr(self, "_detail_title_host", None)
+        if host is not None:
+            host.reposition()
+
+    def _mount_tester_on_project(self):
+        if not (self.state.tester_name or "").strip():
+            self.state.tester_name = self._session_tester_name or default_tester_name()
+            if self.state.tester_name:
+                self._is_dirty = True
+        self._refresh_tester_title_label()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -960,6 +1047,8 @@ class MainWindow(QMainWindow):
         self._on_dates_changed()
 
         self._parse_fresh_project(project_path)
+        refresh_special_profile(self.state)
+        self._mount_tester_on_project()
         self.refresh_overview_ui()
         self._set_mirror_status("镜像中...", "dim")
         self._start_mirror(project_path, local_path)
@@ -1359,6 +1448,8 @@ class MainWindow(QMainWindow):
         loaded.project_path = str(saved.local_path)
 
         self.state = loaded
+        refresh_special_profile(self.state)
+        self._mount_tester_on_project()
         self._local_path = saved.local_path
         self._project_path = saved.local_path
         self._source_path = Path(loaded.source_path) if loaded.source_path else saved.local_path
@@ -1506,11 +1597,20 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "无法导出", "报告编号不能为空")
                 return
 
+            refresh_special_profile(self.state)
+            profile = profile_from_state(self.state)
+
             template_path = resolve_report_template_for_language(
-                lang, self._network_config
+                lang,
+                self._network_config,
+                use_4sign=profile.use_4sign,
             )
             if template_path is None:
                 QMessageBox.warning(self, "错误", "找不到报告模板，请确认公盘模板连接正常")
+                return
+
+            if profile.show_tester and not (self.state.tester_name or "").strip():
+                QMessageBox.warning(self, "无法导出", "当前客户/主机厂要求汇总表填写检测人员，请先确认测试员姓名")
                 return
 
             stem = WordGenerator.report_filename_stem(report_no)
@@ -1567,6 +1667,16 @@ class MainWindow(QMainWindow):
                     "无法导出",
                     "以下试验尚未完成明细（含关键参数确认），无法导出报告：\n"
                     + "\n".join(incomplete),
+                )
+                return
+
+            na_blocked = state_has_forbidden_na(self.state, leg_filter)
+            if na_blocked:
+                QMessageBox.warning(
+                    self,
+                    "无法导出",
+                    "当前主机厂/客户不允许结论为 N/A，请先修改以下试验：\n"
+                    + "\n".join(na_blocked),
                 )
                 return
 

@@ -21,6 +21,11 @@ REPORT_TEMPLATE_FILES = {
     "英文": "template_en.docx",
     "中英文": "template_ze.docx",
 }
+REPORT_TEMPLATE_4SIGN_FILES = {
+    "中文": "template_zh_4sign.docx",
+    "英文": "template_en_4sign.docx",
+    "中英文": "template_ze_4sign.docx",
+}
 REPORT_TEMPLATE_FALLBACK = "template_raw.docx"
 
 
@@ -316,12 +321,18 @@ def resolve_report_template_file(
 
 
 def resolve_report_template_for_language(
-    lang: str, config: Optional[NetworkSourcesConfig] = None
+    lang: str,
+    config: Optional[NetworkSourcesConfig] = None,
+    *,
+    use_4sign: bool = False,
 ) -> Optional[Path]:
-    filename = REPORT_TEMPLATE_FILES.get(lang, REPORT_TEMPLATE_FILES["中文"])
+    mapping = REPORT_TEMPLATE_4SIGN_FILES if use_4sign else REPORT_TEMPLATE_FILES
+    filename = mapping.get(lang, mapping["中文"])
     path = resolve_report_template_file(filename, config)
     if path is not None:
         return path
+    if use_4sign:
+        return resolve_report_template_for_language(lang, config, use_4sign=False)
     if lang == "中文":
         return resolve_report_template_file(REPORT_TEMPLATE_FALLBACK, config)
     return None

@@ -120,3 +120,6 @@ def apply_application_data(state: ProjectState, data: ApplicationData) -> None:
         state.active_sample_column_index = 0
 
     state.sync_application_fields_from_sample_column()
+    from src.io.special_rules import refresh_special_profile
+
+    refresh_special_profile(state)

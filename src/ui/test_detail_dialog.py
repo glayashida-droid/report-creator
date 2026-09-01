@@ -45,6 +45,7 @@ from src.io.data_tables import (
     upload_existing_xlsx,
 )
 from src.io.test_photos import is_usable_test_name
+from src.io.special_rules import profile_from_state
 from src.ui.test_photos_panel import TestPhotosPanel, warn_duplicate_test_names
 from src.ui.data_table_template_dialog import DataTableTemplateDialog
 from src.ui.save_success_dialog import SaveSuccessDialog
@@ -560,6 +561,20 @@ class TestDetailDialog(QDialog):
     def _result_display(self, result: TestResult) -> str:
         return format_conclusion(result, self._edit_lang())
 
+    def _allowed_results(self) -> list:
+        state = self._project_state
+        if state is not None:
+            profile = profile_from_state(state)
+            if profile.forbid_na:
+                return [TestResult.PASS, TestResult.FAIL]
+        return list(TestResult)
+
+    def _populate_result_combo(self, combo) -> None:
+        combo.clear()
+        for r in self._allowed_results():
+            combo.addItem(self._result_display(r), userData=r)
+        self._expand_result_combo_popup(combo)
+
     def _make_calendar_date_edit(self):
         date_edit = QDateEdit()
         date_edit.setCalendarPopup(True)
@@ -944,9 +959,7 @@ class TestDetailDialog(QDialog):
         bulk.setObjectName("bulkResultCombo")
         bulk.setFocusPolicy(Qt.StrongFocus)
         bulk.addItem("—")
-        for r in TestResult:
-            bulk.addItem(self._result_display(r), userData=r)
-        self._expand_result_combo_popup(bulk)
+        self._populate_result_combo(bulk)
         bulk.activated.connect(
             lambda index, s=slot: self._apply_bulk_result_on_slot(s, index)
         )
@@ -1943,9 +1956,7 @@ class TestDetailDialog(QDialog):
             table.setCellWidget(row, 2, txt_desc)
 
             combo_res = QComboBox()
-            for r in TestResult:
-                combo_res.addItem(self._result_display(r), userData=r)
-            self._expand_result_combo_popup(combo_res)
+            self._populate_result_combo(combo_res)
             row_result = result
             if slot_info and isinstance(slot_info.get("result"), TestResult):
                 row_result = slot_info["result"]
@@ -1953,10 +1964,12 @@ class TestDetailDialog(QDialog):
                 row_result = result
             bulk = slot.get("bulk")
             bulk_data = bulk.currentData() if bulk is not None else None
-            if isinstance(bulk_data, TestResult):
+            if isinstance(bulk_data, TestResult) and bulk_data in self._allowed_results():
                 combo_res.setCurrentIndex(combo_res.findData(bulk_data))
-            else:
+            elif row_result in self._allowed_results():
                 combo_res.setCurrentIndex(combo_res.findData(row_result))
+            else:
+                combo_res.setCurrentIndex(0)
             table.setCellWidget(row, 3, combo_res)
         self._refresh_sample_summary()
         self._schedule_result_header_sync()
