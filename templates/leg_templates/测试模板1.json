@@ -1,0 +1,85 @@
+{
+  "name": "测试模板1",
+  "legs": [
+    {
+      "leg_id": "L1",
+      "leg_name": "Leg 1",
+      "nodes": [
+        {
+          "test_name": "机械冲击（前）",
+          "standard_id": "VW82511-2010\n\nVW82511-2010",
+          "standard_chapter": "8.3.5\n\n8.3.4",
+          "standard_test_name": "环境循环试验\n\n振动应力叠加温度环境试验",
+          "standard_desc": "-恒温恒湿箱内的空气温度与相对湿度需符合图 12 要求，温度公差为 ±2.5℃。\n-将气囊模块按照实际装车安装姿态固定在恒温恒湿试验箱内，被测样品依据图12 完成30个循环试验。\n\n-本次宽带噪声振动试验需采用可同步开展振动与温度循环测试的设备。被测样品（DUT）必须按照实际装车姿态及设计规定的安装方式固定在振动台激振器上。控制系统需能够执行规定的测试曲线（参见8.3.4.4 节 “试验条件”），测量点设置于被测样品工装夹具上（见图9）。\n-按照下述功率谱密度开展机械宽带噪声振动测试（表6及图10）：\n-将规定的试验曲线（图9）沿三个空间坐标轴施加于气囊模块（图10）。水平纵向与水平横向各试验24小时，竖直方向试验72小时。温度循环曲线同步叠加至振动试验曲线中（图11）。\n整个试验过程中，需向点火管持续通入100mA 的允许不引爆安全电流。",
+          "result_desc": null,
+          "evaluation_req": "试验后，安全气囊模块应该保持完整性和其功能性，桥路电阻在1.7Ω~2.3Ω范围内。\n\n试验后，安全气囊模块应该保持完整性和其功能性，桥路电阻在1.7Ω~2.3Ω范围内。",
+          "standards": [
+            {
+              "standard_id": "VW82511-2010",
+              "chapter": "8.3.5",
+              "test_name": "环境循环试验",
+              "standard_desc": "-恒温恒湿箱内的空气温度与相对湿度需符合图 12 要求，温度公差为 ±2.5℃。\n-将气囊模块按照实际装车安装姿态固定在恒温恒湿试验箱内，被测样品依据图12 完成30个循环试验。",
+              "result_desc": "试验后，安全气囊模块保持完整性和其功能性，桥路电阻在1.7Ω~2.3Ω范围内。",
+              "evaluation_req": "试验后，安全气囊模块应该保持完整性和其功能性，桥路电阻在1.7Ω~2.3Ω范围内。"
+            },
+            {
+              "standard_id": "VW82511-2010",
+              "chapter": "8.3.4",
+              "test_name": "振动应力叠加温度环境试验",
+              "standard_desc": "-本次宽带噪声振动试验需采用可同步开展振动与温度循环测试的设备。被测样品（DUT）必须按照实际装车姿态及设计规定的安装方式固定在振动台激振器上。控制系统需能够执行规定的测试曲线（参见8.3.4.4 节 “试验条件”），测量点设置于被测样品工装夹具上（见图9）。\n-按照下述功率谱密度开展机械宽带噪声振动测试（表6及图10）：\n-将规定的试验曲线（图9）沿三个空间坐标轴施加于气囊模块（图10）。水平纵向与水平横向各试验24小时，竖直方向试验72小时。温度循环曲线同步叠加至振动试验曲线中（图11）。\n整个试验过程中，需向点火管持续通入100mA 的允许不引爆安全电流。",
+              "result_desc": "试验后，安全气囊模块保持完整性和其功能性，桥路电阻在1.7Ω~2.3Ω范围内。",
+              "evaluation_req": "试验后，安全气囊模块应该保持完整性和其功能性，桥路电阻在1.7Ω~2.3Ω范围内。"
+            }
+          ],
+          "equipment_name": null,
+          "equipments": [],
+          "start_date": null,
+          "end_date": null,
+          "samples": []
+        }
+      ]
+    },
+    {
+      "leg_id": "L2",
+      "leg_name": "Leg 2",
+      "nodes": [
+        {
+          "test_name": "湿热循环",
+          "standard_id": null,
+          "standard_chapter": null,
+          "standard_test_name": null,
+          "standard_desc": null,
+          "result_desc": null,
+          "evaluation_req": null,
+          "standards": [],
+          "equipment_name": null,
+          "equipments": [],
+          "start_date": null,
+          "end_date": null,
+          "samples": []
+        }
+      ]
+    },
+    {
+      "leg_id": "L3",
+      "leg_name": "Leg 3",
+      "nodes": [
+        {
+          "test_name": "盐雾腐蚀",
+          "standard_id": null,
+          "standard_chapter": null,
+          "standard_test_name": null,
+          "standard_desc": null,
+          "result_desc": null,
+          "evaluation_req": null,
+          "standards": [],
+          "equipment_name": null,
+          "equipments": [],
+          "start_date": null,
+          "end_date": null,
+          "samples": []
+        }
+      ]
+    }
+  ]
+}

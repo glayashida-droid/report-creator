@@ -1,0 +1,196 @@
+{
+  "name": "测试123",
+  "legs": [
+    {
+      "leg_id": "L1",
+      "leg_name": "Leg 1",
+      "nodes": [
+        {
+          "test_name": "M-04Vibration test",
+          "standard_id": "VW82511-2010",
+          "standard_chapter": "8.3.4",
+          "standard_test_name": "振动应力叠加温度环境试验",
+          "standard_desc": null,
+          "standard_desc_en": null,
+          "result_desc": null,
+          "result_desc_en": null,
+          "evaluation_req": null,
+          "evaluation_req_en": null,
+          "standards": [
+            {
+              "standard_id": "VW82511-2010",
+              "chapter": "8.3.4",
+              "test_name": "振动应力叠加温度环境试验",
+              "test_item": "",
+              "standard_desc": "",
+              "standard_desc_en": "",
+              "result_desc": "",
+              "result_desc_en": "",
+              "evaluation_req": "",
+              "evaluation_req_en": "",
+              "env_condition": "",
+              "images": [],
+              "key_params": [],
+              "key_params_defaults": [],
+              "key_params_confirmed": false
+            }
+          ],
+          "equipment_name": null,
+          "equipments": [],
+          "start_date": null,
+          "end_date": null,
+          "env_condition": null,
+          "samples": [],
+          "data_tables": []
+        },
+        {
+          "test_name": "M-05Mechanical Shock",
+          "standard_id": "VW82511-2010",
+          "standard_chapter": "8.3.5",
+          "standard_test_name": "环境循环试验",
+          "standard_desc": null,
+          "standard_desc_en": null,
+          "result_desc": null,
+          "result_desc_en": null,
+          "evaluation_req": null,
+          "evaluation_req_en": null,
+          "standards": [
+            {
+              "standard_id": "VW82511-2010",
+              "chapter": "8.3.5",
+              "test_name": "环境循环试验",
+              "test_item": "",
+              "standard_desc": "",
+              "standard_desc_en": "",
+              "result_desc": "",
+              "result_desc_en": "",
+              "evaluation_req": "",
+              "evaluation_req_en": "",
+              "env_condition": "",
+              "images": [],
+              "key_params": [],
+              "key_params_defaults": [],
+              "key_params_confirmed": false
+            }
+          ],
+          "equipment_name": null,
+          "equipments": [],
+          "start_date": null,
+          "end_date": null,
+          "env_condition": null,
+          "samples": [],
+          "data_tables": []
+        }
+      ]
+    },
+    {
+      "leg_id": "L2",
+      "leg_name": "Leg 2",
+      "nodes": [
+        {
+          "test_name": "M-04Vibration test",
+          "standard_id": "VW 82517-2010-11",
+          "standard_chapter": "8.3.2",
+          "standard_test_name": "机械冲击试验",
+          "standard_desc": null,
+          "standard_desc_en": null,
+          "result_desc": null,
+          "result_desc_en": null,
+          "evaluation_req": null,
+          "evaluation_req_en": null,
+          "standards": [
+            {
+              "standard_id": "VW 82517-2010-11",
+              "chapter": "8.3.2",
+              "test_name": "机械冲击试验",
+              "test_item": "",
+              "standard_desc": "",
+              "standard_desc_en": "",
+              "result_desc": "",
+              "result_desc_en": "",
+              "evaluation_req": "",
+              "evaluation_req_en": "",
+              "env_condition": "",
+              "images": [],
+              "key_params": [],
+              "key_params_defaults": [],
+              "key_params_confirmed": false
+            }
+          ],
+          "equipment_name": null,
+          "equipments": [],
+          "start_date": null,
+          "end_date": null,
+          "env_condition": null,
+          "samples": [],
+          "data_tables": []
+        },
+        {
+          "test_name": "1231241",
+          "standard_id": null,
+          "standard_chapter": null,
+          "standard_test_name": null,
+          "standard_desc": null,
+          "standard_desc_en": null,
+          "result_desc": null,
+          "result_desc_en": null,
+          "evaluation_req": null,
+          "evaluation_req_en": null,
+          "standards": [],
+          "equipment_name": null,
+          "equipments": [],
+          "start_date": null,
+          "end_date": null,
+          "env_condition": null,
+          "samples": [],
+          "data_tables": []
+        },
+        {
+          "test_name": "M-05Mechanical Shock",
+          "standard_id": null,
+          "standard_chapter": null,
+          "standard_test_name": null,
+          "standard_desc": null,
+          "standard_desc_en": null,
+          "result_desc": null,
+          "result_desc_en": null,
+          "evaluation_req": null,
+          "evaluation_req_en": null,
+          "standards": [],
+          "equipment_name": null,
+          "equipments": [],
+          "start_date": null,
+          "end_date": null,
+          "env_condition": null,
+          "samples": [],
+          "data_tables": []
+        },
+        {
+          "test_name": "123123",
+          "standard_id": null,
+          "standard_chapter": null,
+          "standard_test_name": null,
+          "standard_desc": null,
+          "standard_desc_en": null,
+          "result_desc": null,
+          "result_desc_en": null,
+          "evaluation_req": null,
+          "evaluation_req_en": null,
+          "standards": [],
+          "equipment_name": null,
+          "equipments": [],
+          "start_date": null,
+          "end_date": null,
+          "env_condition": null,
+          "samples": [],
+          "data_tables": []
+        }
+      ]
+    },
+    {
+      "leg_id": "L3",
+      "leg_name": "Leg 3",
+      "nodes": []
+    }
+  ]
+}

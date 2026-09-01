@@ -24,6 +24,7 @@ from src.models.project_state import (
     TestNode,
     TestSample,
     TestResult,
+    TestStandard,
 )
 
 
@@ -217,6 +218,17 @@ def test_condition_image_width_caps_small_pngs():
     assert abs(width2 - 5.0) < 0.05
 
 
+_MIN_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\xcf\xc0"
+    b"\x00\x00\x03\x01\x01\x00\xc9\xfe\x92\xef\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+
+def _para_has_image(paragraph) -> bool:
+    return bool(paragraph._element.xpath(".//w:drawing"))
+
+
 def test_condition_blocks_titled_and_indented(tmp_path):
     from docx import Document
 
@@ -253,6 +265,47 @@ def test_condition_blocks_titled_and_indented(tmp_path):
         "防尘实验",
         "  防尘条件正文。",
     ]
+
+
+def test_condition_section_interleaves_standards_and_images(tmp_path):
+    template = tmp_path / "t.docx"
+    Document().save(template)
+    node = TestNode(test_name="组合")
+    node.apply_standards(
+        [
+            TestStandard(
+                standard_id="S1",
+                chapter="1",
+                test_name="机械冲击",
+                standard_desc="冲击条件正文。",
+                images=[_MIN_PNG],
+            ),
+            TestStandard(
+                standard_id="S2",
+                chapter="2",
+                test_name="防尘实验",
+                standard_desc="防尘条件正文。",
+                images=[_MIN_PNG, _MIN_PNG],
+            ),
+        ]
+    )
+    gen = WordGenerator(str(template))
+    doc = Document()
+    anchor = doc.add_paragraph("ANCHOR")
+    gen._insert_condition_section(doc, anchor, node)
+    paras = [p for p in doc.paragraphs if p.text != "ANCHOR"]
+
+    mechanical_idx = next(i for i, p in enumerate(paras) if p.text == "机械冲击")
+    dust_idx = next(i for i, p in enumerate(paras) if p.text == "防尘实验")
+    assert mechanical_idx < dust_idx
+    assert any(_para_has_image(p) for p in paras[mechanical_idx:dust_idx])
+    assert paras[mechanical_idx + 2].text == ""
+    assert _para_has_image(paras[mechanical_idx + 3])
+
+    dust_images = [i for i, p in enumerate(paras) if i > dust_idx and _para_has_image(p)]
+    assert len(dust_images) == 2
+    assert paras[dust_images[0] - 1].text == ""
+    assert paras[dust_images[1] - 1].text == ""
 
 
 def test_prepare_embed_stream_downscales_to_330ppi():

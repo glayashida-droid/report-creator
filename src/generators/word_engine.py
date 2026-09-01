@@ -45,6 +45,7 @@ from src.models.project_state import (
     TestNode,
     TestResult,
     TestSample,
+    TestStandard,
 )
 
 # Fixed section-(1) text kept in the Chinese template contract
@@ -1139,8 +1140,7 @@ class WordGenerator:
         self._add_para_before(
             doc, anchor, f"（4）{self._L('检测条件', 'Test condition')}：", size=SIZE_BODY
         )
-        self._insert_condition_blocks(doc, anchor, node)
-        self._insert_condition_images(doc, anchor, node)
+        self._insert_condition_section(doc, anchor, node)
 
         qty = len([s for s in (node.samples or []) if s.sample_id])
         self._add_para_before(
@@ -1246,36 +1246,57 @@ class WordGenerator:
             for i, v in enumerate(vals):
                 self._set_cell_text(table.rows[idx].cells[i], v)
 
+    def _emit_condition_body(
+        self, doc: Document, anchor: Paragraph, zh: str, en: str, *, indent: str = "  "
+    ) -> None:
+        lang = self._lang()
+        zh = (zh or "").strip()
+        en = (en or "").strip()
+        if lang == "英文":
+            texts = [en] if en else [""]
+        elif lang == "中英文":
+            texts = [t for t in (zh, en) if t] or ["/"]
+        else:
+            texts = [zh] if zh else ["/"]
+        for body in texts:
+            if not body and lang == "英文":
+                continue
+            for block in re.split(r"\n+", body):
+                text = block.strip()
+                if text:
+                    self._add_para_before(doc, anchor, indent + text, size=SIZE_BODY)
+
+    def _insert_condition_text_for_standard(
+        self, doc: Document, anchor: Paragraph, std: TestStandard
+    ) -> None:
+        """One standard: trial name + indented condition body."""
+        title = (std.field_title() or std.test_name or "").strip() or "/"
+        self._add_para_before(doc, anchor, title, size=SIZE_BODY)
+        self._emit_condition_body(doc, anchor, std.standard_desc or "", std.standard_desc_en or "")
+
+    def _insert_condition_images_for_standard(
+        self, doc: Document, anchor: Paragraph, blobs: Sequence[bytes]
+    ) -> None:
+        """Embed one standard's condition images with a blank line between each."""
+        for i, blob in enumerate(blobs):
+            width = self._condition_image_width_in(blob)
+            self._add_picture_bytes_before(doc, anchor, blob, width)
+            if i < len(blobs) - 1:
+                self._add_para_before(doc, anchor, "", size=SIZE_BODY)
+
+    def _insert_condition_blank(self, doc: Document, anchor: Paragraph) -> None:
+        self._add_para_before(doc, anchor, "", size=SIZE_BODY)
+
     def _insert_condition_blocks(self, doc: Document, anchor: Paragraph, node: TestNode):
         """检测条件：每条标准先写试验名称，再写缩进两格的条件正文。"""
         stds = node.resolved_standards()
-        lang = self._lang()
-        indent = "  "
-
-        def emit_body(zh: str, en: str):
-            zh = (zh or "").strip()
-            en = (en or "").strip()
-            if lang == "英文":
-                texts = [en] if en else [""]
-            elif lang == "中英文":
-                texts = [t for t in (zh, en) if t] or ["/"]
-            else:
-                texts = [zh] if zh else ["/"]
-            for body in texts:
-                if not body and lang == "英文":
-                    continue
-                for block in re.split(r"\n+", body):
-                    text = block.strip()
-                    if text:
-                        self._add_para_before(doc, anchor, indent + text, size=SIZE_BODY)
-
         if not stds:
-            emit_body(node.standard_desc or "", node.standard_desc_en or "")
+            self._emit_condition_body(
+                doc, anchor, node.standard_desc or "", node.standard_desc_en or "", indent=""
+            )
             return
         for std in stds:
-            title = (std.field_title() or std.test_name or "").strip() or "/"
-            self._add_para_before(doc, anchor, title, size=SIZE_BODY)
-            emit_body(std.standard_desc or "", std.standard_desc_en or "")
+            self._insert_condition_text_for_standard(doc, anchor, std)
 
     def _insert_condition_images(self, doc: Document, anchor: Paragraph, node: TestNode):
         blobs: List[bytes] = []
@@ -1283,9 +1304,23 @@ class WordGenerator:
             for blob in std.images or []:
                 if blob:
                     blobs.append(blob)
-        for blob in blobs:
-            width = self._condition_image_width_in(blob)
-            self._add_picture_bytes_before(doc, anchor, blob, width)
+        self._insert_condition_images_for_standard(doc, anchor, blobs)
+
+    def _insert_condition_section(self, doc: Document, anchor: Paragraph, node: TestNode):
+        """检测条件：每条标准先文字、空行、图片，标准之间再空一行。"""
+        stds = node.resolved_standards()
+        if not stds:
+            self._insert_condition_blocks(doc, anchor, node)
+            self._insert_condition_images(doc, anchor, node)
+            return
+        for i, std in enumerate(stds):
+            self._insert_condition_text_for_standard(doc, anchor, std)
+            blobs = [blob for blob in (std.images or []) if blob]
+            if blobs:
+                self._insert_condition_blank(doc, anchor)
+                self._insert_condition_images_for_standard(doc, anchor, blobs)
+            if i < len(stds) - 1:
+                self._insert_condition_blank(doc, anchor)
 
     def _result_desc_texts(self, node: TestNode) -> List[str]:
         """One 试验结果 text per result table, in selection order.
