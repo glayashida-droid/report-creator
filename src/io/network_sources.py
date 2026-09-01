@@ -28,6 +28,10 @@ REPORT_TEMPLATE_4SIGN_FILES = {
 }
 REPORT_TEMPLATE_FALLBACK = "template_raw.docx"
 
+SOURCE_CONFIGURED = "configured"
+SOURCE_FALLBACK = "fallback"
+SOURCE_MIXED = "mixed"
+
 
 @dataclass(frozen=True)
 class EquipmentListSource:
@@ -72,10 +76,58 @@ class ProbeResult:
     equipment_error: str
     standards_error: str
     templates_error: str
+    equipment_source: str = ""
+    standards_source: str = ""
+    templates_source: str = ""
+    leg_templates_path: Optional[str] = None
+    report_templates_path: Optional[str] = None
+    data_tables_path: Optional[str] = None
+    leg_templates_source: str = ""
+    report_templates_source: str = ""
+    data_tables_source: str = ""
+
+    @property
+    def all_configured_connected(self) -> bool:
+        return (
+            self.equipment_ok
+            and self.standards_ok
+            and self.templates_ok
+            and self.equipment_source == SOURCE_CONFIGURED
+            and self.standards_source == SOURCE_CONFIGURED
+            and self.templates_source == SOURCE_CONFIGURED
+        )
 
 
 def default_config_path() -> Path:
     return repo_root() / "config.json"
+
+
+def local_fallback_root() -> Path:
+    return repo_root() / "templates"
+
+
+def local_fallback_for(kind: str) -> Path:
+    root = local_fallback_root()
+    mapping = {
+        "equipment_list": root,
+        "standards_library": root / "standard sheet" / "标准库.xlsx",
+        "leg_templates": root / "leg_templates",
+        "report_templates": root / "report_templates",
+        "data_tables": root / "data_tables",
+    }
+    return mapping[kind]
+
+
+def connection_kind(source: str, configured_raw: str) -> str:
+    """Label a resolved source as 网络 or 本地 for UI tooltips."""
+    if source == SOURCE_FALLBACK:
+        return "本地"
+    if source != SOURCE_CONFIGURED:
+        return ""
+    text = (configured_raw or "").strip()
+    if text.startswith("smb://") or text.startswith("\\\\") or text.startswith("/Volumes/"):
+        return "网络"
+    return "本地"
 
 
 def _directory_source(raw: dict, key: str, default: str = "") -> DirectorySource:
@@ -284,6 +336,29 @@ def normalize_config_path(value: str) -> str:
     return text
 
 
+def _directory_usable(path: Path) -> bool:
+    ok, _err = probe_accessible_directory(path, "")
+    return ok
+
+
+def _pick_usable_directory(configured: str, fallback: Path) -> Tuple[Optional[Path], str]:
+    text = (configured or "").strip()
+    if text:
+        path = Path(normalize_config_path(text))
+        if _directory_usable(path):
+            return path, SOURCE_CONFIGURED
+    if _directory_usable(fallback):
+        return fallback, SOURCE_FALLBACK
+    if text:
+        return Path(normalize_config_path(text)), SOURCE_CONFIGURED
+    return None, ""
+
+
+def _resolved_directory(configured: str, kind: str) -> Path:
+    path, _source = _pick_usable_directory(configured, local_fallback_for(kind))
+    return path if path is not None else local_fallback_for(kind)
+
+
 def resolve_directory(source: DirectorySource) -> Optional[Path]:
     path_text = normalize_config_path(source.directory)
     if not path_text:
@@ -299,17 +374,17 @@ def resolve_config_directory(configured: str) -> Path:
 
 def leg_templates_directory(config: Optional[NetworkSourcesConfig] = None) -> Path:
     cfg = config or load_network_sources_config()
-    return resolve_config_directory(cfg.leg_templates.directory)
+    return _resolved_directory(cfg.leg_templates.directory, "leg_templates")
 
 
 def report_templates_directory(config: Optional[NetworkSourcesConfig] = None) -> Path:
     cfg = config or load_network_sources_config()
-    return resolve_config_directory(cfg.report_templates.directory)
+    return _resolved_directory(cfg.report_templates.directory, "report_templates")
 
 
 def data_table_templates_directory(config: Optional[NetworkSourcesConfig] = None) -> Path:
     cfg = config or load_network_sources_config()
-    return resolve_config_directory(cfg.data_tables.directory)
+    return _resolved_directory(cfg.data_tables.directory, "data_tables")
 
 
 def resolve_report_template_file(
@@ -350,13 +425,7 @@ def _date_from_filename(name: str, prefix: str) -> Optional[int]:
         return None
 
 
-def resolve_equipment_list_file(source: EquipmentListSource) -> Optional[Path]:
-    directory = normalize_config_path(source.directory)
-    if not directory:
-        return None
-    folder = Path(directory)
-    if not _safe_is_dir(folder):
-        return None
+def _pick_equipment_file(folder: Path, source: EquipmentListSource) -> Optional[Path]:
     ext = source.extension if source.extension.startswith(".") else f".{source.extension}"
     pattern = f"{source.file_prefix}*{ext}"
     matches = _safe_glob(folder, pattern)
@@ -372,12 +441,47 @@ def resolve_equipment_list_file(source: EquipmentListSource) -> Optional[Path]:
     return max(matches, key=sort_key)
 
 
-def resolve_standards_library_file(source: StandardsLibrarySource) -> Optional[Path]:
+def _resolve_equipment_list(source: EquipmentListSource) -> Tuple[Optional[Path], str]:
+    directory = normalize_config_path(source.directory)
+    if directory:
+        folder = Path(directory)
+        if _directory_usable(folder):
+            return _pick_equipment_file(folder, source), SOURCE_CONFIGURED
+    fallback_dir = local_fallback_for("equipment_list")
+    if _directory_usable(fallback_dir):
+        found = _pick_equipment_file(fallback_dir, source)
+        if found is not None:
+            return found, SOURCE_FALLBACK
+        return None, SOURCE_FALLBACK
+    return None, SOURCE_CONFIGURED if directory else ""
+
+
+def resolve_equipment_list_file(source: EquipmentListSource) -> Optional[Path]:
+    path, _kind = _resolve_equipment_list(source)
+    return path
+
+
+def _resolve_standards_library(source: StandardsLibrarySource) -> Tuple[Optional[Path], str]:
     path_text = normalize_config_path(source.file)
-    if not path_text:
-        return None
-    path = Path(path_text)
-    return path if _safe_is_file(path) else None
+    path = Path(path_text) if path_text else None
+    if path is not None:
+        ok, _err = probe_readable_file(path)
+        if ok:
+            return path, SOURCE_CONFIGURED
+        if _directory_usable(path.parent):
+            return (path if _safe_is_file(path) else None), SOURCE_CONFIGURED
+    fallback = local_fallback_for("standards_library")
+    ok, _err = probe_readable_file(fallback)
+    if ok:
+        return fallback, SOURCE_FALLBACK
+    if path is not None:
+        return (path if _safe_is_file(path) else None), SOURCE_CONFIGURED
+    return None, ""
+
+
+def resolve_standards_library_file(source: StandardsLibrarySource) -> Optional[Path]:
+    path, _kind = _resolve_standards_library(source)
+    return path
 
 
 def probe_readable_file(path: Optional[Path]) -> Tuple[bool, str]:
@@ -411,15 +515,31 @@ def probe_accessible_directory(path: Optional[Path], label: str) -> Tuple[bool, 
     return True, ""
 
 
+def _combine_sources(*sources: str) -> str:
+    present = {item for item in sources if item}
+    if not present:
+        return ""
+    if present == {SOURCE_CONFIGURED}:
+        return SOURCE_CONFIGURED
+    if present == {SOURCE_FALLBACK}:
+        return SOURCE_FALLBACK
+    return SOURCE_MIXED
+
+
+def _path_text(path: Optional[Path]) -> Optional[str]:
+    return str(path) if path is not None else None
+
+
 def probe_template_sources(config: NetworkSourcesConfig) -> Tuple[bool, str]:
     errors: list[str] = []
+    (leg_dir, _leg_src), (report_dir, _report_src), (data_dir, _data_src) = (
+        resolve_template_locations(config)
+    )
 
-    leg_dir = resolve_directory(config.leg_templates)
     ok, err = probe_accessible_directory(leg_dir, "Leg模板")
     if not ok:
         errors.append(err)
 
-    report_dir = resolve_directory(config.report_templates)
     ok, err = probe_accessible_directory(report_dir, "报告模板")
     if not ok:
         errors.append(err)
@@ -428,7 +548,6 @@ def probe_template_sources(config: NetworkSourcesConfig) -> Tuple[bool, str]:
             if not _safe_is_file(report_dir / filename):
                 errors.append(f"报告模板缺少 {filename}")
 
-    data_dir = resolve_directory(config.data_tables)
     ok, err = probe_accessible_directory(data_dir, "数据表模板")
     if not ok:
         errors.append(err)
@@ -438,11 +557,25 @@ def probe_template_sources(config: NetworkSourcesConfig) -> Tuple[bool, str]:
     return True, ""
 
 
+def resolve_template_locations(
+    config: NetworkSourcesConfig,
+) -> list[Tuple[Optional[Path], str]]:
+    return [
+        _pick_usable_directory(config.leg_templates.directory, local_fallback_for("leg_templates")),
+        _pick_usable_directory(
+            config.report_templates.directory, local_fallback_for("report_templates")
+        ),
+        _pick_usable_directory(config.data_tables.directory, local_fallback_for("data_tables")),
+    ]
+
+
 def probe_network_sources(config: Optional[NetworkSourcesConfig] = None) -> ProbeResult:
     """Probe configured paths for readability only — no Finder/SMB open (avoids focus steal)."""
     cfg = config or load_network_sources_config()
-    equipment_path = resolve_equipment_list_file(cfg.equipment_list)
-    standards_path = resolve_standards_library_file(cfg.standards_library)
+    equipment_path, equipment_source = _resolve_equipment_list(cfg.equipment_list)
+    standards_path, standards_source = _resolve_standards_library(cfg.standards_library)
+    locations = resolve_template_locations(cfg)
+    (leg_dir, leg_source), (report_dir, report_source), (data_dir, data_source) = locations
     equipment_ok, equipment_error = probe_readable_file(equipment_path)
     standards_ok, standards_error = probe_readable_file(standards_path)
     templates_ok, templates_error = probe_template_sources(cfg)
@@ -459,4 +592,13 @@ def probe_network_sources(config: Optional[NetworkSourcesConfig] = None) -> Prob
         equipment_error=equipment_error,
         standards_error=standards_error,
         templates_error=templates_error,
+        equipment_source=equipment_source,
+        standards_source=standards_source,
+        templates_source=_combine_sources(leg_source, report_source, data_source),
+        leg_templates_path=_path_text(leg_dir),
+        report_templates_path=_path_text(report_dir),
+        data_tables_path=_path_text(data_dir),
+        leg_templates_source=leg_source,
+        report_templates_source=report_source,
+        data_tables_source=data_source,
     )

@@ -27,6 +27,7 @@ from src.io.sample_files import find_sample_files
 from src.io.network_sources import (
     NetworkSourcesConfig,
     ProbeResult,
+    connection_kind,
     load_network_sources_config,
     probe_network_sources,
     resolve_report_template_for_language,
@@ -178,10 +179,54 @@ def _is_blank_project_date(value: QDate) -> bool:
     return (not value.isValid()) or value.year() < _EARLIEST_REAL_YEAR
 
 
+def _conn_tooltip(kind: str, path: Optional[str], error: str, ok: bool) -> str:
+    lines = []
+    if kind:
+        lines.append(kind)
+    if path:
+        lines.append(path)
+    if not ok and error and error not in lines:
+        lines.append(error)
+    return "\n".join(lines)
+
+
+def _templates_tooltip(result: ProbeResult, config: NetworkSourcesConfig) -> str:
+    rows = (
+        (
+            "报告模板",
+            result.report_templates_path,
+            result.report_templates_source,
+            config.report_templates.directory,
+        ),
+        (
+            "Leg模板",
+            result.leg_templates_path,
+            result.leg_templates_source,
+            config.leg_templates.directory,
+        ),
+        (
+            "数据表模板",
+            result.data_tables_path,
+            result.data_tables_source,
+            config.data_tables.directory,
+        ),
+    )
+    lines = []
+    for label, path, source, raw in rows:
+        kind = connection_kind(source, raw)
+        suffix = f" [{kind}]" if kind else ""
+        lines.append(f"{label}{suffix}")
+        lines.append(path or "（未找到）")
+    if not result.templates_ok and result.templates_error:
+        lines.append(result.templates_error)
+    return "\n".join(lines)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"Report Creator---Ver{APP_VERSION}  Design by IKARUGA")
+        self.setAttribute(Qt.WA_AlwaysShowToolTips)
         self.resize(1100, 620)
         self.setMinimumSize(880, 480)
         self.state = ProjectState()
@@ -213,6 +258,7 @@ class MainWindow(QMainWindow):
 
         # 1. Project Locator (compact)
         top_panel = QGroupBox("项目定位")
+        top_panel.setAttribute(Qt.WA_AlwaysShowToolTips)
         top_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         top_outer = QVBoxLayout(top_panel)
         top_outer.setContentsMargins(8, 6, 8, 6)
@@ -274,6 +320,14 @@ class MainWindow(QMainWindow):
         self.chk_mirror_conn = QCheckBox("本地镜像ok")
         self.chk_mirror_conn.setObjectName("connectionStatus")
         self.chk_mirror_conn.setEnabled(False)
+        for chk in (
+            self.chk_equipment_conn,
+            self.chk_standards_conn,
+            self.chk_templates_conn,
+            self.chk_mirror_conn,
+        ):
+            chk.setAttribute(Qt.WA_AlwaysShowToolTips)
+        self.chk_mirror_conn.setToolTip("尚未加载项目")
         self.lbl_mirror_status = QLabel("")
         self.lbl_mirror_status.setObjectName("dimLabel")
         self.btn_open_local = QPushButton("打开")
@@ -1297,6 +1351,12 @@ class MainWindow(QMainWindow):
         )
         self.btn_open_local.setVisible(ready)
         self.chk_mirror_conn.setChecked(ready)
+        if ready:
+            self.chk_mirror_conn.setToolTip(f"本地\n{self._local_path}")
+        elif self._local_path is not None:
+            self.chk_mirror_conn.setToolTip(f"本地镜像未就绪\n{self._local_path}")
+        else:
+            self.chk_mirror_conn.setToolTip("尚未加载项目")
 
     def _start_network_probe(self):
         if self._network_probe_worker is not None and self._network_probe_worker.isRunning():
@@ -1314,20 +1374,31 @@ class MainWindow(QMainWindow):
             equipment_path=result.equipment_path,
             equipment_ok=result.equipment_ok,
         )
-        self._network_all_connected = (
-            result.equipment_ok and result.standards_ok and result.templates_ok
-        )
+        self._network_all_connected = result.all_configured_connected
         self.chk_equipment_conn.setChecked(result.equipment_ok)
         self.chk_standards_conn.setChecked(result.standards_ok)
         self.chk_templates_conn.setChecked(result.templates_ok)
+        cfg = self._network_config
         self.chk_equipment_conn.setToolTip(
-            "" if result.equipment_ok else (result.equipment_error or "设备清单未连接")
+            _conn_tooltip(
+                connection_kind(result.equipment_source, cfg.equipment_list.directory),
+                result.equipment_path,
+                result.equipment_error,
+                result.equipment_ok,
+            )
+            or (result.equipment_error or "设备清单未连接")
         )
         self.chk_standards_conn.setToolTip(
-            "" if result.standards_ok else (result.standards_error or "标准库未连接")
+            _conn_tooltip(
+                connection_kind(result.standards_source, cfg.standards_library.file),
+                result.standards_path,
+                result.standards_error,
+                result.standards_ok,
+            )
+            or (result.standards_error or "标准库未连接")
         )
         self.chk_templates_conn.setToolTip(
-            "" if result.templates_ok else (result.templates_error or "模板未连接")
+            _templates_tooltip(result, cfg) or (result.templates_error or "模板未连接")
         )
         self._schedule_network_probe()
 

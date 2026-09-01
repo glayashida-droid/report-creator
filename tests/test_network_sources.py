@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from unittest.mock import patch
 
 from src.io.network_sources import (
     EquipmentListSource,
+    SOURCE_CONFIGURED,
+    SOURCE_FALLBACK,
+    SOURCE_MIXED,
     _safe_is_dir,
     attempt_mount_network_shares,
+    connection_kind,
     load_network_sources_config,
     normalize_config_path,
     probe_network_sources,
     probe_template_sources,
+    report_templates_directory,
     resolve_equipment_list_file,
     resolve_report_template_for_language,
 )
@@ -167,6 +173,10 @@ def test_probe_network_sources_with_local_files(tmp_path: Path):
     assert result.templates_ok is True
     assert result.equipment_path.endswith("01-设备清单-20260825.xlsx")
     assert result.standards_path.endswith("标准库.xlsx")
+    assert result.equipment_source == SOURCE_CONFIGURED
+    assert result.standards_source == SOURCE_CONFIGURED
+    assert result.templates_source == SOURCE_CONFIGURED
+    assert result.all_configured_connected is True
 
 
 def test_probe_network_sources_does_not_auto_mount(tmp_path: Path):
@@ -271,3 +281,171 @@ def test_db_loader_network_mode_clears_equipment_cache_on_path_change(tmp_path: 
     )
     assert loader._equipment_path == str(second)
     assert loader.equipments_df is None
+
+
+def _make_fallback_tree(root: Path) -> Path:
+    (root / "standard sheet").mkdir(parents=True)
+    (root / "standard sheet" / "标准库.xlsx").write_bytes(b"std")
+    (root / "leg_templates").mkdir()
+    (root / "report_templates").mkdir()
+    for name in ("template_zh.docx", "template_en.docx", "template_ze.docx"):
+        (root / "report_templates" / name).write_bytes(b"t")
+    (root / "data_tables").mkdir()
+    (root / "01-设备清单-20260825.xlsx").write_bytes(b"eq")
+    return root
+
+
+def test_connection_kind_labels():
+    assert connection_kind(SOURCE_FALLBACK, "smb://host/share") == "本地"
+    assert connection_kind(SOURCE_CONFIGURED, "smb://10.10.31.8/材料实验室a/x") == "网络"
+    assert connection_kind(SOURCE_CONFIGURED, "\\\\10.10.31.8\\share") == "网络"
+    assert connection_kind(SOURCE_CONFIGURED, "/Volumes/材料实验室a/x") == "网络"
+    assert connection_kind(SOURCE_CONFIGURED, "/tmp/local") == "本地"
+    assert connection_kind("", "smb://host/share") == ""
+
+
+def test_probe_falls_back_to_local_when_configured_missing(tmp_path: Path):
+    fallback = _make_fallback_tree(tmp_path / "local_templates")
+    cfg_path = _write_config(
+        tmp_path,
+        network_sources={
+            "equipment_list": {
+                "directory": str(tmp_path / "missing_eq"),
+                "file_prefix": "01-设备清单",
+                "extension": ".xlsx",
+            },
+            "standards_library": {"file": str(tmp_path / "missing" / "标准库.xlsx")},
+            "leg_templates": {"directory": str(tmp_path / "missing_leg")},
+            "report_templates": {"directory": str(tmp_path / "missing_report")},
+            "data_tables": {"directory": str(tmp_path / "missing_data")},
+        },
+    )
+    config = load_network_sources_config(cfg_path)
+    with patch("src.io.network_sources.local_fallback_root", return_value=fallback):
+        result = probe_network_sources(config)
+        picked = resolve_equipment_list_file(config.equipment_list)
+        report_dir = report_templates_directory(config)
+    assert result.equipment_ok is True
+    assert result.standards_ok is True
+    assert result.templates_ok is True
+    assert result.equipment_source == SOURCE_FALLBACK
+    assert result.standards_source == SOURCE_FALLBACK
+    assert result.templates_source == SOURCE_FALLBACK
+    assert result.all_configured_connected is False
+    assert picked == fallback / "01-设备清单-20260825.xlsx"
+    assert report_dir == fallback / "report_templates"
+    assert str(fallback) in (result.equipment_path or "")
+    assert str(fallback) in (result.standards_path or "")
+
+
+def test_probe_prefers_configured_over_local_fallback(tmp_path: Path):
+    fallback = _make_fallback_tree(tmp_path / "local_templates")
+    cfg_path = _write_config(tmp_path)
+    config = load_network_sources_config(cfg_path)
+    with patch("src.io.network_sources.local_fallback_root", return_value=fallback):
+        result = probe_network_sources(config)
+    assert result.equipment_source == SOURCE_CONFIGURED
+    assert result.standards_source == SOURCE_CONFIGURED
+    assert result.templates_source == SOURCE_CONFIGURED
+    assert result.all_configured_connected is True
+    assert str(fallback) not in (result.equipment_path or "")
+    assert str(fallback) not in (result.standards_path or "")
+
+
+def test_probe_does_not_fallback_when_configured_dir_usable_but_file_missing(
+    tmp_path: Path,
+):
+    fallback = _make_fallback_tree(tmp_path / "local_templates")
+    cfg_path = _write_config(tmp_path)
+    config = load_network_sources_config(cfg_path)
+    (Path(config.report_templates.directory) / "template_en.docx").unlink()
+    with patch("src.io.network_sources.local_fallback_root", return_value=fallback):
+        result = probe_network_sources(config)
+    assert result.templates_ok is False
+    assert result.report_templates_source == SOURCE_CONFIGURED
+    assert "template_en.docx" in result.templates_error
+
+
+def test_templates_mixed_fallback_when_one_dir_missing(tmp_path: Path):
+    fallback = _make_fallback_tree(tmp_path / "local_templates")
+    cfg_path = _write_config(tmp_path)
+    config = load_network_sources_config(cfg_path)
+    shutil.rmtree(config.report_templates.directory)
+    with patch("src.io.network_sources.local_fallback_root", return_value=fallback):
+        result = probe_network_sources(config)
+    assert result.templates_ok is True
+    assert result.report_templates_source == SOURCE_FALLBACK
+    assert result.leg_templates_source == SOURCE_CONFIGURED
+    assert result.data_tables_source == SOURCE_CONFIGURED
+    assert result.templates_source == SOURCE_MIXED
+    assert result.all_configured_connected is False
+    assert str(fallback / "report_templates") == result.report_templates_path
+
+
+def test_standards_does_not_fallback_when_parent_usable_but_file_missing(tmp_path: Path):
+    fallback = _make_fallback_tree(tmp_path / "local_templates")
+    cfg_path = _write_config(tmp_path)
+    config = load_network_sources_config(cfg_path)
+    Path(config.standards_library.file).unlink()
+    with patch("src.io.network_sources.local_fallback_root", return_value=fallback):
+        result = probe_network_sources(config)
+    assert result.standards_ok is False
+    assert result.standards_source == SOURCE_CONFIGURED
+
+
+def test_equipment_does_not_fallback_when_configured_dir_empty(tmp_path: Path):
+    fallback = _make_fallback_tree(tmp_path / "local_templates")
+    cfg_path = _write_config(tmp_path)
+    config = load_network_sources_config(cfg_path)
+    for path in Path(config.equipment_list.directory).glob("01-设备清单*"):
+        path.unlink()
+    with patch("src.io.network_sources.local_fallback_root", return_value=fallback):
+        result = probe_network_sources(config)
+    assert result.equipment_ok is False
+    assert result.equipment_source == SOURCE_CONFIGURED
+
+
+def test_conn_tooltip_shows_kind_and_path():
+    from src.io.network_sources import (
+        ConnectionCheckConfig,
+        DirectorySource,
+        NetworkSourcesConfig,
+        ProbeResult,
+        StandardsLibrarySource,
+    )
+    from src.ui.main_window import _conn_tooltip, _templates_tooltip
+
+    assert _conn_tooltip("本地", "/tmp/templates/01.xlsx", "", True) == (
+        "本地\n/tmp/templates/01.xlsx"
+    )
+    assert "无法访问" in _conn_tooltip("", None, "无法访问 /missing", False)
+
+    cfg = NetworkSourcesConfig(
+        equipment_list=EquipmentListSource(directory="smb://host/eq", file_prefix="01-设备清单"),
+        standards_library=StandardsLibrarySource(file="smb://host/std.xlsx"),
+        leg_templates=DirectorySource(directory="smb://host/leg"),
+        report_templates=DirectorySource(directory="smb://host/report"),
+        data_tables=DirectorySource(directory="smb://host/data"),
+        connection_check=ConnectionCheckConfig(),
+    )
+    probed = ProbeResult(
+        equipment_ok=True,
+        standards_ok=True,
+        templates_ok=True,
+        equipment_path=None,
+        standards_path=None,
+        equipment_error="",
+        standards_error="",
+        templates_error="",
+        templates_source=SOURCE_FALLBACK,
+        leg_templates_path="/tmp/leg",
+        report_templates_path="/tmp/report",
+        data_tables_path="/tmp/data",
+        leg_templates_source=SOURCE_FALLBACK,
+        report_templates_source=SOURCE_FALLBACK,
+        data_tables_source=SOURCE_FALLBACK,
+    )
+    tip = _templates_tooltip(probed, cfg)
+    assert "报告模板 [本地]" in tip
+    assert "/tmp/report" in tip
+    assert "Leg模板 [本地]" in tip
