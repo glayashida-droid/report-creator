@@ -25,6 +25,14 @@ from src.io.to_numbers import apply_autoliv_to_numbers
 from application_parser import parse_application, prepare_excel_bytes
 from src.parsers.pdf_parser import QuotationParser
 from src.io.project_mirror import incremental_copy, list_saved_projects, local_project_dir
+from src.io.project_sync import (
+    RemoteJsonError,
+    is_remote_json_newer,
+    load_json_from_remote,
+    local_state_path,
+    save_json_to_remote_then_local,
+    write_local_json_cache,
+)
 from src.io.sample_files import find_sample_files
 from src.io.network_sources import (
     NetworkSourcesConfig,
@@ -1161,6 +1169,22 @@ class MainWindow(QMainWindow):
         self._project_path = project_path
         self._mirror_ready = False
 
+        remote_state = load_json_from_remote(project_path)
+        if remote_state is not None:
+            remote_state.source_path = str(project_path)
+            remote_state.project_path = str(local_path)
+            remote_state.project_id = remote_state.project_id or project_id
+            self.state = remote_state
+            write_local_json_cache(self.state, local_path)
+            refresh_special_profile(self.state)
+            self._mount_tester_on_project()
+            self._apply_state_to_ui()
+            self._set_path_text(str(project_path))
+            self._set_mirror_status("镜像中...", "dim")
+            self._start_mirror(project_path, local_path)
+            self._is_dirty = False
+            return
+
         self.state = ProjectState(
             project_id=project_id,
             source_path=str(project_path),
@@ -1574,11 +1598,50 @@ class MainWindow(QMainWindow):
             self._local_path = local_project_dir(self.state.project_id)
         self._local_path.mkdir(parents=True, exist_ok=True)
         self.state.project_path = str(self._local_path)
-        save_path = self._local_path / "project_state.json"
-        self.state.save_to_file(str(save_path))
+        if not self._persist_project_json():
+            return False
         self._is_dirty = False
         if show_success:
             SaveSuccessDialog(self).exec()
+        return True
+
+    def _persist_project_json(self) -> bool:
+        """Write JSON: remote first when source_path is set, then local cache."""
+        local = self._local_path
+        if local is None:
+            return False
+        remote = self._source_project_path()
+        configured = (self.state.source_path or "").strip()
+        if remote is not None:
+            try:
+                same_as_local = remote.resolve() == local.resolve()
+            except OSError:
+                same_as_local = False
+            if not same_as_local:
+                try:
+                    save_json_to_remote_then_local(self.state, local, remote)
+                except RemoteJsonError as exc:
+                    QMessageBox.warning(
+                        self,
+                        "保存失败",
+                        f"明细未保存（修改仍保留）。\n{exc}",
+                    )
+                    return False
+                return True
+        elif configured:
+            try:
+                configured_path = Path(configured)
+                same_as_local = configured_path.resolve() == local.resolve()
+            except OSError:
+                same_as_local = False
+            if not same_as_local:
+                QMessageBox.warning(
+                    self,
+                    "保存失败",
+                    "公盘路径不可访问，明细未保存（本地未更新，修改仍保留）。\n请检查网络后重试。",
+                )
+                return False
+        self.state.save_to_file(str(local_state_path(local)))
         return True
 
     def load_saved_state(self):
@@ -1597,6 +1660,35 @@ class MainWindow(QMainWindow):
         loaded = ProjectState.load_from_file(str(saved.json_path))
         loaded.project_id = loaded.project_id or saved.project_id
         loaded.project_path = str(saved.local_path)
+
+        source_raw = (loaded.source_path or "").strip()
+        remote_path = Path(source_raw) if source_raw else None
+        remote_available = remote_path is not None and remote_path.is_dir()
+        if remote_available:
+            use_remote = True
+            if is_remote_json_newer(saved.local_path, remote_path):
+                reply = QMessageBox.question(
+                    self,
+                    "公盘有更新",
+                    "公盘上的 project_state.json 比本地缓存新。是否用公盘版本加载？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                use_remote = reply == QMessageBox.Yes
+            if use_remote:
+                remote_state = load_json_from_remote(remote_path)
+                if remote_state is not None:
+                    remote_state.project_id = remote_state.project_id or saved.project_id
+                    remote_state.source_path = source_raw or remote_state.source_path
+                    remote_state.project_path = str(saved.local_path)
+                    loaded = remote_state
+                    write_local_json_cache(loaded, saved.local_path)
+        elif source_raw:
+            QMessageBox.warning(
+                self,
+                "公盘不可用",
+                "公盘路径不可访问，将使用本地缓存打开。\n公盘恢复后请重新加载或保存以同步。",
+            )
 
         self.state = loaded
         refresh_special_profile(self.state)
