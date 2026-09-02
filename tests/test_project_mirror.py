@@ -38,6 +38,45 @@ def test_incremental_copy_can_cancel():
         assert incremental_copy(src, dest, cancelled=lambda: cancelled) is False
 
 
+def test_structure_mirror_skips_images_keeps_dirs_copies_light_xlsx():
+    """Structure mirror: album dirs exist, photos stay remote-only, light xlsx copies."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "src"
+        dest = Path(tmp) / "dest"
+        album = src / "3.测试组" / "Leg1-振动" / "试验前"
+        album.mkdir(parents=True)
+        (album / "shot.jpg").write_bytes(b"\xff\xd8" + b"img" * 100)
+        (album / "shot.PNG").write_bytes(b"png-bytes")
+        app_dir = src / "1.接样组"
+        app_dir.mkdir(parents=True)
+        (app_dir / "A22600000001.xlsx").write_bytes(b"small-application")
+
+        assert incremental_copy(src, dest) is True
+
+        assert (dest / "3.测试组" / "Leg1-振动" / "试验前").is_dir()
+        assert not (dest / "3.测试组" / "Leg1-振动" / "试验前" / "shot.jpg").exists()
+        assert not (dest / "3.测试组" / "Leg1-振动" / "试验前" / "shot.PNG").exists()
+        assert (dest / "1.接样组" / "A22600000001.xlsx").read_bytes() == b"small-application"
+
+
+def test_structure_mirror_skips_files_over_size_threshold():
+    from src.io.project_mirror import STRUCTURE_MIRROR_MAX_FILE_BYTES
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "src"
+        dest = Path(tmp) / "dest"
+        tables = src / "3.测试组" / "Leg1-振动" / "数据表附件"
+        tables.mkdir(parents=True)
+        (tables / "big.xlsx").write_bytes(b"x" * (STRUCTURE_MIRROR_MAX_FILE_BYTES + 1))
+        (tables / "tiny.xlsx").write_bytes(b"tiny")
+
+        assert incremental_copy(src, dest) is True
+
+        assert (dest / "3.测试组" / "Leg1-振动" / "数据表附件").is_dir()
+        assert not (dest / "3.测试组" / "Leg1-振动" / "数据表附件" / "big.xlsx").exists()
+        assert (dest / "3.测试组" / "Leg1-振动" / "数据表附件" / "tiny.xlsx").read_bytes() == b"tiny"
+
+
 def test_list_saved_projects():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -67,5 +106,7 @@ def test_list_saved_projects():
 if __name__ == "__main__":
     test_incremental_copy_and_skip_junk()
     test_incremental_copy_can_cancel()
+    test_structure_mirror_skips_images_keeps_dirs_copies_light_xlsx()
+    test_structure_mirror_skips_files_over_size_threshold()
     test_list_saved_projects()
     print("test_project_mirror: ok")

@@ -1,7 +1,9 @@
 from src.io.project_mirror import (
+    STRUCTURE_MIRROR_MAX_FILE_BYTES,
     SavedProject,
     default_data_root,
     incremental_copy,
+    is_structure_mirror_skipped,
     list_saved_projects,
     local_project_dir,
     state_file_path,
@@ -26,6 +28,7 @@ from src.io.leg_templates import (
 )
 
 __all__ = [
+    "STRUCTURE_MIRROR_MAX_FILE_BYTES",
     "SavedProject",
     "SavedLegTemplate",
     "TemplateExistsError",
@@ -36,6 +39,7 @@ __all__ = [
     "default_templates_dir",
     "incremental_copy",
     "is_remote_json_newer",
+    "is_structure_mirror_skipped",
     "list_leg_templates",
     "list_saved_projects",
     "load_json_from_remote",

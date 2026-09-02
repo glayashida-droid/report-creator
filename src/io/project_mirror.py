@@ -9,8 +9,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional
 
+from src.io.test_photos import IMAGE_EXTS
+
 SKIP_FILE_NAMES = {".DS_Store", "Thumbs.db", "project_state.json"}
 SKIP_DIR_NAMES = {".DS_Store"}
+
+# Structure mirror keeps a directory skeleton + light files only.
+# Photos and oversized attachments stay on the remote until explicit download / upload.
+STRUCTURE_MIRROR_MAX_FILE_BYTES = 1 * 1024 * 1024  # 1 MiB
 
 
 def repo_root() -> Path:
@@ -37,6 +43,20 @@ def should_skip_file(name: str) -> bool:
     return False
 
 
+def is_structure_mirror_skipped(
+    path: Path,
+    *,
+    max_bytes: int = STRUCTURE_MIRROR_MAX_FILE_BYTES,
+) -> bool:
+    """True when structure mirror should not copy this file (image or oversized)."""
+    if path.suffix.lower() in IMAGE_EXTS:
+        return True
+    try:
+        return path.stat().st_size > max_bytes
+    except OSError:
+        return True
+
+
 def _needs_copy(src: Path, dst: Path) -> bool:
     if not dst.exists():
         return True
@@ -56,11 +76,17 @@ def incremental_copy(
     src: Path,
     dest: Path,
     cancelled: Optional[Callable[[], bool]] = None,
+    *,
+    structure_only: bool = True,
 ) -> bool:
-    """Copy src into dest, skipping unchanged files.
+    """Copy src into dest as a structure mirror (dirs + light files).
 
-    Returns False if cancelled mid-copy. Never overwrites project_state.json
-    from the source tree.
+    By default skips IMAGE_EXTS originals and files larger than
+    STRUCTURE_MIRROR_MAX_FILE_BYTES, while still creating every walked
+    directory so the local skeleton remains. Always skips junk, ``~$``,
+    and never overwrites local project_state.json from the source tree.
+
+    Returns False if cancelled mid-copy.
     """
     src = Path(src)
     dest = Path(dest)
@@ -82,6 +108,8 @@ def incremental_copy(
                 continue
             src_file = Path(dirpath) / name
             if not src_file.is_file():
+                continue
+            if structure_only and is_structure_mirror_skipped(src_file):
                 continue
             dst_file = target_dir / name
             if not _needs_copy(src_file, dst_file):
