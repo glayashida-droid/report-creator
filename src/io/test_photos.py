@@ -139,11 +139,23 @@ def iter_export_photos(
     leg_name: str,
     test_name: str,
     order: Optional[Sequence[str]] = None,
+    remote_root: Optional[Path] = None,
+    temps: Optional[List[Path]] = None,
 ) -> List[Path]:
-    out: List[Path] = []
-    for album in list_albums(project_root, leg_name, test_name, order=order):
-        out.extend(list_photos(project_root, leg_name, test_name, album))
-    return out
+    """Export-ready photo paths via merge view (local + optional remote)."""
+    from src.io.project_assets import iter_merged_export_photos
+
+    return [
+        item.path
+        for item in iter_merged_export_photos(
+            project_root,
+            remote_root,
+            leg_name,
+            test_name,
+            order=order,
+            temps=temps,
+        )
+    ]
 
 
 def remap_album_order(

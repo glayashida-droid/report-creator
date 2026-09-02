@@ -357,3 +357,45 @@ def thumbnail_for_photo(
         save_kwargs = {"quality": 85} if fmt == "JPEG" else {}
         img.save(cache, fmt, **save_kwargs)
     return cache
+
+
+@dataclass(frozen=True)
+class ExportPhoto:
+    album: str
+    path: Path
+    stem: str
+
+
+def iter_merged_export_photos(
+    local_root: Optional[PathLike],
+    remote_root: Optional[PathLike],
+    leg_name: str,
+    test_name: str,
+    order: Optional[Sequence[str]] = None,
+    *,
+    temps: Optional[List[Path]] = None,
+) -> List[ExportPhoto]:
+    """Album-ordered embed paths via merge view; cloud-only materializes to temp.
+
+    Does not write into formal album directories. When ``temps`` is provided,
+    cloud temp paths are appended for the caller to delete after export.
+    """
+    out: List[ExportPhoto] = []
+    for album in list_merged_albums(local_root, remote_root, leg_name, test_name, order=order):
+        for photo in list_merged_photos(
+            local_root, remote_root, leg_name, test_name, album
+        ):
+            if photo.is_cloud_only:
+                path = original_view_path(local_root, remote_root, photo.relative_path)
+                if temps is not None:
+                    temps.append(path)
+            else:
+                path = photo.read_path
+            out.append(
+                ExportPhoto(
+                    album=album,
+                    path=path,
+                    stem=Path(photo.relative_path).stem,
+                )
+            )
+    return out

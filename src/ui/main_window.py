@@ -2107,11 +2107,13 @@ class MainWindow(QMainWindow):
                 )
                 return
 
+            remote = self._source_project_path()
             engine.generate(
                 self.state, str(out_path),
                 project_path=target_project_path, leg_filter=leg_filter,
                 report_language=lang,
                 report_no=report_no,
+                remote_root=str(remote) if remote is not None else None,
             )
 
             msg = QMessageBox(self)

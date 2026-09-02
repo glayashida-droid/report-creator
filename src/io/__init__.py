@@ -1,6 +1,7 @@
 from src.io.project_assets import (
     MergedPhoto,
     download_photo_to_album,
+    iter_merged_export_photos,
     list_merged_albums,
     list_merged_photos,
     move_photo_to_spare,
@@ -61,6 +62,7 @@ __all__ = [
     "incremental_upload",
     "is_remote_json_newer",
     "is_structure_mirror_skipped",
+    "iter_merged_export_photos",
     "list_leg_templates",
     "list_merged_albums",
     "list_merged_photos",

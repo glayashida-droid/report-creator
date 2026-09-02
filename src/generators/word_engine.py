@@ -23,7 +23,8 @@ from src.io.data_tables import (
     read_preview_snapshot,
     resolve_attachment_path,
 )
-from src.io.test_photos import list_albums, list_photos, uses_data_photo_layout
+from src.io.project_assets import iter_merged_export_photos
+from src.io.test_photos import uses_data_photo_layout
 from src.language_copy import (
     field_label,
     format_conclusion,
@@ -109,35 +110,47 @@ class WordGenerator:
         leg_filter: str = None,
         report_language: str = "中文",
         report_no: str | None = None,
+        remote_root: str = None,
     ):
         self._report_language = (report_language or "中文").strip() or "中文"
-        doc = Document(self.template_path)
-        placeholders = self._build_placeholders(
-            state, report_language=self._report_language, report_no=report_no
-        )
-        self._replace_everywhere(doc, placeholders)
-        self._tighten_cover_info_table(doc)
-        if self._report_language == "中英文":
-            self._fill_ze_cover_english(doc, state)
+        self._export_temps: list = []
+        try:
+            doc = Document(self.template_path)
+            placeholders = self._build_placeholders(
+                state, report_language=self._report_language, report_no=report_no
+            )
+            self._replace_everywhere(doc, placeholders)
+            self._tighten_cover_info_table(doc)
+            if self._report_language == "中英文":
+                self._fill_ze_cover_english(doc, state)
 
-        nodes = list(state.iter_nodes_for_export(leg_filter))
+            nodes = list(state.iter_nodes_for_export(leg_filter))
 
-        self._replace_marker_with_table(
-            doc, "{{样品信息表}}", lambda d, p: self._insert_sample_info_table(d, p, state)
-        )
-        self._replace_marker_with_table(
-            doc, "{{样品清单表}}", lambda d, p: self._insert_sample_list_table(d, p, state, [n for _, n in nodes])
-        )
-        self._replace_marker_with_table(
-            doc, "{{结果汇总表}}", lambda d, p: self._insert_summary_table(d, p, [n for _, n in nodes], state)
-        )
-        self._replace_marker_with_blocks(
-            doc,
-            "{{试验明细}}",
-            lambda d, p: self._insert_test_details(d, p, nodes, project_path),
-        )
+            self._replace_marker_with_table(
+                doc, "{{样品信息表}}", lambda d, p: self._insert_sample_info_table(d, p, state)
+            )
+            self._replace_marker_with_table(
+                doc, "{{样品清单表}}", lambda d, p: self._insert_sample_list_table(d, p, state, [n for _, n in nodes])
+            )
+            self._replace_marker_with_table(
+                doc, "{{结果汇总表}}", lambda d, p: self._insert_summary_table(d, p, [n for _, n in nodes], state)
+            )
+            self._replace_marker_with_blocks(
+                doc,
+                "{{试验明细}}",
+                lambda d, p: self._insert_test_details(
+                    d, p, nodes, project_path, remote_root
+                ),
+            )
 
-        doc.save(output_path)
+            doc.save(output_path)
+        finally:
+            for temp in getattr(self, "_export_temps", []) or []:
+                try:
+                    Path(temp).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self._export_temps = []
 
     def _lang(self) -> str:
         return self._report_language or "中文"
@@ -1098,9 +1111,12 @@ class WordGenerator:
         anchor: Paragraph,
         nodes: List[Tuple[TestLeg, TestNode]],
         project_path: Optional[str],
+        remote_root: Optional[str] = None,
     ):
         for idx, (leg, node) in enumerate(nodes, 1):
-            self._append_test_node(doc, anchor, leg, node, idx, project_path)
+            self._append_test_node(
+                doc, anchor, leg, node, idx, project_path, remote_root
+            )
 
     def _append_test_node(
         self,
@@ -1110,6 +1126,7 @@ class WordGenerator:
         node: TestNode,
         index: int,
         project_path: Optional[str],
+        remote_root: Optional[str] = None,
     ):
         # Each test item starts on a new page (matches CTI golden layout)
         self._add_page_break_before(doc, anchor)
@@ -1196,6 +1213,7 @@ class WordGenerator:
                 leg.leg_name,
                 node.test_name,
                 order=getattr(node, "photo_album_order", None) or None,
+                remote_root=Path(remote_root) if remote_root else None,
             )
 
     def _evaluation_text(self, node: TestNode) -> str:
@@ -1470,23 +1488,46 @@ class WordGenerator:
         leg_name: str,
         test_name: str,
         order=None,
+        remote_root: Optional[Path] = None,
     ):
-        albums = list_albums(project_root, leg_name, test_name, order=order)
-        if not albums:
+        temps = getattr(self, "_export_temps", None)
+        if temps is None:
+            self._export_temps = []
+            temps = self._export_temps
+        exported = iter_merged_export_photos(
+            project_root,
+            remote_root,
+            leg_name,
+            test_name,
+            order=order,
+            temps=temps,
+        )
+        if not exported:
             return
         lang = self._lang()
-        for album in albums:
-            photos = list_photos(project_root, leg_name, test_name, album)
-            if not photos:
-                continue
+        # Group by album preserving merge order
+        by_album: List[Tuple[str, List]] = []
+        for item in exported:
+            if not by_album or by_album[-1][0] != item.album:
+                by_album.append((item.album, [item]))
+            else:
+                by_album[-1][1].append(item)
+        for album, items in by_album:
             if uses_data_photo_layout(album):
-                for path in photos:
-                    self._add_picture_file_before(doc, anchor, path, DATA_PHOTO_WIDTH_IN)
-                    cap_text = photo_caption(album, lang, file_stem=path.stem)
+                for item in items:
+                    self._add_picture_file_before(doc, anchor, item.path, DATA_PHOTO_WIDTH_IN)
+                    cap_text = photo_caption(album, lang, file_stem=item.stem)
                     cap = self._add_para_before(doc, anchor, cap_text, size=SIZE_CAPTION)
                     cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
             else:
-                self._insert_photo_pairs(doc, anchor, photos, PHOTO_WIDTH_IN, album=album)
+                self._insert_photo_pairs(
+                    doc,
+                    anchor,
+                    [item.path for item in items],
+                    PHOTO_WIDTH_IN,
+                    album=album,
+                    stems=[item.stem for item in items],
+                )
 
     def _insert_photo_pairs(
         self,
@@ -1495,6 +1536,7 @@ class WordGenerator:
         photos: Sequence[Path],
         width_in: float,
         album: str = "",
+        stems: Optional[Sequence[str]] = None,
     ):
         pairs = list(photos)
         half = _CONTENT_WIDTH_DXA // 2
@@ -1518,7 +1560,12 @@ class WordGenerator:
                     err = p.add_run(f"[无法插入图片: {path.name}]")
                     self._style_run(err, size=SIZE_CAPTION)
                     print(f"Failed to add image {path}: {exc}")
-                cap_text = photo_caption(album, lang, file_stem=path.stem)
+                stem = (
+                    stems[i + col]
+                    if stems is not None and (i + col) < len(stems)
+                    else path.stem
+                )
+                cap_text = photo_caption(album, lang, file_stem=stem)
                 cap = cell.add_paragraph(cap_text)
                 cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 self._apply_tight_spacing(cap)
