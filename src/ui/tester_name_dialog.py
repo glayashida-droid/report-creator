@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -17,6 +19,7 @@ class TesterNameDialog(QDialog):
         self.setWindowTitle("测试员")
         self.setModal(True)
         self.setMinimumWidth(360)
+        self.setWindowFlag(Qt.WindowCloseButtonHint, False)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
@@ -33,10 +36,18 @@ class TesterNameDialog(QDialog):
         self.txt_name.setText((default_name or "").strip())
         layout.addWidget(self.txt_name)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok)
         buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def reject(self) -> None:
+        return
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self.result() == QDialog.Accepted:
+            super().closeEvent(event)
+            return
+        event.ignore()
 
     def tester_name(self) -> str:
         return (self.txt_name.text() or "").strip()

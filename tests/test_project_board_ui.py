@@ -1,12 +1,15 @@
 import sys
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
+import json
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
+    QLabel,
     QLineEdit,
     QProgressBar,
     QWidget,
@@ -27,6 +30,7 @@ from src.ui.project_board import (
     COL_END,
     COL_INDEX,
     COL_PROJECT,
+    COL_QTY,
     COL_SAMPLE,
     COL_STANDARDS,
     COL_STATUS,
@@ -250,6 +254,67 @@ def test_f_unlocks_board_and_back_returns():
     assert win._stack.currentWidget() is win._report_page
 
 
+def test_board_gate_hotzone_on_top_panel_matches_tester_width():
+    _app()
+    win = MainWindow()
+    win._session_tester_name = "展玮鸿"
+    win._refresh_tester_title_label()
+    QApplication.processEvents()
+    gate = win.btn_board_gate
+    assert gate.parentWidget() is win._top_panel
+    assert gate.cursor().shape() == Qt.PointingHandCursor
+    assert not gate.isHidden()
+    assert gate.width() == win.lbl_tester_title.width()
+    assert gate.objectName() == "boardGateHotzone"
+    win.close()
+
+
+def test_tester_title_click_opens_rename_not_board(monkeypatch):
+    _app()
+    win = MainWindow()
+    win._session_tester_name = "展玮鸿"
+    win._refresh_tester_title_label()
+    called = {"prompt": False, "board": False}
+
+    def fake_prompt(*, mount_project=False):
+        called["prompt"] = True
+        called["mount"] = mount_project
+        return True
+
+    monkeypatch.setattr(win, "_prompt_tester_name", fake_prompt)
+    monkeypatch.setattr(
+        win, "_unlock_project_board", lambda: called.__setitem__("board", True) or True
+    )
+    win._on_tester_title_clicked()
+    assert called["prompt"] is True
+    assert called["mount"] is True
+    assert called["board"] is False
+    win.close()
+
+
+def test_board_gate_click_opens_gate_dialog(monkeypatch):
+    _app()
+    win = MainWindow()
+    accepted = {"ok": False}
+
+    class FakeGate:
+        def exec(self):
+            accepted["ok"] = True
+            return QDialog.Accepted
+
+    monkeypatch.setattr(
+        "src.ui.main_window.BoardGateDialog", lambda parent=None: FakeGate()
+    )
+    unlocked = {"ok": False}
+    monkeypatch.setattr(
+        win, "_unlock_project_board", lambda: unlocked.__setitem__("ok", True) or True
+    )
+    win._on_board_gate_clicked()
+    assert accepted["ok"] is True
+    assert unlocked["ok"] is True
+    win.close()
+
+
 def test_search_expands_drawer_and_highlights_hit(tmp_path):
     _app()
     _save(
@@ -361,6 +426,110 @@ def test_board_columns_match_form():
     assert "试验员" not in BOARD_COLUMNS
 
 
+def test_board_sample_qty_editable_and_persists(tmp_path):
+    _app()
+    _save(
+        tmp_path,
+        ProjectState(
+            project_id="A22600000070",
+            sample_name="方向盘",
+            application_fields={"送样数量": "3"},
+            legs=[
+                TestLeg(
+                    leg_id="L1",
+                    leg_name="Leg 1",
+                    nodes=[_incomplete_node("高温试验", "2026-08-01", "2026-08-20")],
+                )
+            ],
+        ),
+    )
+    page = ProjectBoardPage(tmp_path)
+    page.reload(today=TODAY)
+    QApplication.processEvents()
+    parent = page.tree.topLevelItem(0)
+    assert parent.text(COL_QTY) == "3"
+    assert bool(parent.flags() & Qt.ItemIsEditable)
+    child = parent.child(0)
+    assert child is not None
+    assert bool(child.flags() & Qt.ItemIsEditable)
+    assert child.text(COL_QTY) == ""
+
+    parent.setText(COL_QTY, " 3+5 ")
+    QApplication.processEvents()
+    assert parent.text(COL_QTY) == "3+5"
+    assert child.text(COL_QTY) == ""
+    path = tmp_path / "A22600000070" / "project_state.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["application_fields"]["送样数量"] == "3+5"
+    assert not str(data["legs"][0]["nodes"][0].get("sample_qty") or "").strip()
+
+    page.reload(today=TODAY)
+    QApplication.processEvents()
+    assert page.tree.topLevelItem(0).text(COL_QTY) == "3+5"
+    assert page.tree.topLevelItem(0).child(0).text(COL_QTY) == ""
+    page.close()
+
+
+def test_board_sample_qty_child_edit_persists(tmp_path):
+    _app()
+    _save(
+        tmp_path,
+        ProjectState(
+            project_id="A22600000071",
+            sample_name="空数量",
+            application_fields={"送样数量": "9"},
+            legs=[
+                TestLeg(
+                    leg_id="L1",
+                    leg_name="Leg 1",
+                    nodes=[_incomplete_node("高温试验", "2026-08-01", "2026-08-20")],
+                )
+            ],
+        ),
+    )
+    page = ProjectBoardPage(tmp_path)
+    page.reload(today=TODAY)
+    QApplication.processEvents()
+    parent = page.tree.topLevelItem(0)
+    child = parent.child(0)
+    assert parent.text(COL_QTY) == "9"
+    assert child.text(COL_QTY) == ""
+
+    child.setText(COL_QTY, "2+2")
+    QApplication.processEvents()
+    assert parent.text(COL_QTY) == "9"
+    assert child.text(COL_QTY) == "2+2"
+    path = tmp_path / "A22600000071" / "project_state.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["application_fields"]["送样数量"] == "9"
+    assert data["legs"][0]["nodes"][0]["sample_qty"] == "2+2"
+    page.close()
+
+
+def test_board_qty_column_not_widened_by_json_path(tmp_path):
+    _app()
+    _save(
+        tmp_path,
+        ProjectState(
+            project_id="A22600000072",
+            sample_name="窄列",
+            application_fields={},
+            legs=[
+                TestLeg(
+                    leg_id="L1",
+                    leg_name="Leg 1",
+                    nodes=[_incomplete_node("高温试验", "2026-08-01", "2026-08-20")],
+                )
+            ],
+        ),
+    )
+    page = ProjectBoardPage(tmp_path)
+    page.reload(today=TODAY)
+    QApplication.processEvents()
+    assert page.tree.columnWidth(COL_QTY) <= 110
+    page.close()
+
+
 def test_detail_dialog_to_combo_uses_full_names():
     _app()
 
@@ -388,4 +557,104 @@ def test_detail_dialog_to_combo_uses_full_names():
     assert dlg.lbl_to.text() == "TO:"
     assert dlg.cmb_to.maximumWidth() <= 200
     assert dlg.txt_env_condition.minimumWidth() >= 200
+    dlg.show()
+    QApplication.processEvents()
+    assert dlg.to_row_host.isVisible()
+    assert dlg.to_row_host.objectName() == "toRowHost"
+    assert dlg.to_row_host.y() > dlg.date_start.y()
+    assert dlg.txt_env_condition.parentWidget() is dlg.date_start.parentWidget()
+    assert dlg.btn_print_raw.parentWidget() is dlg.date_start.parentWidget()
+    assert abs(dlg.txt_env_condition.y() - dlg.date_start.y()) <= 8
+    assert dlg.btn_print_raw.text() == "打印"
+    assert dlg.btn_print_raw.toolTip() == "打印原始记录"
+    assert abs(dlg.btn_print_raw.y() - dlg.date_start.y()) <= 8
     dlg.close()
+
+
+def test_detail_dialog_hides_to_row_without_numbers():
+    _app()
+    node = TestNode(test_name="高温试验")
+    dlg = TestDetailDialog(node, [], [])
+    dlg.show()
+    QApplication.processEvents()
+    assert not dlg.to_row_host.isVisible()
+    assert dlg.txt_env_condition.parentWidget() is dlg.date_start.parentWidget()
+    assert abs(dlg.txt_env_condition.y() - dlg.date_start.y()) <= 8
+    assert dlg.btn_print_raw.text() == "打印"
+    dlg.close()
+
+
+def test_board_toolbar_year_box_and_back_label(tmp_path):
+    _app()
+    from src.io.user_prefs import save_board_intranet_year
+
+    save_board_intranet_year(2027, tmp_path)
+    page = ProjectBoardPage(tmp_path)
+    assert page.btn_back.text() == "返回当前项目"
+    assert page.txt_year.text() == "2027"
+    assert page.txt_search.maximumWidth() == 320
+    assert [w.text() for w in page.findChildren(QLabel) if w.text() == "年份"] == []
+
+
+def test_board_year_persists_on_edit(tmp_path):
+    _app()
+    from src.io.user_prefs import board_intranet_year
+
+    page = ProjectBoardPage(tmp_path)
+    assert page.txt_year.text() == str(date.today().year)
+    page.txt_year.setText("2027")
+    page.txt_year.editingFinished.emit()
+    assert board_intranet_year(tmp_path) == 2027
+    page2 = ProjectBoardPage(tmp_path)
+    assert page2.txt_year.text() == "2027"
+
+
+def test_clicking_project_id_starts_background_lookup(tmp_path):
+    _app()
+    _save(tmp_path, ProjectState(project_id="A2260715291101", sample_name="方向盘总成"))
+    page = ProjectBoardPage(tmp_path)
+    page.reload(today=TODAY)
+    with patch("src.ui.project_board.IntranetLookupWorker") as worker_cls:
+        worker = worker_cls.return_value
+        worker.isRunning.return_value = False
+        with patch.object(page, "setCursor"):
+            with patch("src.ui.project_board.locate_project_intranet_folder") as locate:
+                link = page.tree.itemWidget(page.tree.topLevelItem(0), COL_PROJECT)
+                QTest.mouseClick(link, Qt.LeftButton)
+                locate.assert_not_called()
+        worker.start.assert_called_once()
+    assert page._lookup_busy is True
+    assert page._lookup_workers
+    assert page._lookup_project_id == "A2260715291101"
+
+
+def test_intranet_lookup_done_opens_folder(tmp_path):
+    _app()
+    page = ProjectBoardPage(tmp_path)
+    folder = tmp_path / "公盘项目"
+    folder.mkdir()
+    opened = []
+    page._lookup_gen = 1
+    page._lookup_busy = True
+    with patch("src.ui.project_board.open_folder_in_file_manager", side_effect=opened.append):
+        with patch.object(page, "unsetCursor"):
+            page._on_intranet_lookup_done(1, "found", str(folder))
+    assert opened == [str(folder)]
+    assert page._lookup_busy is False
+
+
+def test_intranet_lookup_not_ready_prompts_without_opening(tmp_path):
+    _app()
+    page = ProjectBoardPage(tmp_path)
+    opened = []
+    page._lookup_gen = 1
+    page._lookup_busy = True
+    with patch("src.ui.project_board.open_folder_in_file_manager", side_effect=opened.append):
+        with patch("src.ui.project_board.request_intranet_share_mount") as mount:
+            with patch("src.ui.project_board.QMessageBox.information") as info:
+                with patch.object(page, "unsetCursor"):
+                    page._on_intranet_lookup_done(1, "not_ready", "")
+                    mount.assert_called_once()
+                    info.assert_called_once()
+    assert opened == []
+    assert page._lookup_busy is False

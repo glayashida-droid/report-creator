@@ -88,6 +88,11 @@ QGroupBox#detailGroup {{
     margin-top: 14px;
 }}
 
+QWidget#toRowHost,
+QWidget#toRowHost > QLabel {{
+    background-color: transparent;
+}}
+
 QGroupBox#overviewGroup {{
     padding: 0px;
     margin-top: 14px;
@@ -98,6 +103,13 @@ QLabel#groupTitleSuffix {{
     font-weight: 600;
     background-color: {BG_PANEL};
     padding: 0 12px 0 8px;
+}}
+
+QLabel#boardGateHotzone {{
+    background: transparent;
+    color: transparent;
+    border: none;
+    padding: 0;
 }}
 
 QToolButton#overviewReload {{
@@ -980,6 +992,17 @@ QTreeWidget#projectBoardTable QLabel#projectIdLink {{
 
 QTreeWidget#projectBoardTable::item:selected {{
     background-color: rgba(255, 0, 255, 0.25);
+}}
+
+QLineEdit#boardQtyEdit {{
+    background-color: {BG_INPUT};
+    color: {TEXT};
+    border: 1px solid {CYAN};
+    border-radius: 4px;
+    padding: 0 4px;
+    min-height: 0;
+    max-height: 18px;
+    font-size: 12px;
 }}
 
 QProgressBar {{

@@ -202,7 +202,9 @@ class TestNode(BaseModel):
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     env_condition: Optional[str] = None  # test environment; from standard library or user edit
+    test_method: Optional[str] = None  # 检测方法; auto-filled from standards, user-editable
     selected_to: Optional[str] = None  # Autoliv TO picked on the detail card
+    sample_qty: str = ""  # per-test qty on the personal project board
     samples: List[TestSample] = Field(default_factory=list)
     data_tables: List[DataTableRef] = Field(default_factory=list)
     # Manual order of photo album folders under 3.测试组/{Leg名}-{试验名}/; empty → default sort.
@@ -273,6 +275,12 @@ class TestNode(BaseModel):
 
     def joined_test_method(self) -> str:
         return "；".join(s.ref_label() for s in self.resolved_standards() if s.ref_label())
+
+    def resolved_test_method(self) -> str:
+        """User-edited 检测方法 if set; otherwise the auto-joined standard refs."""
+        if self._has_text(self.test_method):
+            return str(self.test_method).strip()
+        return self.joined_test_method()
 
     def joined_standard_desc(self) -> str:
         return _join_blocks(s.standard_desc for s in self.resolved_standards())

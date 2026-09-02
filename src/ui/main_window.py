@@ -97,10 +97,18 @@ class _GroupTitleToolbarHost(QObject):
 class _GroupTitleRightLabelHost(QObject):
     """Keep a label parked at the top-right of a QGroupBox title bar."""
 
-    def __init__(self, group: QGroupBox, widget: QWidget, parent=None):
+    def __init__(
+        self,
+        group: QGroupBox,
+        widget: QWidget,
+        parent=None,
+        *,
+        require_text: bool = True,
+    ):
         super().__init__(parent)
         self._group = group
         self._widget = widget
+        self._require_text = require_text
         group.installEventFilter(self)
         self.reposition()
 
@@ -116,14 +124,17 @@ class _GroupTitleRightLabelHost(QObject):
     def reposition(self):
         group = self._group
         widget = self._widget
-        widget.adjustSize()
+        if self._require_text:
+            widget.adjustSize()
         inset = 12
         x = max(0, group.width() - widget.width() - inset)
-        y = max(0, (14 - widget.height()) // 2 + 1)
+        y = max(0, (14 - max(widget.height(), 1)) // 2 + 1)
         widget.move(x, y)
-        if widget.text():
-            widget.show()
-            widget.raise_()
+        if self._require_text and not widget.text():
+            widget.hide()
+            return
+        widget.show()
+        widget.raise_()
 
 
 class NetworkProbeWorker(QThread):
@@ -173,7 +184,7 @@ class MirrorWorker(QThread):
             self.failed.emit(self._generation, str(e))
 
 
-APP_VERSION = "1.3.3"
+APP_VERSION = "1.3.4"
 # Calendar popup floor. Dates before this are treated as "no end date"
 # because QDateEdit may clamp the blank sentinel to 1752-09-14.
 _EARLIEST_REAL_YEAR = 1990
@@ -265,11 +276,21 @@ class MainWindow(QMainWindow):
 
         # 1. Project Locator (compact)
         top_panel = QGroupBox("项目定位")
+        self._top_panel = top_panel
         top_panel.setAttribute(Qt.WA_AlwaysShowToolTips)
         top_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         top_outer = QVBoxLayout(top_panel)
         top_outer.setContentsMargins(8, 6, 8, 6)
         top_outer.setSpacing(4)
+
+        # Invisible hot zone (same width as tester title) — board gate entry
+        self.btn_board_gate = ClickableLabel("", top_panel)
+        self.btn_board_gate.setObjectName("boardGateHotzone")
+        self.btn_board_gate.setCursor(Qt.PointingHandCursor)
+        self.btn_board_gate.clicked.connect(self._on_board_gate_clicked)
+        self._board_gate_host = _GroupTitleRightLabelHost(
+            top_panel, self.btn_board_gate, self, require_text=False
+        )
 
         row = QHBoxLayout()
         row.setSpacing(6)
@@ -593,6 +614,7 @@ class MainWindow(QMainWindow):
         self._board_page.leave_requested.connect(self._hide_project_board)
         self._stack.addWidget(self._board_page)
         self._stack.setCurrentWidget(report_page)
+        self._sync_board_gate_hotzone_size()
 
     def _apply_golden_split(self):
         splitter = getattr(self, "_main_splitter", None)
@@ -645,8 +667,34 @@ class MainWindow(QMainWindow):
         host = getattr(self, "_detail_title_host", None)
         if host is not None:
             host.reposition()
+        self._sync_board_gate_hotzone_size()
+
+    def _sync_board_gate_hotzone_size(self) -> None:
+        """Match invisible board-gate hit area to the tester title sensing width."""
+        gate = getattr(self, "btn_board_gate", None)
+        if gate is None:
+            return
+        label = getattr(self, "lbl_tester_title", None)
+        if label is not None and label.text():
+            label.adjustSize()
+            w = max(label.width(), 1)
+            h = max(label.height(), 14)
+        else:
+            name = (self._session_tester_name or "").strip() or "　　"
+            sample = f"测试员：{name}"
+            fm = gate.fontMetrics()
+            # Match groupTitleSuffix horizontal padding (8 + 12).
+            w = fm.horizontalAdvance(sample) + 20
+            h = max(fm.height(), 14)
+        gate.setFixedSize(w, h)
+        host = getattr(self, "_board_gate_host", None)
+        if host is not None:
+            host.reposition()
 
     def _on_tester_title_clicked(self):
+        self._prompt_tester_name(mount_project=True)
+
+    def _on_board_gate_clicked(self):
         dialog = BoardGateDialog(self)
         if dialog.exec() != QDialog.Accepted:
             return

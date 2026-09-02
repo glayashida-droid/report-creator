@@ -684,27 +684,34 @@ class TestDetailDialog(QDialog):
         date_row.addWidget(self.date_start)
         date_row.addWidget(QLabel("结束日期:"))
         date_row.addWidget(self.date_end)
-        self.lbl_to = QLabel("TO:")
-        self.cmb_to = QComboBox()
-        self.cmb_to.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        self.cmb_to.setMinimumWidth(100)
-        self.cmb_to.setMaximumWidth(200)
-        date_row.addWidget(self.lbl_to)
-        date_row.addWidget(self.cmb_to)
-        date_row.addStretch(1)
-        date_layout.addLayout(date_row)
-
-        env_row = QHBoxLayout()
-        env_row.setContentsMargins(12, 0, 0, 0)
-        env_row.setSpacing(8)
         self.lbl_env = QLabel("检测环境:")
         self.txt_env_condition = QLineEdit()
         self.txt_env_condition.setPlaceholderText("选择标准后自动填入")
         self.txt_env_condition.setMinimumWidth(200)
         self.txt_env_condition.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        env_row.addWidget(self.lbl_env)
-        env_row.addWidget(self.txt_env_condition, stretch=1)
-        date_layout.addLayout(env_row)
+        date_row.addWidget(self.lbl_env)
+        date_row.addWidget(self.txt_env_condition, stretch=1)
+        self.btn_print_raw = QPushButton("打印")
+        self.btn_print_raw.setToolTip("打印原始记录")
+        self.btn_print_raw.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.btn_print_raw.clicked.connect(self._on_print_raw_record)
+        date_row.addWidget(self.btn_print_raw)
+        date_layout.addLayout(date_row)
+
+        self.to_row_host = QWidget()
+        self.to_row_host.setObjectName("toRowHost")
+        to_row = QHBoxLayout(self.to_row_host)
+        to_row.setContentsMargins(12, 0, 0, 0)
+        to_row.setSpacing(8)
+        self.lbl_to = QLabel("TO:")
+        self.cmb_to = QComboBox()
+        self.cmb_to.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.cmb_to.setMinimumWidth(100)
+        self.cmb_to.setMaximumWidth(200)
+        to_row.addWidget(self.lbl_to)
+        to_row.addWidget(self.cmb_to)
+        to_row.addStretch(1)
+        date_layout.addWidget(self.to_row_host)
         self._fill_to_combo()
         self._updating_dates = False
         self.date_start.dateChanged.connect(self._on_node_dates_changed)
@@ -739,8 +746,7 @@ class TestDetailDialog(QDialog):
         method_row.setSpacing(8)
         method_row.addWidget(QLabel("检测方法:"))
         self.txt_std_method = QLineEdit()
-        self.txt_std_method.setReadOnly(True)
-        self.txt_std_method.setPlaceholderText("勾选后按顺序显示标准号 / 章节号")
+        self.txt_std_method.setPlaceholderText("勾选后按顺序填入标准号 / 章节号，可编辑")
         method_row.addWidget(self.txt_std_method, stretch=1)
         std_layout.addLayout(method_row)
 
@@ -927,8 +933,11 @@ class TestDetailDialog(QDialog):
         for item in tos:
             self.cmb_to.addItem(item, item)
         visible = bool(tos)
-        self.lbl_to.setVisible(visible)
-        self.cmb_to.setVisible(visible)
+        self.to_row_host.setVisible(visible)
+
+    def _on_print_raw_record(self):
+        """Hook for original-record printing; template and export come later."""
+        return
 
     def _restore_selected_to(self):
         wanted = str(getattr(self.node_data, "selected_to", None) or "").strip()
@@ -2238,6 +2247,8 @@ class TestDetailDialog(QDialog):
         self._restore_equipments()
         if self.node_data.env_condition:
             self.txt_env_condition.setText(self.node_data.env_condition)
+        if self.node_data.test_method:
+            self.txt_std_method.setText(self.node_data.test_method)
         self._restore_selected_to()
 
         # Standards restore rebuilds sample tables; fill rows afterward.
@@ -2954,6 +2965,8 @@ class TestDetailDialog(QDialog):
         self.node_data.end_date = end.toString("yyyy-MM-dd")
         env = self.txt_env_condition.text().strip()
         self.node_data.env_condition = env or None
+        method = self.txt_std_method.text().strip()
+        self.node_data.test_method = method or None
         if self._project_to_numbers():
             picked = str(self.cmb_to.currentData() or "").strip()
             self.node_data.selected_to = picked or None

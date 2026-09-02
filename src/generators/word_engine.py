@@ -1055,6 +1055,9 @@ class WordGenerator:
 
     @staticmethod
     def _format_method(node: TestNode) -> str:
+        edited = (getattr(node, "test_method", None) or "").strip()
+        if edited:
+            return edited
         parts = []
         for std in node.resolved_standards():
             sid = (std.standard_id or "").strip()

@@ -1,15 +1,23 @@
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
+import json
 
 from src.io.project_board import (
     BOARD_COLUMNS,
     board_progress_ratio,
     filter_board_rows,
+    find_project_intranet_dir,
     group_board_rows,
     highlight_html,
     highlight_spans,
     list_board_rows,
-    project_intranet_url,
+    locate_project_intranet_folder,
+    open_folder_in_file_manager,
+    project_intranet_year_root,
+    resolve_intranet_year_root,
+    update_board_sample_qty,
+    update_board_test_sample_qty,
 )
 from src.models.project_state import (
     ProjectState,
@@ -50,13 +58,109 @@ def _complete_node(name: str, start: str, end: str) -> TestNode:
     )
 
 
-def test_intranet_url_waits_for_base():
-    assert project_intranet_url("A2260715291101") == ""
-    assert project_intranet_url("A2260715291101", base="") == ""
+def test_intranet_year_root_appends_year_folder():
     assert (
-        project_intranet_url("A2260715291101", base="smb://lab/projects/")
-        == "smb://lab/projects/A2260715291101"
+        project_intranet_year_root(2026)
+        == "smb://10.10.31.8/材料实验室b/车载电子/2026年"
     )
+    assert project_intranet_year_root(2027, share="smb://lab/ee/") == "smb://lab/ee/2027年"
+    assert project_intranet_year_root(2026, share="") == ""
+    with patch("src.io.network_sources.sys.platform", "darwin"):
+        assert resolve_intranet_year_root(2026) == Path("/Volumes/材料实验室b/车载电子/2026年")
+    with patch("src.io.network_sources.sys.platform", "win32"):
+        from src.io.network_sources import normalize_config_path
+
+        assert normalize_config_path(project_intranet_year_root(2026)) == (
+            "\\\\10.10.31.8\\材料实验室b\\车载电子\\2026年"
+        )
+
+
+def test_find_project_intranet_dir_under_month(tmp_path):
+    month = tmp_path / "8月"
+    month.mkdir()
+    target = month / "A2260715291101方向盘总成"
+    target.mkdir()
+    (month / "A2260688978101左安全气帘总成").mkdir()
+    found = find_project_intranet_dir("A2260715291101", 2026, year_root=tmp_path)
+    assert found == target
+
+
+def test_find_project_intranet_dir_exact_name_wins(tmp_path):
+    month = tmp_path / "8月"
+    month.mkdir()
+    exact = month / "A2260715291101"
+    extra = month / "A2260715291101方向盘总成"
+    extra.mkdir()
+    exact.mkdir()
+    found = find_project_intranet_dir("A2260715291101", 2026, year_root=tmp_path)
+    assert found == exact
+
+
+def test_find_project_intranet_dir_missing_or_empty(tmp_path):
+    (tmp_path / "8月").mkdir()
+    assert find_project_intranet_dir("A2260715291101", 2026, year_root=tmp_path) is None
+    assert find_project_intranet_dir("", 2026, year_root=tmp_path) is None
+    assert find_project_intranet_dir("A2260715291101", 2026, year_root=tmp_path / "nope") is None
+
+
+def test_find_project_intranet_dir_at_year_root(tmp_path):
+    target = tmp_path / "A2260715291101"
+    target.mkdir()
+    assert find_project_intranet_dir("A2260715291101", 2026, year_root=tmp_path) == target
+
+
+def test_find_project_intranet_dir_skips_files(tmp_path):
+    month = tmp_path / "8月"
+    month.mkdir()
+    (month / "A2260715291101.txt").write_text("not a folder", encoding="utf-8")
+    target = month / "A2260715291101方向盘总成"
+    target.mkdir()
+    assert find_project_intranet_dir("A2260715291101", 2026, year_root=tmp_path) == target
+
+
+def test_find_project_intranet_dir_exact_in_early_month_wins(tmp_path):
+    first = tmp_path / "1月" / "A2260715291101"
+    later = tmp_path / "12月" / "A2260715291101方向盘总成"
+    first.mkdir(parents=True)
+    later.mkdir(parents=True)
+    assert find_project_intranet_dir("A2260715291101", 2026, year_root=tmp_path) == first
+
+
+def test_locate_project_intranet_folder_statuses(tmp_path):
+    missing_root = tmp_path / "nope"
+    assert locate_project_intranet_folder("A1", 2026, year_root=missing_root).status == "not_ready"
+    (tmp_path / "8月").mkdir()
+    assert locate_project_intranet_folder("A1", 2026, year_root=tmp_path).status == "missing"
+    target = tmp_path / "8月" / "A1样品"
+    target.mkdir()
+    result = locate_project_intranet_folder("A1", 2026, year_root=tmp_path)
+    assert result.status == "found"
+    assert result.path == target
+
+
+def test_open_folder_in_file_manager_uses_explorer_on_windows(tmp_path):
+    launched = []
+    target = tmp_path / "A1"
+    target.mkdir()
+    open_folder_in_file_manager(
+        target,
+        platform="win32",
+        popen=lambda args, **kwargs: launched.append((args, kwargs)),
+    )
+    assert launched[0][0] == ["explorer", str(target)]
+    assert launched[0][1].get("close_fds") is False
+
+
+def test_open_folder_in_file_manager_uses_open_on_macos(tmp_path):
+    launched = []
+    target = tmp_path / "A1"
+    target.mkdir()
+    open_folder_in_file_manager(
+        target,
+        platform="darwin",
+        popen=lambda args, **kwargs: launched.append(args),
+    )
+    assert launched == [["open", str(target)]]
 
 
 def test_highlight_spans_are_case_insensitive():
@@ -111,7 +215,8 @@ def test_list_board_rows_one_row_per_test_card(tmp_path):
     assert [row.test_name for row in rows] == ["温度循环试验", "振动试验"]
     assert {row.project_id for row in rows} == {"A22600000001"}
     assert rows[0].sample_name == "主气囊"
-    assert rows[0].sample_qty == "3"
+    assert rows[0].sample_qty == ""
+    assert rows[0].project_sample_qty == "3"
     assert rows[0].applicant == "均胜"
     assert rows[0].start == date(2026, 6, 5)
     assert rows[0].end == date(2026, 6, 20)
@@ -123,6 +228,7 @@ def test_list_board_rows_one_row_per_test_card(tmp_path):
     groups = group_board_rows(rows, today=TODAY)
     assert len(groups) == 1
     assert groups[0].project_id == "A22600000001"
+    assert groups[0].sample_qty == "3"
     assert [row.test_name for row in groups[0].tests] == ["温度循环试验", "振动试验"]
     assert groups[0].start == date(2026, 6, 5)
     assert groups[0].end == date(2026, 7, 2)
@@ -329,7 +435,76 @@ def test_qty_falls_back_to_customer_quantity_key(tmp_path):
     )
     _save(tmp_path, state)
     row = list_board_rows(tmp_path, today=TODAY)[0]
-    assert row.sample_qty == "6"
+    assert row.project_sample_qty == "6"
+    assert row.sample_qty == ""
+    assert group_board_rows([row], today=TODAY)[0].sample_qty == "6"
+
+
+def test_update_board_sample_qty_persists_and_rereads(tmp_path):
+    state = ProjectState(
+        project_id="A22600000007",
+        sample_name="控制器",
+        application_fields={"送样数量": "3", "样品名称": "控制器"},
+        application_columns=[{"送样数量": "3", "样品名称": "控制器"}],
+        active_sample_column_index=0,
+    )
+    _save(tmp_path, state)
+    path = tmp_path / "A22600000007" / "project_state.json"
+    assert update_board_sample_qty(path, "3+3+3") is True
+    row = list_board_rows(tmp_path, today=TODAY)[0]
+    assert row.project_sample_qty == "3+3+3"
+    assert row.sample_qty == ""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["application_fields"]["送样数量"] == "3+3+3"
+    assert data["application_columns"][0]["送样数量"] == "3+3+3"
+
+
+def test_update_board_sample_qty_clear_removes_fallback_key(tmp_path):
+    state = ProjectState(
+        project_id="A22600000008",
+        application_fields={"客户送样数量": "6"},
+    )
+    _save(tmp_path, state)
+    path = tmp_path / "A22600000008" / "project_state.json"
+    assert update_board_sample_qty(path, "") is True
+    row = list_board_rows(tmp_path, today=TODAY)[0]
+    assert row.project_sample_qty == ""
+    assert row.sample_qty == ""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert "客户送样数量" not in data["application_fields"]
+    assert "送样数量" not in data["application_fields"]
+
+
+def test_update_board_test_sample_qty_persists_independently(tmp_path):
+    state = ProjectState(
+        project_id="A22600000009",
+        sample_name="气囊",
+        application_fields={"送样数量": "3"},
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[
+                    _incomplete_node("高温试验", "2026-08-01", "2026-08-20"),
+                    _incomplete_node("振动试验", "2026-08-21", "2026-08-30"),
+                ],
+            )
+        ],
+    )
+    _save(tmp_path, state)
+    path = tmp_path / "A22600000009" / "project_state.json"
+    assert update_board_test_sample_qty(path, 0, 1, "2+2") is True
+    rows = list_board_rows(tmp_path, today=TODAY)
+    assert rows[0].sample_qty == ""
+    assert rows[0].project_sample_qty == "3"
+    assert rows[1].sample_qty == "2+2"
+    assert rows[1].project_sample_qty == "3"
+    group = group_board_rows(rows, today=TODAY)[0]
+    assert group.sample_qty == "3"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["application_fields"]["送样数量"] == "3"
+    assert data["legs"][0]["nodes"][1]["sample_qty"] == "2+2"
+    assert not str(data["legs"][0]["nodes"][0].get("sample_qty") or "").strip()
 
 
 def test_overview_shows_compact_to_numbers():

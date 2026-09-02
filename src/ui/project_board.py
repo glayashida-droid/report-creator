@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from typing import List, Optional
 
-from PySide6.QtCore import QRect, Qt, QUrl, Signal
-from PySide6.QtGui import QBrush, QColor, QDesktopServices, QPalette, QPainter
+from PySide6.QtCore import QRect, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QIntValidator, QPalette, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QGroupBox,
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QSizePolicy,
@@ -37,7 +39,16 @@ from src.io.project_board import (
     highlight_html,
     highlight_spans,
     list_board_rows,
-    project_intranet_url,
+    locate_project_intranet_folder,
+    open_folder_in_file_manager,
+    request_intranet_share_mount,
+    update_board_sample_qty,
+    update_board_test_sample_qty,
+)
+from src.io.user_prefs import (
+    board_intranet_year,
+    parse_intranet_year,
+    save_board_intranet_year,
 )
 from src.ui.theme import BG_INPUT, CYAN, OVERDUE, TEXT
 
@@ -54,13 +65,24 @@ COL_END = 8
 COL_QTY = 9
 COL_NOTES = 10
 
+# JSON path for qty persistence — not Qt.UserRole, so autosize won't treat the
+# path as display text when the cell is empty.
+_QTY_PATH_ROLE = Qt.UserRole + 1
+_QTY_LEG_ROLE = Qt.UserRole + 2
+_QTY_NODE_ROLE = Qt.UserRole + 3
+
 _PROGRESS_ON_CYAN = "#0A0E14"
 _COL_PAD = 28
+INTRANET_LOOKUP_TIMEOUT_MS = 20_000
 _MIN_COL_WIDTHS = {
     COL_INDEX: 48,
     COL_STATUS: 110,
     COL_START: 100,
     COL_END: 100,
+    COL_QTY: 72,
+}
+_MAX_COL_WIDTHS = {
+    COL_QTY: 110,
 }
 
 
@@ -78,10 +100,10 @@ class ClickableLabel(QLabel):
 
 
 class ProjectIdLink(QLabel):
-    def __init__(self, project_id: str, url: str = "", parent=None):
+    def __init__(self, project_id: str, on_open=None, parent=None):
         super().__init__(parent)
         self._project_id = project_id
-        self._url = (url or "").strip()
+        self._on_open = on_open
         self.setObjectName("projectIdLink")
         self.setTextFormat(Qt.RichText)
         self.setCursor(Qt.PointingHandCursor)
@@ -94,17 +116,45 @@ class ProjectIdLink(QLabel):
         )
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and self._url:
-            QDesktopServices.openUrl(QUrl(self._url))
+        if event.button() == Qt.LeftButton:
+            if self._on_open is not None:
+                self._on_open(self._project_id)
             event.accept()
             return
         super().mousePressEvent(event)
+
+
+class IntranetLookupWorker(QThread):
+    done = Signal(int, str, object)
+
+    def __init__(self, generation: int, project_id: str, year: int, parent=None):
+        super().__init__(parent)
+        self._generation = generation
+        self._project_id = project_id
+        self._year = year
+
+    def run(self):
+        try:
+            result = locate_project_intranet_folder(self._project_id, self._year)
+            path = str(result.path) if result.path else ""
+            self.done.emit(self._generation, result.status, path)
+        except Exception:
+            self.done.emit(self._generation, "not_ready", "")
 
 
 class SearchHighlightDelegate(QStyledItemDelegate):
     def __init__(self, query_fn, parent=None):
         super().__init__(parent)
         self._query_fn = query_fn
+
+    def createEditor(self, parent, option, index):
+        editor = QLineEdit(parent)
+        editor.setObjectName("boardQtyEdit")
+        editor.setFrame(False)
+        return editor
+
+    def updateEditorGeometry(self, editor, option, index) -> None:
+        editor.setGeometry(option.rect.adjusted(1, 1, -1, -1))
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
         query = (self._query_fn() or "").strip()
@@ -163,6 +213,13 @@ class ProjectBoardPage(QWidget):
         self._data_root = data_root
         self._today: date = date.today()
         self._rows: List[BoardRow] = []
+        self._lookup_gen = 0
+        self._lookup_busy = False
+        self._lookup_project_id = ""
+        self._lookup_workers: List[IntranetLookupWorker] = []
+        self._lookup_timer = QTimer(self)
+        self._lookup_timer.setSingleShot(True)
+        self._lookup_timer.timeout.connect(self._on_intranet_lookup_timeout)
         self._build()
 
     def _build(self):
@@ -180,9 +237,22 @@ class ProjectBoardPage(QWidget):
         toolbar.addWidget(QLabel("搜索"))
         self.txt_search = QLineEdit()
         self.txt_search.setPlaceholderText("项目号 / 样品 / 试验 / 标准 / TO号")
+        self.txt_search.setMinimumWidth(180)
+        self.txt_search.setMaximumWidth(320)
         self.txt_search.textChanged.connect(self._apply_filter)
-        toolbar.addWidget(self.txt_search, stretch=1)
-        self.btn_back = QPushButton("返回报告")
+        toolbar.addWidget(self.txt_search)
+        self.txt_year = QLineEdit()
+        self.txt_year.setObjectName("boardYear")
+        self.txt_year.setMaxLength(4)
+        self.txt_year.setFixedWidth(72)
+        self.txt_year.setAlignment(Qt.AlignCenter)
+        self.txt_year.setValidator(QIntValidator(2000, 2099, self.txt_year))
+        self.txt_year.setToolTip("公盘目录年份（车载电子/{年}年）")
+        self.txt_year.setText(str(board_intranet_year(self._data_root)))
+        self.txt_year.editingFinished.connect(self._persist_year)
+        toolbar.addWidget(self.txt_year)
+        toolbar.addStretch(1)
+        self.btn_back = QPushButton("返回当前项目")
         self.btn_back.setObjectName("poolToggle")
         self.btn_back.clicked.connect(self.leave_requested.emit)
         toolbar.addWidget(self.btn_back)
@@ -192,6 +262,7 @@ class ProjectBoardPage(QWidget):
         self.tree.setObjectName("projectBoardTable")
         self.tree.setColumnCount(len(BOARD_COLUMNS))
         self.tree.setHeaderLabels(list(BOARD_COLUMNS))
+        # Qty edits start only via editItem; other columns stay non-editable.
         self.tree.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.tree.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tree.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -208,6 +279,7 @@ class ProjectBoardPage(QWidget):
         self.tree.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.tree.setItemDelegate(SearchHighlightDelegate(self._search_query, self.tree))
         self.tree.itemClicked.connect(self._on_item_clicked)
+        self.tree.itemChanged.connect(self._on_item_changed)
         self.tree.itemExpanded.connect(self._sync_group_arrow)
         self.tree.itemCollapsed.connect(self._sync_group_arrow)
         header = self.tree.header()
@@ -224,6 +296,81 @@ class ProjectBoardPage(QWidget):
     def _search_query(self) -> str:
         return self.txt_search.text()
 
+    def _year_value(self) -> int:
+        parsed = parse_intranet_year(self.txt_year.text())
+        if parsed is not None:
+            return parsed
+        year = board_intranet_year(self._data_root)
+        self.txt_year.setText(str(year))
+        return year
+
+    def _persist_year(self) -> None:
+        year = self._year_value()
+        self.txt_year.setText(str(year))
+        save_board_intranet_year(year, self._data_root)
+
+    def _open_project_folder(self, project_id: str) -> None:
+        if self._lookup_busy:
+            return
+        year = self._year_value()
+        save_board_intranet_year(year, self._data_root)
+        self._lookup_workers = [w for w in self._lookup_workers if w.isRunning()]
+        self._lookup_gen += 1
+        gen = self._lookup_gen
+        self._lookup_busy = True
+        self._lookup_project_id = project_id
+        try:
+            self.setCursor(Qt.WaitCursor)
+        except RuntimeError:
+            pass
+        worker = IntranetLookupWorker(gen, project_id, year, parent=self)
+        worker.done.connect(self._on_intranet_lookup_done)
+        self._lookup_workers.append(worker)
+        worker.start()
+        self._lookup_timer.start(INTRANET_LOOKUP_TIMEOUT_MS)
+
+    def _finish_intranet_lookup(self, generation: int) -> bool:
+        if generation != self._lookup_gen or not self._lookup_busy:
+            return False
+        self._lookup_busy = False
+        self._lookup_timer.stop()
+        try:
+            self.unsetCursor()
+        except RuntimeError:
+            pass
+        return True
+
+    def _on_intranet_lookup_timeout(self) -> None:
+        if not self._finish_intranet_lookup(self._lookup_gen):
+            return
+        year = self._year_value()
+        QMessageBox.information(
+            self,
+            "未找到公盘目录",
+            f"查找 {year}年 公盘目录超时。请确认公盘已连接后再试。",
+        )
+
+    def _on_intranet_lookup_done(self, generation: int, status: str, path) -> None:
+        if not self._finish_intranet_lookup(generation):
+            return
+        year = self._year_value()
+        if status == "found" and path:
+            open_folder_in_file_manager(path)
+            return
+        if status == "not_ready":
+            request_intranet_share_mount()
+            QMessageBox.information(
+                self,
+                "未找到公盘目录",
+                f"无法访问 {year}年 公盘目录。请确认公盘已连接后再试。",
+            )
+            return
+        QMessageBox.information(
+            self,
+            "未找到公盘目录",
+            f"在 {year}年 下未找到项目 {self._lookup_project_id} 对应的公盘目录。",
+        )
+
     def reload(self, *, today: Optional[date] = None) -> None:
         self._today = today or date.today()
         self._rows = list_board_rows(self._data_root, today=self._today)
@@ -238,27 +385,79 @@ class ProjectBoardPage(QWidget):
     def _apply_filter(self) -> None:
         query = (self.txt_search.text() or "").strip()
         groups = self.visible_groups()
-        self.tree.clear()
-        for index, group in enumerate(groups):
-            parent = self._make_group_item(index, group)
-            self.tree.addTopLevelItem(parent)
-            self._set_project_link(parent, group.project_id, query)
-            for test in group.tests:
-                child = self._make_test_item(test)
-                parent.addChild(child)
-                self._set_progress(child, test.progress, test.overdue)
-            parent.setExpanded(bool(query))
-            self._sync_group_arrow(parent)
-            self._set_progress(parent, group.progress, group.overdue)
+        self.tree.blockSignals(True)
+        try:
+            self.tree.clear()
+            for index, group in enumerate(groups):
+                parent = self._make_group_item(index, group)
+                self.tree.addTopLevelItem(parent)
+                self._set_project_link(parent, group.project_id, query)
+                for test in group.tests:
+                    child = self._make_test_item(test)
+                    parent.addChild(child)
+                    self._set_progress(child, test.progress, test.overdue)
+                parent.setExpanded(bool(query))
+                self._sync_group_arrow(parent)
+                self._set_progress(parent, group.progress, group.overdue)
+        finally:
+            self.tree.blockSignals(False)
         self._autosize_columns()
         test_count = sum(len(group.tests) for group in groups)
         self.lbl_count.setText(f"{len(groups)} 个项目 · {test_count} 个试验")
 
     def _on_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        if column == COL_QTY:
+            if item.flags() & Qt.ItemIsEditable:
+                self.tree.editItem(item, COL_QTY)
+            return
         if column == COL_PROJECT:
             return
         if item.parent() is None and item.childCount():
             item.setExpanded(not item.isExpanded())
+
+    def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
+        if column != COL_QTY:
+            return
+        raw = item.data(COL_QTY, _QTY_PATH_ROLE)
+        if not raw:
+            return
+        path = Path(str(raw))
+        qty = (item.text(COL_QTY) or "").strip()
+        if item.text(COL_QTY) != qty:
+            self.tree.blockSignals(True)
+            try:
+                item.setText(COL_QTY, qty)
+            finally:
+                self.tree.blockSignals(False)
+
+        parent = item.parent()
+        if parent is None:
+            if not update_board_sample_qty(path, qty):
+                return
+            self._rows = [
+                row if row.json_path != path else replace(row, project_sample_qty=qty)
+                for row in self._rows
+            ]
+            return
+
+        leg_raw = item.data(COL_QTY, _QTY_LEG_ROLE)
+        node_raw = item.data(COL_QTY, _QTY_NODE_ROLE)
+        if leg_raw is None or node_raw is None:
+            return
+        leg_index = int(leg_raw)
+        node_index = int(node_raw)
+        if not update_board_test_sample_qty(path, leg_index, node_index, qty):
+            return
+        self._rows = [
+            row
+            if not (
+                row.json_path == path
+                and row.leg_index == leg_index
+                and row.node_index == node_index
+            )
+            else replace(row, sample_qty=qty)
+            for row in self._rows
+        ]
 
     def _sync_group_arrow(self, item: QTreeWidgetItem) -> None:
         if item.parent() is not None:
@@ -287,6 +486,8 @@ class ProjectBoardPage(QWidget):
         )
         item.setData(COL_INDEX, Qt.UserRole, index + 1)
         item.setData(COL_PROJECT, Qt.UserRole, group.project_id)
+        item.setData(COL_QTY, _QTY_PATH_ROLE, str(group.json_path))
+        item.setFlags(item.flags() | Qt.ItemIsEditable)
         item.setForeground(COL_INDEX, QBrush(QColor("#00FFFF")))
         return item
 
@@ -302,15 +503,20 @@ class ProjectBoardPage(QWidget):
                 "",
                 format_iso_date(row.start),
                 format_iso_date(row.end),
-                "",
+                row.sample_qty,
                 row.notes,
             ]
         )
+        item.setData(COL_QTY, _QTY_PATH_ROLE, str(row.json_path))
+        if row.leg_index is not None and row.node_index is not None:
+            item.setData(COL_QTY, _QTY_LEG_ROLE, row.leg_index)
+            item.setData(COL_QTY, _QTY_NODE_ROLE, row.node_index)
+            item.setFlags(item.flags() | Qt.ItemIsEditable)
         item.setForeground(COL_INDEX, QBrush(QColor("#8B949E")))
         return item
 
     def _set_project_link(self, item: QTreeWidgetItem, project_id: str, query: str) -> None:
-        link = ProjectIdLink(project_id, project_intranet_url(project_id))
+        link = ProjectIdLink(project_id, self._open_project_folder)
         link.set_highlight(query)
         self.tree.setItemWidget(item, COL_PROJECT, link)
 
@@ -343,13 +549,16 @@ class ProjectBoardPage(QWidget):
             for i in range(self.tree.topLevelItemCount()):
                 width = max(width, self._item_col_width(self.tree.topLevelItem(i), col, 0, fm))
             width = max(width, _MIN_COL_WIDTHS.get(col, 40))
+            if col in _MAX_COL_WIDTHS:
+                width = min(width, _MAX_COL_WIDTHS[col])
             self.tree.setColumnWidth(col, width)
 
     def _item_col_width(self, item: QTreeWidgetItem, col: int, depth: int, fm) -> int:
         extra = self.tree.indentation() * depth if col == COL_INDEX else 0
         width = 0
         text = item.text(col)
-        if not text:
+        # Project column text lives in a widget; fall back to UserRole id for width.
+        if not text and col == COL_PROJECT:
             data = item.data(col, Qt.UserRole)
             if isinstance(data, str) and data:
                 text = data

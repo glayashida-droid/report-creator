@@ -8,16 +8,20 @@ from __future__ import annotations
 
 import html
 import json
+import os
+import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
+from src.io.network_sources import normalize_config_path
 from src.io.project_mirror import default_data_root, list_saved_projects
 from src.io.to_numbers import format_to_numbers_display
 
-# Intranet folder for an A-number. Empty until the share URL is provided.
-PROJECT_INTRANET_BASE = ""
+# Year folder lives under this share as ``{year}年``; month dirs are one level below.
+PROJECT_INTRANET_SHARE = "smb://10.10.31.8/材料实验室b/车载电子"
 
 BOARD_COLUMNS: Tuple[str, ...] = (
     "序号",
@@ -37,13 +41,170 @@ _STANDARD_HINT_KEYS = ("standard_id", "standard_chapter", "standard_test_name")
 _HIGHLIGHT_BG = "rgba(0, 255, 255, 0.55)"
 
 
-def project_intranet_url(project_id: str, base: Optional[str] = None) -> str:
-    root = (PROJECT_INTRANET_BASE if base is None else base) or ""
-    root = root.strip().rstrip("/\\")
-    pid = (project_id or "").strip()
-    if not root or not pid:
+def project_intranet_year_root(year: int, share: Optional[str] = None) -> str:
+    base = (PROJECT_INTRANET_SHARE if share is None else share) or ""
+    base = base.strip().rstrip("/\\")
+    if not base:
         return ""
-    return f"{root}/{pid}"
+    return f"{base}/{int(year)}年"
+
+
+def resolve_intranet_year_root(year: int, share: Optional[str] = None) -> Optional[Path]:
+    raw = project_intranet_year_root(year, share)
+    if not raw:
+        return None
+    return Path(normalize_config_path(raw))
+
+
+def intranet_year_root_ready(
+    year: int,
+    *,
+    share: Optional[str] = None,
+    year_root: Optional[Path] = None,
+) -> bool:
+    root = year_root if year_root is not None else resolve_intranet_year_root(year, share)
+    return root is not None and _is_dir(root)
+
+
+def request_intranet_share_mount(share: Optional[str] = None) -> None:
+    """Ask Finder to mount the SMB share. No-op off macOS."""
+    if sys.platform != "darwin":
+        return
+    raw = (PROJECT_INTRANET_SHARE if share is None else share) or ""
+    text = raw.strip()
+    if text.startswith("smb://"):
+        without_scheme = text[6:]
+    elif text.startswith("\\\\"):
+        without_scheme = text.lstrip("\\").replace("\\", "/")
+    else:
+        return
+    parts = [p for p in without_scheme.split("/") if p]
+    if len(parts) < 2:
+        return
+    subprocess.run(["open", f"smb://{parts[0]}/{parts[1]}"], check=False)
+
+
+def find_project_intranet_dir(
+    project_id: str,
+    year: int,
+    *,
+    share: Optional[str] = None,
+    year_root: Optional[Path] = None,
+) -> Optional[Path]:
+    """Find the folder under ``{year}年`` whose name contains the A-number.
+
+    Looks at the year folder itself and one level of month subfolders.
+    Exact name matches return immediately so a later month is not scanned.
+    """
+    pid = (project_id or "").strip()
+    if not pid:
+        return None
+    root = year_root if year_root is not None else resolve_intranet_year_root(year, share)
+    if root is None or not _is_dir(root):
+        return None
+    needle = pid.lower()
+    prefixed: List[Path] = []
+    substring: List[Path] = []
+    for entry in _safe_scandir_dirs(root):
+        hit = _match_intranet_name(entry, needle)
+        if hit == "exact":
+            return entry
+        if hit == "prefixed":
+            prefixed.append(entry)
+        elif hit == "substring":
+            substring.append(entry)
+        for child in _safe_scandir_dirs(entry):
+            child_hit = _match_intranet_name(child, needle)
+            if child_hit == "exact":
+                return child
+            if child_hit == "prefixed":
+                prefixed.append(child)
+            elif child_hit == "substring":
+                substring.append(child)
+    if prefixed:
+        return prefixed[0]
+    if substring:
+        return substring[0]
+    return None
+
+
+@dataclass(frozen=True)
+class IntranetLocateResult:
+    status: str
+    path: Optional[Path] = None
+
+
+def locate_project_intranet_folder(
+    project_id: str,
+    year: int,
+    *,
+    share: Optional[str] = None,
+    year_root: Optional[Path] = None,
+) -> IntranetLocateResult:
+    """Ready / missing / found, for a background lookup off the UI thread."""
+    if not intranet_year_root_ready(year, share=share, year_root=year_root):
+        return IntranetLocateResult("not_ready")
+    found = find_project_intranet_dir(
+        project_id, year, share=share, year_root=year_root
+    )
+    if found is None:
+        return IntranetLocateResult("missing")
+    return IntranetLocateResult("found", found)
+
+
+def open_folder_in_file_manager(
+    path: Path | str,
+    *,
+    platform: Optional[str] = None,
+    popen: Optional[Callable[..., object]] = None,
+) -> None:
+    """Open a folder without blocking on ShellExecute/QUrl.
+
+    Windows uses ``explorer`` via Popen so a slow UNC path cannot freeze Qt.
+    """
+    target = os.fspath(path)
+    plat = sys.platform if platform is None else platform
+    launch = popen or subprocess.Popen
+    if plat == "win32" or plat.startswith("win"):
+        launch(["explorer", target], close_fds=False)
+        return
+    if plat == "darwin":
+        launch(["open", target])
+        return
+    launch(["xdg-open", target])
+
+
+def _match_intranet_name(path: Path, needle: str) -> str:
+    name = path.name.lower()
+    if name == needle:
+        return "exact"
+    if needle not in name:
+        return ""
+    if name.startswith(needle):
+        return "prefixed"
+    return "substring"
+
+
+def _is_dir(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def _safe_scandir_dirs(path: Path) -> List[Path]:
+    try:
+        with os.scandir(path) as entries:
+            found: List[Path] = []
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        found.append(Path(entry.path))
+                except OSError:
+                    continue
+            return found
+    except OSError:
+        return []
 
 
 def highlight_spans(text: str, query: str) -> List[Tuple[int, int]]:
@@ -120,6 +281,7 @@ class BoardRow:
     project_id: str
     sample_name: str
     sample_qty: str
+    project_sample_qty: str
     applicant: str
     start: Optional[date]
     end: Optional[date]
@@ -131,12 +293,15 @@ class BoardRow:
     json_path: Path
     overdue: bool
     progress: Optional[float]
+    leg_index: Optional[int] = None
+    node_index: Optional[int] = None
 
     def search_blob(self) -> str:
         bits = [
             self.project_id,
             self.sample_name,
             self.sample_qty,
+            self.project_sample_qty,
             self.applicant,
             format_iso_date(self.start),
             format_iso_date(self.end),
@@ -201,7 +366,7 @@ def _group_from_tests(tests: Sequence[BoardRow], today: date) -> BoardGroup:
     return BoardGroup(
         project_id=first.project_id,
         sample_name=first.sample_name,
-        sample_qty=first.sample_qty,
+        sample_qty=first.project_sample_qty,
         applicant=first.applicant,
         tester_name=_unique_join(row.tester_name for row in tests),
         start=start,
@@ -248,7 +413,7 @@ def _rows_from_json(json_path: Path, fallback_id: str, today: date) -> List[Boar
         fields = {}
     project_id = str(data.get("project_id") or "").strip() or fallback_id
     sample_name = str(data.get("sample_name") or fields.get("样品名称") or "").strip()
-    sample_qty = _sample_qty(fields)
+    project_sample_qty = _sample_qty(fields)
     applicant = str(data.get("applicant_name") or fields.get("申请公司") or "").strip()
     tester_name = str(data.get("tester_name") or "").strip()
     compact_to = str(data.get("to_numbers_display") or "").strip()
@@ -258,8 +423,8 @@ def _rows_from_json(json_path: Path, fallback_id: str, today: date) -> List[Boar
             compact_to = format_to_numbers_display(
                 [str(item).strip() for item in raw_tos if str(item).strip()]
             )
-    nodes = _iter_named_nodes(data.get("legs") or [])
-    if not nodes:
+    named = _iter_named_nodes_indexed(data.get("legs") or [])
+    if not named:
         start = parse_iso_date(data.get("test_start_date"))
         end = parse_iso_date(data.get("test_end_date"))
         overdue = end is not None and end < today
@@ -267,7 +432,8 @@ def _rows_from_json(json_path: Path, fallback_id: str, today: date) -> List[Boar
             BoardRow(
                 project_id=project_id,
                 sample_name=sample_name,
-                sample_qty=sample_qty,
+                sample_qty="",
+                project_sample_qty=project_sample_qty,
                 applicant=applicant,
                 start=start,
                 end=end,
@@ -282,7 +448,7 @@ def _rows_from_json(json_path: Path, fallback_id: str, today: date) -> List[Boar
             )
         ]
     rows: List[BoardRow] = []
-    for node in nodes:
+    for leg_index, node_index, node in named:
         start = parse_iso_date(node.get("start_date"))
         end = parse_iso_date(node.get("end_date"))
         overdue = end is not None and end < today and not _node_looks_complete(node)
@@ -291,7 +457,8 @@ def _rows_from_json(json_path: Path, fallback_id: str, today: date) -> List[Boar
             BoardRow(
                 project_id=project_id,
                 sample_name=sample_name,
-                sample_qty=sample_qty,
+                sample_qty=str(node.get("sample_qty") or "").strip(),
+                project_sample_qty=project_sample_qty,
                 applicant=applicant,
                 start=start,
                 end=end,
@@ -303,6 +470,8 @@ def _rows_from_json(json_path: Path, fallback_id: str, today: date) -> List[Boar
                 json_path=json_path,
                 overdue=overdue,
                 progress=board_progress_ratio(start, end, today),
+                leg_index=leg_index,
+                node_index=node_index,
             )
         )
     return rows
@@ -316,22 +485,130 @@ def _sample_qty(fields: dict) -> str:
     return ""
 
 
-def _iter_named_nodes(legs: Iterable) -> List[dict]:
-    out: List[dict] = []
+def update_board_sample_qty(json_path: Path, sample_qty: str) -> bool:
+    """Patch ``送样数量`` in project JSON without loading ``ProjectState``.
+
+    Also mirrors into the active ``application_columns`` entry when present, so a
+    later sample-column sync does not wipe the board edit. Returns False if the
+    file cannot be read or written.
+    """
+    path = Path(json_path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    qty = (sample_qty or "").strip()
+    fields = data.get("application_fields")
+    fields = dict(fields) if isinstance(fields, dict) else {}
+    if qty:
+        fields["送样数量"] = qty
+    else:
+        fields.pop("送样数量", None)
+        fields.pop("客户送样数量", None)
+    data["application_fields"] = fields
+    _patch_active_sample_column_qty(data, qty)
+    try:
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        return False
+    return True
+
+
+def update_board_test_sample_qty(
+    json_path: Path,
+    leg_index: int,
+    node_index: int,
+    sample_qty: str,
+) -> bool:
+    """Patch one test node's ``sample_qty`` without loading ``ProjectState``."""
+    path = Path(json_path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    legs = data.get("legs")
+    if not isinstance(legs, list) or leg_index < 0 or leg_index >= len(legs):
+        return False
+    leg = legs[leg_index]
+    if not isinstance(leg, dict):
+        return False
+    nodes = leg.get("nodes")
+    if not isinstance(nodes, list) or node_index < 0 or node_index >= len(nodes):
+        return False
+    node = nodes[node_index]
+    if not isinstance(node, dict):
+        return False
+    node = dict(node)
+    qty = (sample_qty or "").strip()
+    if qty:
+        node["sample_qty"] = qty
+    else:
+        node.pop("sample_qty", None)
+    nodes[node_index] = node
+    leg = dict(leg)
+    leg["nodes"] = nodes
+    legs[leg_index] = leg
+    data["legs"] = legs
+    try:
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        return False
+    return True
+
+
+def _patch_active_sample_column_qty(data: dict, qty: str) -> None:
+    columns = data.get("application_columns")
+    if not isinstance(columns, list) or not columns:
+        return
+    try:
+        idx = int(data.get("active_sample_column_index", 0) or 0)
+    except (TypeError, ValueError):
+        idx = 0
+    if idx < 0 or idx >= len(columns):
+        return
+    col = columns[idx]
+    if not isinstance(col, dict):
+        return
+    col = dict(col)
+    if qty:
+        col["送样数量"] = qty
+    else:
+        col.pop("送样数量", None)
+        col.pop("客户送样数量", None)
+    columns[idx] = col
+    data["application_columns"] = columns
+
+
+def _iter_named_nodes_indexed(legs: Iterable) -> List[Tuple[int, int, dict]]:
+    out: List[Tuple[int, int, dict]] = []
     if not isinstance(legs, list):
         return out
-    for leg in legs:
+    for leg_index, leg in enumerate(legs):
         if not isinstance(leg, dict):
             continue
         nodes = leg.get("nodes") or []
         if not isinstance(nodes, list):
             continue
-        for node in nodes:
+        for node_index, node in enumerate(nodes):
             if not isinstance(node, dict):
                 continue
             if str(node.get("test_name") or "").strip():
-                out.append(node)
+                out.append((leg_index, node_index, node))
     return out
+
+
+def _iter_named_nodes(legs: Iterable) -> List[dict]:
+    return [node for _, _, node in _iter_named_nodes_indexed(legs)]
 
 
 def _standard_ref_label(standard_id, chapter) -> str:
