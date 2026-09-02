@@ -69,3 +69,47 @@ def save_board_intranet_year(year: int, data_root: Optional[Path] = None) -> Non
     prefs = load_user_prefs(data_root)
     prefs["board_intranet_year"] = parsed
     save_user_prefs(prefs, data_root)
+
+
+def nightly_sync_enabled(data_root: Optional[Path] = None) -> bool:
+    return bool(load_user_prefs(data_root).get("nightly_sync_enabled"))
+
+
+def _normalize_hhmm(value: str) -> str:
+    raw = str(value or "").strip() or "22:30"
+    parts = raw.split(":")
+    if len(parts) != 2:
+        return "22:30"
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except ValueError:
+        return "22:30"
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return "22:30"
+    return f"{hour:02d}:{minute:02d}"
+
+
+def nightly_sync_time(data_root: Optional[Path] = None) -> str:
+    return _normalize_hhmm(str(load_user_prefs(data_root).get("nightly_sync_time") or "22:30"))
+
+
+def nightly_sync_all_projects(data_root: Optional[Path] = None) -> bool:
+    prefs = load_user_prefs(data_root)
+    if "nightly_sync_all_projects" not in prefs:
+        return True
+    return bool(prefs.get("nightly_sync_all_projects"))
+
+
+def save_nightly_sync_prefs(
+    *,
+    enabled: bool,
+    time_hhmm: str,
+    all_projects: bool = True,
+    data_root: Optional[Path] = None,
+) -> None:
+    prefs = load_user_prefs(data_root)
+    prefs["nightly_sync_enabled"] = bool(enabled)
+    prefs["nightly_sync_time"] = _normalize_hhmm(time_hhmm)
+    prefs["nightly_sync_all_projects"] = bool(all_projects)
+    save_user_prefs(prefs, data_root)

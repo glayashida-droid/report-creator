@@ -1,18 +1,47 @@
-"""Project sync helpers — JSON remote lifecycle (photos/nightly land in later tickets)."""
+"""Project sync — JSON remote lifecycle + nightly upload / purge."""
 
 from __future__ import annotations
 
+import os
+import shutil
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Union
+from typing import Callable, List, Optional, Sequence, Union
 
+from src.io.project_mirror import (
+    STRUCTURE_MIRROR_MAX_FILE_BYTES,
+    SKIP_DIR_NAMES,
+    should_skip_file,
+)
+from src.io.test_photos import IMAGE_EXTS
 from src.models.project_state import ProjectState
 
 PathLike = Union[str, Path]
 PROJECT_STATE_NAME = "project_state.json"
+THUMBS_DIR_NAME = ".thumbs"
+# Nightly purge targets: images, spreadsheets, or oversized (aligned with TKT-2 + xlsx).
+_PURGE_EXTS = IMAGE_EXTS | {".xlsx", ".xls"}
 
 
 class RemoteJsonError(OSError):
     """Raised when project_state.json cannot be written to the remote root."""
+
+
+@dataclass
+class UploadFailure:
+    relative_path: str
+    error: str
+
+
+@dataclass
+class SyncReport:
+    uploaded: List[str] = field(default_factory=list)
+    purged: List[str] = field(default_factory=list)
+    failed: List[UploadFailure] = field(default_factory=list)
+
+    @property
+    def ok_paths(self) -> List[str]:
+        return list(self.uploaded)
 
 
 def remote_state_path(remote_root: PathLike) -> Path:
@@ -87,3 +116,130 @@ def save_json_to_remote_then_local(
 def write_local_json_cache(state: ProjectState, local_root: PathLike) -> None:
     """Persist a local cache copy after a successful remote load."""
     state.save_to_file(str(local_state_path(local_root)))
+
+
+def is_purge_candidate(path: Path) -> bool:
+    """True for nightly-purgeable local files (images, xlsx, or oversized)."""
+    if path.suffix.lower() in _PURGE_EXTS:
+        return True
+    try:
+        return path.stat().st_size > STRUCTURE_MIRROR_MAX_FILE_BYTES
+    except OSError:
+        return False
+
+
+def _needs_upload(src: Path, dst: Path) -> bool:
+    if not dst.exists():
+        return True
+    try:
+        src_stat = src.stat()
+        dst_stat = dst.stat()
+    except OSError:
+        return True
+    if src_stat.st_size != dst_stat.st_size:
+        return True
+    if src_stat.st_mtime > dst_stat.st_mtime + 2:
+        return True
+    return False
+
+
+def _sizes_match(local_file: Path, remote_file: Path) -> bool:
+    try:
+        return local_file.stat().st_size == remote_file.stat().st_size
+    except OSError:
+        return False
+
+
+def incremental_upload(
+    local_root: PathLike,
+    remote_root: PathLike,
+    cancelled: Optional[Callable[[], bool]] = None,
+) -> SyncReport:
+    """Copy new/changed local files to remote (incl. 备用/). Does not purge."""
+    local = Path(local_root)
+    remote = Path(remote_root)
+    report = SyncReport()
+    if not local.is_dir():
+        report.failed.append(UploadFailure("", f"本地根不存在: {local}"))
+        return report
+    if not remote.is_dir():
+        report.failed.append(UploadFailure("", f"公盘根不可用: {remote}"))
+        return report
+
+    for dirpath, dirnames, filenames in os.walk(local):
+        if cancelled and cancelled():
+            break
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if d not in SKIP_DIR_NAMES and d != THUMBS_DIR_NAME and not d.startswith(".")
+        ]
+        rel_dir = Path(dirpath).relative_to(local)
+        for name in filenames:
+            if cancelled and cancelled():
+                break
+            if should_skip_file(name) or name.startswith("."):
+                continue
+            src = Path(dirpath) / name
+            if not src.is_file():
+                continue
+            rel = (rel_dir / name).as_posix()
+            dest = remote / rel
+            if not _needs_upload(src, dest):
+                # Already in sync — still eligible for purge
+                report.uploaded.append(rel)
+                continue
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest)
+                report.uploaded.append(rel)
+            except OSError as exc:
+                report.failed.append(UploadFailure(rel, str(exc)))
+    return report
+
+
+def purge_verified_uploads(
+    local_root: PathLike,
+    remote_root: PathLike,
+    relative_paths: Optional[Sequence[str]] = None,
+) -> List[str]:
+    """Delete local purge-candidates whose remote copy matches by size.
+
+    Keeps directories and `.thumbs`. Returns purged relative paths.
+    """
+    local = Path(local_root)
+    remote = Path(remote_root)
+    purged: List[str] = []
+    if relative_paths is None:
+        return purged
+    for rel in relative_paths:
+        text = (rel or "").strip()
+        if not text or ".." in Path(text).parts:
+            continue
+        local_file = local / text
+        remote_file = remote / text
+        if not local_file.is_file() or not remote_file.is_file():
+            continue
+        if not is_purge_candidate(local_file):
+            continue
+        if not _sizes_match(local_file, remote_file):
+            continue
+        try:
+            local_file.unlink()
+            purged.append(text)
+        except OSError:
+            continue
+    return purged
+
+
+def sync_project_to_remote(
+    local_root: PathLike,
+    remote_root: PathLike,
+    cancelled: Optional[Callable[[], bool]] = None,
+) -> SyncReport:
+    """Upload then purge verified large/local media files."""
+    report = incremental_upload(local_root, remote_root, cancelled=cancelled)
+    if cancelled and cancelled():
+        return report
+    report.purged = purge_verified_uploads(local_root, remote_root, report.uploaded)
+    return report

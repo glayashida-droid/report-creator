@@ -27,10 +27,12 @@ from src.parsers.pdf_parser import QuotationParser
 from src.io.project_mirror import incremental_copy, list_saved_projects, local_project_dir
 from src.io.project_sync import (
     RemoteJsonError,
+    SyncReport,
     is_remote_json_newer,
     load_json_from_remote,
     local_state_path,
     save_json_to_remote_then_local,
+    sync_project_to_remote,
     write_local_json_cache,
 )
 from src.io.sample_files import find_sample_files
@@ -43,7 +45,14 @@ from src.io.network_sources import (
     resolve_report_template_for_language,
 )
 from src.io.special_rules import profile_from_state, refresh_special_profile, state_has_forbidden_na
-from src.io.user_prefs import default_tester_name, save_default_tester_name
+from src.io.user_prefs import (
+    default_tester_name,
+    nightly_sync_all_projects,
+    nightly_sync_enabled,
+    nightly_sync_time,
+    save_default_tester_name,
+    save_nightly_sync_prefs,
+)
 from src.io.leg_templates import (
     TemplateExistsError,
     TemplateNameError,
@@ -171,6 +180,8 @@ class NetworkProbeWorker(QThread):
 
 
 class MirrorWorker(QThread):
+    """Background structure mirror: dirs + light files; skips photos / oversized."""
+
     succeeded = Signal(int, str)
     failed = Signal(int, str)
 
@@ -190,6 +201,35 @@ class MirrorWorker(QThread):
             self.succeeded.emit(self._generation, str(self._dest))
         except Exception as e:
             self.failed.emit(self._generation, str(e))
+
+
+class NightlySyncWorker(QThread):
+    """Upload local changes to remote then purge verified large files."""
+
+    finished_report = Signal(object)  # SyncReport
+    failed = Signal(str)
+
+    def __init__(self, jobs: list, parent=None):
+        super().__init__(parent)
+        self._jobs = list(jobs)  # [(local_root, remote_root), ...]
+
+    def run(self):
+        merged = SyncReport()
+        try:
+            for local_root, remote_root in self._jobs:
+                if self.isInterruptionRequested():
+                    break
+                report = sync_project_to_remote(
+                    local_root,
+                    remote_root,
+                    cancelled=self.isInterruptionRequested,
+                )
+                merged.uploaded.extend(report.uploaded)
+                merged.purged.extend(report.purged)
+                merged.failed.extend(report.failed)
+            self.finished_report.emit(merged)
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 APP_VERSION = "1.3.4"
@@ -268,10 +308,16 @@ class MainWindow(QMainWindow):
         self._connection_timer.timeout.connect(self._start_network_probe)
         self._session_tester_name = ""
         self._tester_prompt_pending = True
+        self._sync_worker = None  # type: Optional[NightlySyncWorker]
+        self._nightly_sync_timer = QTimer(self)
+        self._nightly_sync_timer.setInterval(30_000)
+        self._nightly_sync_timer.timeout.connect(self._on_nightly_sync_tick)
+        self._last_nightly_fire_key = ""
 
         self.init_ui()
         self._start_network_probe()
         self._schedule_network_probe()
+        self._nightly_sync_timer.start()
 
     def init_ui(self):
         self._stack = QStackedWidget()
@@ -385,11 +431,44 @@ class MainWindow(QMainWindow):
         mirror_row.setSpacing(4)
         mirror_row.addWidget(self.lbl_mirror_status)
         mirror_row.addWidget(self.btn_open_local)
+
+        self.chk_nightly_sync = QCheckBox("夜间同步")
+        self.chk_nightly_sync.setChecked(nightly_sync_enabled())
+        self.chk_nightly_sync.setToolTip("程序运行到设定时刻时增量备份到公盘并清理本地大文件")
+        self.edit_nightly_time = QLineEdit(nightly_sync_time())
+        self.edit_nightly_time.setFixedWidth(52)
+        self.edit_nightly_time.setMaxLength(5)
+        self.edit_nightly_time.setPlaceholderText("HH:MM")
+        self.edit_nightly_time.setToolTip("夜间同步时刻（HH:MM）")
+        self.chk_nightly_all = QCheckBox("全部项目")
+        self.chk_nightly_all.setChecked(nightly_sync_all_projects())
+        self.chk_nightly_all.setToolTip("勾选：同步本地 data/ 下全部缓存项目；否则仅当前项目")
+        self.btn_backup_now = QPushButton("立即备份到公盘")
+        self.btn_backup_now.setObjectName("mirrorOpenLink")
+        self.btn_backup_now.setFlat(True)
+        self.btn_backup_now.setCursor(Qt.PointingHandCursor)
+        self.btn_backup_now.setToolTip("立刻增量上传并校验清理本地大文件")
+        self.lbl_sync_status = QLabel("")
+        self.lbl_sync_status.setObjectName("dimLabel")
+        self.chk_nightly_sync.stateChanged.connect(self._persist_nightly_sync_prefs)
+        self.edit_nightly_time.editingFinished.connect(self._persist_nightly_sync_prefs)
+        self.chk_nightly_all.stateChanged.connect(self._persist_nightly_sync_prefs)
+        self.btn_backup_now.clicked.connect(self._start_manual_backup)
+        sync_row = QHBoxLayout()
+        sync_row.setContentsMargins(0, 0, 0, 0)
+        sync_row.setSpacing(6)
+        sync_row.addWidget(self.chk_nightly_sync)
+        sync_row.addWidget(self.edit_nightly_time)
+        sync_row.addWidget(self.chk_nightly_all)
+        sync_row.addWidget(self.btn_backup_now)
+        sync_row.addWidget(self.lbl_sync_status)
+
         meta_row.addWidget(self.lbl_project_id)
         meta_row.addStretch()
         meta_row.addLayout(connection_row)
         meta_row.addLayout(mirror_row)
         top_outer.addLayout(meta_row)
+        top_outer.addLayout(sync_row)
 
         main_layout.addWidget(top_panel)
 
@@ -1461,6 +1540,111 @@ class MainWindow(QMainWindow):
             self.chk_mirror_conn.setToolTip(f"本地镜像未就绪\n{self._local_path}")
         else:
             self.chk_mirror_conn.setToolTip("尚未加载项目")
+
+    def _persist_nightly_sync_prefs(self):
+        save_nightly_sync_prefs(
+            enabled=self.chk_nightly_sync.isChecked(),
+            time_hhmm=self.edit_nightly_time.text(),
+            all_projects=self.chk_nightly_all.isChecked(),
+        )
+        self.edit_nightly_time.setText(nightly_sync_time())
+
+    def _on_nightly_sync_tick(self):
+        if not nightly_sync_enabled():
+            return
+        if self._sync_worker is not None and self._sync_worker.isRunning():
+            return
+        from datetime import datetime
+
+        now = datetime.now()
+        target = nightly_sync_time()
+        key = now.strftime(f"%Y-%m-%d:{target}")
+        if key == self._last_nightly_fire_key:
+            return
+        if now.strftime("%H:%M") != target:
+            return
+        self._last_nightly_fire_key = key
+        self._start_backup_jobs(self._collect_sync_jobs(), label="夜间同步")
+
+    def _start_manual_backup(self):
+        self._persist_nightly_sync_prefs()
+        jobs = self._collect_sync_jobs(all_projects=self.chk_nightly_all.isChecked())
+        if not jobs:
+            self.lbl_sync_status.setText("无可用公盘项目可备份")
+            return
+        self._start_backup_jobs(jobs, label="立即备份")
+
+    def _collect_sync_jobs(self, *, all_projects: Optional[bool] = None):
+        jobs = []
+        seen = set()
+        use_all = nightly_sync_all_projects() if all_projects is None else bool(all_projects)
+        if use_all:
+            for saved in list_saved_projects():
+                local = saved.local_path
+                try:
+                    data = ProjectState.load_from_file(str(saved.json_path))
+                except Exception:
+                    continue
+                remote_raw = (data.source_path or "").strip()
+                if not remote_raw:
+                    continue
+                remote = Path(remote_raw)
+                if not remote.is_dir() or not local.is_dir():
+                    continue
+                key = str(local.resolve())
+                if key in seen:
+                    continue
+                seen.add(key)
+                jobs.append((local, remote))
+        if self._local_path is not None and self._local_path.is_dir():
+            remote = self._source_project_path()
+            if remote is not None and remote.is_dir():
+                key = str(self._local_path.resolve())
+                if key not in seen:
+                    jobs.append((self._local_path, remote))
+        return jobs
+
+    def _start_backup_jobs(self, jobs, *, label: str):
+        if not jobs:
+            self.lbl_sync_status.setText(f"{label}：无任务")
+            return
+        if self._sync_worker is not None and self._sync_worker.isRunning():
+            self.lbl_sync_status.setText("备份进行中…")
+            return
+        self.lbl_sync_status.setText(f"{label}中…")
+        self.btn_backup_now.setEnabled(False)
+        worker = NightlySyncWorker(jobs, self)
+        worker.finished_report.connect(self._on_sync_report)
+        worker.failed.connect(self._on_sync_failed)
+        self._sync_worker = worker
+        worker.start()
+
+    def _on_sync_report(self, report: SyncReport):
+        self.btn_backup_now.setEnabled(True)
+        from datetime import datetime
+
+        stamp = datetime.now().strftime("%H:%M")
+        fail_n = len(report.failed)
+        if fail_n:
+            first = report.failed[0].relative_path or report.failed[0].error
+            self.lbl_sync_status.setText(
+                f"上次同步 {stamp} · 失败 {fail_n} · {first}"
+            )
+            self.lbl_sync_status.setToolTip(
+                "\n".join(
+                    f"{f.relative_path}: {f.error}" if f.relative_path else f.error
+                    for f in report.failed[:12]
+                )
+            )
+        else:
+            self.lbl_sync_status.setText(
+                f"上次同步 {stamp} · 上传 {len(report.uploaded)} · 清理 {len(report.purged)}"
+            )
+            self.lbl_sync_status.setToolTip("")
+
+    def _on_sync_failed(self, message: str):
+        self.btn_backup_now.setEnabled(True)
+        self.lbl_sync_status.setText(f"同步失败: {message}")
 
     def _start_network_probe(self):
         if self._network_probe_worker is not None and self._network_probe_worker.isRunning():
