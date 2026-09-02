@@ -2,7 +2,10 @@ from src.io.project_assets import (
     MergedPhoto,
     list_merged_albums,
     list_merged_photos,
+    move_photo_to_spare,
     resolve_photo_path,
+    restore_photo_from_spare,
+    spare_dir,
     thumbnail_for_photo,
 )
 from src.io.project_mirror import (
@@ -55,9 +58,12 @@ __all__ = [
     "load_json_from_remote",
     "load_leg_template",
     "local_project_dir",
+    "move_photo_to_spare",
     "resolve_photo_path",
+    "restore_photo_from_spare",
     "save_json_to_remote_then_local",
     "save_leg_template",
+    "spare_dir",
     "state_file_path",
     "thumbnail_for_photo",
     "unique_test_names",

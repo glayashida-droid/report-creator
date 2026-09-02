@@ -16,6 +16,7 @@ RENAME_CONFLICT_MESSAGE = "同名试验项目已存在，请重新命名"
 TEMPLATE_ALBUMS = ("试验前", "试验中", "数据", "试验后")
 IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 SPARE_DIR_NAME = "备用"
+SPARE_ALBUM_NAME = SPARE_DIR_NAME  # alias — 试验目录下与数据表附件同级
 PLACEHOLDER_TEST_NAME = "请选择试验..."
 CUSTOM_TEST_NAME = "自定义"
 _BAD_NAME = re.compile(r'[\\/:*?"<>|]')
@@ -168,6 +169,8 @@ def create_album(project_root: Path, leg_name: str, test_name: str, album_name: 
     leg = require_leg_name(leg_name)
     test = require_usable_test_name(test_name)
     name = validate_album_name(album_name)
+    if name == SPARE_ALBUM_NAME:
+        raise PhotoError(f"「{SPARE_ALBUM_NAME}」为系统保留文件夹")
     dest = album_dir(project_root, leg, test, name)
     if dest.exists():
         raise PhotoError(f"文件夹已存在：{name}")
@@ -195,6 +198,8 @@ def rename_album(
     test = require_usable_test_name(test_name)
     src_name = validate_album_name(old_name)
     dest_name = validate_album_name(new_name)
+    if dest_name == SPARE_ALBUM_NAME:
+        raise PhotoError(f"「{SPARE_ALBUM_NAME}」为系统保留文件夹")
     src = album_dir(project_root, leg, test, src_name)
     dest = album_dir(project_root, leg, test, dest_name)
     if src_name == dest_name:

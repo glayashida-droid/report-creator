@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence, Union
@@ -10,12 +11,18 @@ from PIL import Image
 
 from src.io.test_photos import (
     IMAGE_EXTS,
+    SPARE_ALBUM_NAME,
     SPARE_DIR_NAME,
+    PhotoError,
     album_dir,
     apply_album_order,
     is_image_file,
     is_usable_test_name,
+    require_leg_name,
+    require_usable_test_name,
     test_dir,
+    unique_dest_name,
+    validate_album_name,
 )
 
 PathLike = Union[str, Path]
@@ -42,6 +49,81 @@ def _album_relative(leg_name: str, test_name: str, album_name: str, filename: st
     return (
         album_dir(Path("."), leg_name, test_name, album_name) / filename
     ).as_posix()
+
+
+def spare_dir(project_root: PathLike, leg_name: str, test_name: str) -> Path:
+    return test_dir(project_root, leg_name, test_name) / SPARE_ALBUM_NAME
+
+
+def _spare_relative_for_photo(relative_path: str) -> str:
+    """Map formal-album relative path → same trial's 备用/<filename>."""
+    parts = Path(relative_path).parts
+    if len(parts) < 4:
+        raise PhotoError("照片路径不合法")
+    if parts[-2] == SPARE_DIR_NAME:
+        raise PhotoError("照片已在备用中")
+    return (Path(*parts[:-2]) / SPARE_DIR_NAME / parts[-1]).as_posix()
+
+
+def _move_into_dir(src: Path, dest_dir: Path) -> Path:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = unique_dest_name(dest_dir, src.name)
+    shutil.move(str(src), str(dest))
+    return dest
+
+
+def move_photo_to_spare(
+    local_root: Optional[PathLike],
+    remote_root: Optional[PathLike],
+    relative_path: str,
+) -> Path:
+    """Move a formal-album photo into 备用/ on each root where the file exists.
+
+    Returns the last moved spare path (preferring local when both moved).
+    """
+    rel = Path(relative_path)
+    if not rel.parts or rel.is_absolute() or ".." in rel.parts:
+        raise PhotoError("照片路径不合法")
+    spare_rel = _spare_relative_for_photo(relative_path)
+    moved: Optional[Path] = None
+    local_moved: Optional[Path] = None
+    local = _as_root(local_root)
+    for root in (local, _as_root(remote_root)):
+        if root is None:
+            continue
+        src = root / rel
+        if not src.is_file():
+            continue
+        dest = _move_into_dir(src, (root / spare_rel).parent)
+        moved = dest
+        if local is not None and root.resolve() == local.resolve():
+            local_moved = dest
+    if moved is None:
+        raise PhotoError("找不到照片")
+    return local_moved or moved
+
+
+def restore_photo_from_spare(
+    project_root: PathLike,
+    leg_name: str,
+    test_name: str,
+    filename: str,
+    dest_album: str,
+) -> Path:
+    """Move a file from 备用/ back into a formal album folder."""
+    root = Path(project_root)
+    leg = require_leg_name(leg_name)
+    test = require_usable_test_name(test_name)
+    album = validate_album_name(dest_album)
+    if album == SPARE_ALBUM_NAME:
+        raise PhotoError("不能还原到备用本身")
+    name = Path(filename).name
+    if not name or name in {".", ".."}:
+        raise PhotoError("文件名不合法")
+    src = spare_dir(root, leg, test) / name
+    if not src.is_file():
+        raise PhotoError(f"备用中找不到：{name}")
+    return _move_into_dir(src, album_dir(root, leg, test, album))
 
 
 def _list_image_names(folder: Path) -> List[str]:

@@ -1,6 +1,9 @@
 """试验照片 drawer: album rows, drag-in copy, thumbnails."""
 
 from pathlib import Path
+import os
+import subprocess
+import sys
 import tempfile
 from typing import List, Optional
 
@@ -32,17 +35,19 @@ from src.io.project_assets import (
     MergedPhoto,
     list_merged_albums,
     list_merged_photos,
+    move_photo_to_spare,
+    spare_dir,
     thumbnail_for_photo,
 )
 from src.io.test_photos import (
     PhotoError,
+    SPARE_ALBUM_NAME,
     collect_drop_images,
     copy_into_album,
     copy_into_album_keep_names,
     create_album,
     create_template_albums,
     delete_album,
-    delete_photo,
     is_usable_test_name,
     remap_album_order,
     rename_album,
@@ -427,12 +432,19 @@ class PhotoThumb(QFrame):
     removed = Signal()
     renamed = Signal()
 
-    def __init__(self, photo: MergedPhoto, local_root: Path, parent=None):
+    def __init__(
+        self,
+        photo: MergedPhoto,
+        local_root: Path,
+        parent=None,
+        remote_root: Optional[Path] = None,
+    ):
         super().__init__(parent)
         self.path = Path(photo.read_path)
         self.relative_path = photo.relative_path
         self.is_cloud_only = bool(photo.is_cloud_only)
         self._local_root = Path(local_root)
+        self._remote_root = Path(remote_root) if remote_root else None
         self._popup = None
         self.setObjectName("photoThumb")
         self.setFixedSize(THUMB + 18, THUMB + 10 + NAME_H)
@@ -487,16 +499,16 @@ class PhotoThumb(QFrame):
             badge.move(4, 2)
             badge.raise_()
             badge.setToolTip("仅公盘")
-        else:
-            btn = QPushButton("✕")
-            btn.setObjectName("photoThumbDelete")
-            btn.setFixedSize(18, 18)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setToolTip("从本地镜像中删除")
-            btn.clicked.connect(self._delete)
-            btn.setParent(self)
-            btn.move(self.width() - 20, 2)
-            btn.raise_()
+
+        btn = QPushButton("✕")
+        btn.setObjectName("photoThumbDelete")
+        btn.setFixedSize(18, 18)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setToolTip(f"移入「{SPARE_ALBUM_NAME}」（可从该文件夹拖回还原）")
+        btn.clicked.connect(self._delete)
+        btn.setParent(self)
+        btn.move(self.width() - 20, 2)
+        btn.raise_()
         self._elide_name()
 
     def resizeEvent(self, event):
@@ -563,10 +575,12 @@ class PhotoThumb(QFrame):
         self.renamed.emit()
 
     def _delete(self):
-        if self.is_cloud_only:
-            return
         self._click_timer.stop()
-        delete_photo(self.path)
+        try:
+            move_photo_to_spare(self._local_root, self._remote_root, self.relative_path)
+        except PhotoError as exc:
+            QMessageBox.warning(self, "提示", str(exc))
+            return
         self.removed.emit()
 
 
@@ -661,7 +675,12 @@ class PhotoAlbumRow(QFrame):
             self.album_name,
         )
         for photo in photos:
-            thumb = PhotoThumb(photo, self.project_root, self.thumb_host)
+            thumb = PhotoThumb(
+                photo,
+                self.project_root,
+                self.thumb_host,
+                remote_root=self.remote_root,
+            )
             thumb.removed.connect(self._on_thumb_removed)
             thumb.renamed.connect(self._on_thumb_renamed)
             self.thumb_layout.addWidget(thumb)
@@ -846,10 +865,16 @@ class TestPhotosPanel(QWidget):
         self.btn_template = QPushButton("模版新建")
         self.btn_template.setToolTip("一次开出：试验前、试验中、数据、试验后（已有的跳过）")
         self.btn_custom = QPushButton("自定义新建")
+        self.btn_open_spare = QPushButton(f"打开{SPARE_ALBUM_NAME}")
+        self.btn_open_spare.setToolTip(
+            f"在访达中打开「{SPARE_ALBUM_NAME}」；把照片拖回正式相册即可还原"
+        )
         self.btn_template.clicked.connect(self._add_template)
         self.btn_custom.clicked.connect(self._add_custom)
+        self.btn_open_spare.clicked.connect(self._open_spare_folder)
         toolbar.addWidget(self.btn_template)
         toolbar.addWidget(self.btn_custom)
+        toolbar.addWidget(self.btn_open_spare)
         toolbar.addStretch()
         layout.addLayout(toolbar)
 
@@ -1043,6 +1068,7 @@ class TestPhotosPanel(QWidget):
         enabled = usable and mirrored
         self.btn_template.setEnabled(enabled)
         self.btn_custom.setEnabled(enabled)
+        self.btn_open_spare.setEnabled(enabled)
 
         if not usable:
             self.lbl_hint.setText("请先在主界面选择试验名称，再管理试验照片。")
@@ -1112,6 +1138,19 @@ class TestPhotosPanel(QWidget):
         if rebuild_rows:
             self._reload_preserve_scroll()
         self.changed.emit()
+
+    def _open_spare_folder(self):
+        if not self._ready():
+            return
+        folder = spare_dir(self.project_root, self.leg_name, self.test_name)
+        folder.mkdir(parents=True, exist_ok=True)
+        target = str(folder)
+        if sys.platform == "darwin":
+            subprocess.run(["open", target], check=False)
+        elif sys.platform == "win32":
+            os.startfile(target)
+        else:
+            subprocess.run(["xdg-open", target], check=False)
 
     def _add_template(self):
         if not self._ready():
