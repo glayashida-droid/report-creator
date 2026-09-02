@@ -33,9 +33,12 @@ from src.ui.window_focus import force_window_foreground
 
 from src.io.project_assets import (
     MergedPhoto,
+    download_photo_to_album,
     list_merged_albums,
     list_merged_photos,
     move_photo_to_spare,
+    original_view_path,
+    preview_path_for_photo,
     spare_dir,
     thumbnail_for_photo,
 )
@@ -431,6 +434,7 @@ def _paint_cloud_pixmap():
 class PhotoThumb(QFrame):
     removed = Signal()
     renamed = Signal()
+    downloaded = Signal()
 
     def __init__(
         self,
@@ -448,7 +452,10 @@ class PhotoThumb(QFrame):
         self._popup = None
         self.setObjectName("photoThumb")
         self.setFixedSize(THUMB + 18, THUMB + 10 + NAME_H)
-        tip = "云端照片（本地无原图）· 单击放大" if self.is_cloud_only else "单击放大，双击重命名"
+        if self.is_cloud_only:
+            tip = "云端照片 · 单击预览 · 双击查看原图"
+        else:
+            tip = "单击预览 · 双击重命名"
         self.setToolTip(tip)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 2)
@@ -488,7 +495,7 @@ class PhotoThumb(QFrame):
         self._click_timer = QTimer(self)
         self._click_timer.setSingleShot(True)
         self._click_timer.setInterval(280)
-        self._click_timer.timeout.connect(self._show_popup)
+        self._click_timer.timeout.connect(self._show_preview)
 
         if self.is_cloud_only:
             badge = QLabel(self)
@@ -499,6 +506,15 @@ class PhotoThumb(QFrame):
             badge.move(4, 2)
             badge.raise_()
             badge.setToolTip("仅公盘")
+
+            dl = QPushButton("↓", self)
+            dl.setObjectName("photoThumbDownload")
+            dl.setFixedSize(18, 18)
+            dl.setCursor(Qt.PointingHandCursor)
+            dl.setToolTip("下载到本地相册")
+            dl.clicked.connect(self._download)
+            dl.move(4, 22)
+            dl.raise_()
 
         btn = QPushButton("✕")
         btn.setObjectName("photoThumbDelete")
@@ -536,15 +552,15 @@ class PhotoThumb(QFrame):
             return
         self._click_timer.stop()
         if self.is_cloud_only:
-            event.accept()
-            return
-        self._rename()
+            self._show_original()
+        else:
+            self._rename()
         event.accept()
 
-    def _show_popup(self):
+    def _show_image_popup(self, path: Path):
         from src.ui.test_detail_dialog import StdImagePopup
 
-        pix = QPixmap(str(self.path))
+        pix = QPixmap(str(path))
         if pix.isNull():
             return
         host = self.window()
@@ -558,6 +574,37 @@ class PhotoThumb(QFrame):
             popup.move(host.mapToGlobal(host.rect().center()) - popup.rect().center())
         popup.show()
         popup.raise_()
+
+    def _show_preview(self):
+        try:
+            path = preview_path_for_photo(
+                self._local_root, self._remote_root, self.relative_path
+            )
+        except PhotoError as exc:
+            QMessageBox.warning(self, "提示", str(exc))
+            return
+        self._show_image_popup(path)
+
+    def _show_original(self):
+        try:
+            path = original_view_path(
+                self._local_root, self._remote_root, self.relative_path
+            )
+        except PhotoError as exc:
+            QMessageBox.warning(self, "提示", str(exc))
+            return
+        self._show_image_popup(path)
+
+    def _download(self):
+        self._click_timer.stop()
+        try:
+            download_photo_to_album(
+                self._local_root, self._remote_root, self.relative_path
+            )
+        except PhotoError as exc:
+            QMessageBox.warning(self, "提示", str(exc))
+            return
+        self.downloaded.emit()
 
     def _rename(self):
         text, ok = QInputDialog.getText(
@@ -683,6 +730,7 @@ class PhotoAlbumRow(QFrame):
             )
             thumb.removed.connect(self._on_thumb_removed)
             thumb.renamed.connect(self._on_thumb_renamed)
+            thumb.downloaded.connect(self._on_thumb_downloaded)
             self.thumb_layout.addWidget(thumb)
         self.chip.setText(self.album_name)
         QTimer.singleShot(0, self.scroll._fit_host)
@@ -692,6 +740,10 @@ class PhotoAlbumRow(QFrame):
         self.changed.emit(False)
 
     def _on_thumb_renamed(self):
+        self.changed.emit(False)
+
+    def _on_thumb_downloaded(self):
+        self.reload()
         self.changed.emit(False)
 
     def _ask_prefix(self, title, allow_keep_original=False):

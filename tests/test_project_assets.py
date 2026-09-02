@@ -7,9 +7,12 @@ from pathlib import Path
 from PIL import Image
 
 from src.io.project_assets import (
+    download_photo_to_album,
     list_merged_albums,
     list_merged_photos,
     move_photo_to_spare,
+    original_view_path,
+    preview_path_for_photo,
     resolve_photo_path,
     restore_photo_from_spare,
     thumbnail_for_photo,
@@ -131,3 +134,46 @@ def test_restore_photo_from_spare_returns_to_merge_list(tmp_path: Path):
 
     names = {Path(p.relative_path).name for p in list_merged_photos(local, None, LEG, TEST, "试验前")}
     assert names == {"shot.png"}
+
+
+def test_download_photo_to_album_clears_cloud_only(tmp_path: Path):
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    local.mkdir()
+    src = _png(_album(remote) / "cloud.png", "blue")
+    rel = src.relative_to(remote).as_posix()
+
+    before = list_merged_photos(local, remote, LEG, TEST, "试验前")
+    assert len(before) == 1 and before[0].is_cloud_only
+
+    dest = download_photo_to_album(local, remote, rel)
+    assert dest == local / rel
+    assert dest.is_file()
+
+    after = list_merged_photos(local, remote, LEG, TEST, "试验前")
+    assert len(after) == 1
+    assert after[0].is_cloud_only is False
+    assert after[0].read_path == dest
+
+    # already local → no-op, same path
+    assert download_photo_to_album(local, remote, rel) == dest
+
+
+def test_preview_and_original_do_not_pollute_album(tmp_path: Path):
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    local.mkdir()
+    src = _png(_album(remote) / "cloud.png", "blue")
+    rel = src.relative_to(remote).as_posix()
+    album = _album(local)
+    before = {p.name for p in album.iterdir()}
+
+    preview = preview_path_for_photo(local, remote, rel)
+    assert preview.is_file()
+    assert ".thumbs" in preview.parts
+
+    view = original_view_path(local, remote, rel)
+    assert view.is_file()
+    assert view.parent != album
+    assert not (album / "cloud.png").exists()
+    assert {p.name for p in album.iterdir()} == before

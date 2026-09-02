@@ -254,6 +254,17 @@ QPushButton#photoThumbDelete {{
     font-size: 10px;
 }}
 
+QPushButton#photoThumbDownload {{
+    padding: 0px;
+    min-height: 16px;
+    border-radius: 9px;
+    font-size: 11px;
+    font-weight: 700;
+    color: {CYAN};
+    border: 1px solid {CYAN_DIM};
+    background-color: {BG_PANEL};
+}}
+
 QLabel#photoThumbName {{
     color: {TEXT_DIM};
     background: transparent;

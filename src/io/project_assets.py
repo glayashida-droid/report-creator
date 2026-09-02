@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence, Union
@@ -232,6 +234,83 @@ def resolve_photo_path(
         if candidate.is_file():
             return candidate
     return None
+
+
+def download_photo_to_album(
+    local_root: PathLike,
+    remote_root: Optional[PathLike],
+    relative_path: str,
+) -> Path:
+    """Copy a remote-only photo into the local formal album path.
+
+    If the local file already exists, returns it without copying again.
+    """
+    rel = Path(relative_path)
+    if not rel.parts or rel.is_absolute() or ".." in rel.parts:
+        raise PhotoError("照片路径不合法")
+    if SPARE_DIR_NAME in rel.parts:
+        raise PhotoError("不能下载备用中的路径到相册")
+    local = Path(local_root)
+    dest = local / rel
+    if dest.is_file():
+        return dest
+    remote = _as_root(remote_root)
+    if remote is None:
+        raise PhotoError("公盘路径不可用")
+    src = remote / rel
+    if not src.is_file():
+        raise PhotoError("公盘上找不到该照片")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    return dest
+
+
+PREVIEW_SIZE = 800
+
+
+def preview_path_for_photo(
+    local_root: PathLike,
+    remote_root: Optional[PathLike],
+    relative_path: str,
+    *,
+    size: int = PREVIEW_SIZE,
+) -> Path:
+    """Medium preview under `.thumbs/` — never writes into formal album dirs."""
+    read = resolve_photo_path(local_root, remote_root, relative_path)
+    if read is None:
+        raise PhotoError("找不到照片")
+    return thumbnail_for_photo(local_root, relative_path, read, size=size)
+
+
+def original_view_path(
+    local_root: Optional[PathLike],
+    remote_root: Optional[PathLike],
+    relative_path: str,
+) -> Path:
+    """Path suitable for viewing the original without writing into album dirs.
+
+    Local file is returned as-is. Cloud-only copies into a temp file.
+    """
+    rel = Path(relative_path)
+    if not rel.parts or rel.is_absolute() or ".." in rel.parts:
+        raise PhotoError("照片路径不合法")
+    local = _as_root(local_root)
+    if local is not None:
+        candidate = local / rel
+        if candidate.is_file():
+            return candidate
+    remote = _as_root(remote_root)
+    if remote is None:
+        raise PhotoError("找不到照片")
+    src = remote / rel
+    if not src.is_file():
+        raise PhotoError("找不到照片")
+    suffix = src.suffix.lower() or ".jpg"
+    fd, name = tempfile.mkstemp(prefix="reach-photo-", suffix=suffix)
+    os.close(fd)
+    dest = Path(name)
+    shutil.copy2(src, dest)
+    return dest
 
 
 def thumbs_dir(local_root: PathLike) -> Path:
