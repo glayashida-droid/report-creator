@@ -261,6 +261,13 @@ QLabel#photoThumbName {{
     padding: 0px;
 }}
 
+QLabel#photoCloudBadge {{
+    background-color: {BG_PANEL};
+    border: 1px solid {CYAN_DIM};
+    border-radius: 9px;
+    padding: 1px;
+}}
+
 QPushButton#photoRenameAllLink {{
     padding: 2px 4px;
     font-size: 11px;

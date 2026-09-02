@@ -1,3 +1,10 @@
+from src.io.project_assets import (
+    MergedPhoto,
+    list_merged_albums,
+    list_merged_photos,
+    resolve_photo_path,
+    thumbnail_for_photo,
+)
 from src.io.project_mirror import (
     STRUCTURE_MIRROR_MAX_FILE_BYTES,
     SavedProject,
@@ -29,6 +36,7 @@ from src.io.leg_templates import (
 
 __all__ = [
     "STRUCTURE_MIRROR_MAX_FILE_BYTES",
+    "MergedPhoto",
     "SavedProject",
     "SavedLegTemplate",
     "TemplateExistsError",
@@ -41,13 +49,17 @@ __all__ = [
     "is_remote_json_newer",
     "is_structure_mirror_skipped",
     "list_leg_templates",
+    "list_merged_albums",
+    "list_merged_photos",
     "list_saved_projects",
     "load_json_from_remote",
     "load_leg_template",
     "local_project_dir",
+    "resolve_photo_path",
     "save_json_to_remote_then_local",
     "save_leg_template",
     "state_file_path",
+    "thumbnail_for_photo",
     "unique_test_names",
     "write_local_json_cache",
 ]

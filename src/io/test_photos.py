@@ -15,6 +15,7 @@ TEST_GROUP_DIR = "3.测试组"
 RENAME_CONFLICT_MESSAGE = "同名试验项目已存在，请重新命名"
 TEMPLATE_ALBUMS = ("试验前", "试验中", "数据", "试验后")
 IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
+SPARE_DIR_NAME = "备用"
 PLACEHOLDER_TEST_NAME = "请选择试验..."
 CUSTOM_TEST_NAME = "自定义"
 _BAD_NAME = re.compile(r'[\\/:*?"<>|]')
@@ -115,7 +116,11 @@ def list_albums(
     root = test_dir(project_root, leg_name, test_name)
     if not root.is_dir():
         return []
-    names = [p.name for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")]
+    names = [
+        p.name
+        for p in root.iterdir()
+        if p.is_dir() and not p.name.startswith(".") and p.name != SPARE_DIR_NAME
+    ]
     return apply_album_order(names, order)
 
 

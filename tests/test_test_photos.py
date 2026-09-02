@@ -79,6 +79,15 @@ def test_list_albums_order_and_ignores_loose_and_nested():
         assert iter_export_photos(root, LEG, "别的试验") == []
 
 
+def test_list_albums_excludes_spare_folder():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        test = _dir(root, "高温试验")
+        (test / "试验前").mkdir(parents=True)
+        (test / "备用").mkdir()
+        assert list_albums(root, LEG, "高温试验") == ["试验前"]
+
+
 def test_template_skips_existing_and_custom_rejects_duplicate():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

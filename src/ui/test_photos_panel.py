@@ -28,6 +28,12 @@ from src.ui.scroll_contain import ContainedScrollArea
 from src.ui.theme import BG_INPUT, CYAN
 from src.ui.window_focus import force_window_foreground
 
+from src.io.project_assets import (
+    MergedPhoto,
+    list_merged_albums,
+    list_merged_photos,
+    thumbnail_for_photo,
+)
 from src.io.test_photos import (
     PhotoError,
     collect_drop_images,
@@ -38,8 +44,6 @@ from src.io.test_photos import (
     delete_album,
     delete_photo,
     is_usable_test_name,
-    list_albums,
-    list_photos,
     remap_album_order,
     rename_album,
     rename_all_in_album,
@@ -403,17 +407,37 @@ class RenamePhotosDialog(QDialog):
         return result
 
 
+def _paint_cloud_pixmap():
+    pix = QPixmap(36, 36)
+    pix.fill(Qt.transparent)
+    pix.setDevicePixelRatio(2)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(CYAN))
+    painter.drawEllipse(QRectF(2, 7, 8, 8))
+    painter.drawEllipse(QRectF(6, 4, 9, 9))
+    painter.drawEllipse(QRectF(11, 7, 7, 7))
+    painter.drawRoundedRect(QRectF(3, 10, 14, 5), 2, 2)
+    painter.end()
+    return pix
+
+
 class PhotoThumb(QFrame):
     removed = Signal()
     renamed = Signal()
 
-    def __init__(self, path: Path, parent=None):
+    def __init__(self, photo: MergedPhoto, local_root: Path, parent=None):
         super().__init__(parent)
-        self.path = Path(path)
+        self.path = Path(photo.read_path)
+        self.relative_path = photo.relative_path
+        self.is_cloud_only = bool(photo.is_cloud_only)
+        self._local_root = Path(local_root)
         self._popup = None
         self.setObjectName("photoThumb")
         self.setFixedSize(THUMB + 18, THUMB + 10 + NAME_H)
-        self.setToolTip("单击放大，双击重命名")
+        tip = "云端照片（本地无原图）· 单击放大" if self.is_cloud_only else "单击放大，双击重命名"
+        self.setToolTip(tip)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 2)
         layout.setSpacing(2)
@@ -421,7 +445,17 @@ class PhotoThumb(QFrame):
         self.lbl = QLabel()
         self.lbl.setAlignment(Qt.AlignCenter)
         self.lbl.setCursor(Qt.PointingHandCursor)
-        pix = QPixmap(str(self.path))
+        display = self.path
+        try:
+            display = thumbnail_for_photo(
+                self._local_root,
+                self.relative_path,
+                self.path,
+                size=THUMB * 2,
+            )
+        except Exception:
+            pass
+        pix = QPixmap(str(display))
         if not pix.isNull():
             self.lbl.setPixmap(
                 pix.scaled(THUMB, THUMB, Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -433,7 +467,7 @@ class PhotoThumb(QFrame):
         self.lbl_name = QLabel()
         self.lbl_name.setObjectName("photoThumbName")
         self.lbl_name.setAlignment(Qt.AlignCenter)
-        self.lbl_name.setToolTip(self.path.name + "（双击重命名）")
+        self.lbl_name.setToolTip(self.path.name + ("（云端）" if self.is_cloud_only else "（双击重命名）"))
         self.lbl_name.setCursor(Qt.PointingHandCursor)
         self.lbl_name.mousePressEvent = self._on_press
         self.lbl_name.mouseDoubleClickEvent = self._on_double_click
@@ -444,15 +478,25 @@ class PhotoThumb(QFrame):
         self._click_timer.setInterval(280)
         self._click_timer.timeout.connect(self._show_popup)
 
-        btn = QPushButton("✕")
-        btn.setObjectName("photoThumbDelete")
-        btn.setFixedSize(18, 18)
-        btn.setCursor(Qt.PointingHandCursor)
-        btn.setToolTip("从本地镜像中删除")
-        btn.clicked.connect(self._delete)
-        btn.setParent(self)
-        btn.move(self.width() - 20, 2)
-        btn.raise_()
+        if self.is_cloud_only:
+            badge = QLabel(self)
+            badge.setObjectName("photoCloudBadge")
+            badge.setFixedSize(18, 18)
+            badge.setPixmap(_paint_cloud_pixmap())
+            badge.setScaledContents(True)
+            badge.move(4, 2)
+            badge.raise_()
+            badge.setToolTip("仅公盘")
+        else:
+            btn = QPushButton("✕")
+            btn.setObjectName("photoThumbDelete")
+            btn.setFixedSize(18, 18)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setToolTip("从本地镜像中删除")
+            btn.clicked.connect(self._delete)
+            btn.setParent(self)
+            btn.move(self.width() - 20, 2)
+            btn.raise_()
         self._elide_name()
 
     def resizeEvent(self, event):
@@ -479,6 +523,9 @@ class PhotoThumb(QFrame):
         if event.button() != Qt.LeftButton:
             return
         self._click_timer.stop()
+        if self.is_cloud_only:
+            event.accept()
+            return
         self._rename()
         event.accept()
 
@@ -516,6 +563,8 @@ class PhotoThumb(QFrame):
         self.renamed.emit()
 
     def _delete(self):
+        if self.is_cloud_only:
+            return
         self._click_timer.stop()
         delete_photo(self.path)
         self.removed.emit()
@@ -529,10 +578,18 @@ class PhotoAlbumRow(QFrame):
     albumDeleted = Signal(str)  # album_name
 
     def __init__(
-        self, project_root: Path, leg_name: str, test_name: str, album_name: str, project_id: str, parent=None
+        self,
+        project_root: Path,
+        leg_name: str,
+        test_name: str,
+        album_name: str,
+        project_id: str,
+        parent=None,
+        remote_root: Optional[Path] = None,
     ):
         super().__init__(parent)
         self.project_root = Path(project_root)
+        self.remote_root = Path(remote_root) if remote_root else None
         self.leg_name = leg_name or ""
         self.test_name = test_name
         self.album_name = album_name
@@ -596,9 +653,15 @@ class PhotoAlbumRow(QFrame):
             if widget is not None:
                 widget.setParent(None)
                 widget.deleteLater()
-        photos = list_photos(self.project_root, self.leg_name, self.test_name, self.album_name)
-        for path in photos:
-            thumb = PhotoThumb(path, self.thumb_host)
+        photos = list_merged_photos(
+            self.project_root,
+            self.remote_root,
+            self.leg_name,
+            self.test_name,
+            self.album_name,
+        )
+        for photo in photos:
+            thumb = PhotoThumb(photo, self.project_root, self.thumb_host)
             thumb.removed.connect(self._on_thumb_removed)
             thumb.renamed.connect(self._on_thumb_renamed)
             self.thumb_layout.addWidget(thumb)
@@ -641,9 +704,19 @@ class PhotoAlbumRow(QFrame):
         self.changed.emit(False)
 
     def _rename_all(self):
-        photos = list_photos(self.project_root, self.leg_name, self.test_name, self.album_name)
+        photos = [
+            item.read_path
+            for item in list_merged_photos(
+                self.project_root,
+                self.remote_root,
+                self.leg_name,
+                self.test_name,
+                self.album_name,
+            )
+            if not item.is_cloud_only
+        ]
         if not photos:
-            QMessageBox.information(self, "提示", "这个文件夹里还没有照片。")
+            QMessageBox.information(self, "提示", "这个文件夹里还没有本地照片。")
             return
         prefix = self._ask_prefix("所有照片重命名")
         if not prefix:
@@ -747,6 +820,11 @@ class TestPhotosPanel(QWidget):
     ):
         super().__init__(parent)
         self.project_root = Path(project_root) if project_root else None
+        self.remote_root = None
+        if project_state is not None:
+            raw = (getattr(project_state, "source_path", "") or "").strip()
+            if raw:
+                self.remote_root = Path(raw)
         self.leg_name = leg_name or ""
         self.test_name = test_name or ""
         self.project_id = project_id or ""
@@ -801,7 +879,9 @@ class TestPhotosPanel(QWidget):
     def _seed_order_from_disk(self) -> List[str]:
         if self.project_root is None:
             return []
-        return list_albums(self.project_root, self.leg_name, self.test_name, order=None)
+        return list_merged_albums(
+            self.project_root, self.remote_root, self.leg_name, self.test_name, order=None
+        )
 
     def _write_order(self, names: List[str]) -> None:
         if self.node_data is None:
@@ -903,10 +983,20 @@ class TestPhotosPanel(QWidget):
     def counts(self):
         if self.project_root is None or not is_usable_test_name(self.test_name):
             return 0, 0
-        albums = list_albums(self.project_root, self.leg_name, self.test_name, order=self._preferred_order())
+        albums = list_merged_albums(
+            self.project_root,
+            self.remote_root,
+            self.leg_name,
+            self.test_name,
+            order=self._preferred_order(),
+        )
         photos = 0
         for name in albums:
-            photos += len(list_photos(self.project_root, self.leg_name, self.test_name, name))
+            photos += len(
+                list_merged_photos(
+                    self.project_root, self.remote_root, self.leg_name, self.test_name, name
+                )
+            )
         return len(albums), photos
 
     def _ready(self):
@@ -964,7 +1054,9 @@ class TestPhotosPanel(QWidget):
             return
 
         order = self._preferred_order()
-        albums = list_albums(self.project_root, self.leg_name, self.test_name, order=order)
+        albums = list_merged_albums(
+            self.project_root, self.remote_root, self.leg_name, self.test_name, order=order
+        )
         if albums:
             self.lbl_hint.setText(
                 "把图片或一层文件夹拖到某一行即可导入；拖动左侧文件夹可调整贴图顺序。"
@@ -973,7 +1065,15 @@ class TestPhotosPanel(QWidget):
             self.lbl_hint.setText("还没有照片文件夹。可用「模版新建」一次开出试验前 / 中 / 数据 / 后。")
         self.lbl_hint.show()
         for name in albums:
-            row = PhotoAlbumRow(self.project_root, self.leg_name, self.test_name, name, self.project_id, self.rows_host)
+            row = PhotoAlbumRow(
+                self.project_root,
+                self.leg_name,
+                self.test_name,
+                name,
+                self.project_id,
+                self.rows_host,
+                remote_root=self.remote_root,
+            )
             row.changed.connect(self._on_row_changed)
             row.albumReorderDrop.connect(self._on_row_relative_reorder)
             row.albumRenamed.connect(self._on_album_renamed)
@@ -1023,7 +1123,9 @@ class TestPhotosPanel(QWidget):
         except PhotoError as exc:
             QMessageBox.warning(self, "提示", str(exc))
             return
-        if not created and list_albums(self.project_root, self.leg_name, self.test_name, order=self._preferred_order()):
+        if not created and list_merged_albums(
+            self.project_root, self.remote_root, self.leg_name, self.test_name, order=self._preferred_order()
+        ):
             QMessageBox.information(self, "提示", "模版四个文件夹都已存在。")
         if created and self.node_data is not None:
             order = list(self._preferred_order() or self._seed_order_from_disk())
