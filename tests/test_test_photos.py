@@ -356,6 +356,69 @@ def test_add_template_blocked_when_same_leg_duplicate(tmp_path):
     assert not (tmp_path / "3.测试组").exists()
 
 
+def test_photos_panel_shows_spare_album_last(tmp_path):
+    import sys
+
+    from PySide6.QtWidgets import QApplication, QPushButton
+
+    from src.io.project_assets import move_photo_to_spare
+    from src.io.test_photos import SPARE_ALBUM_NAME, create_template_albums
+    from src.models.project_state import ProjectState, TestLeg, TestNode
+    from src.ui.test_photos_panel import PhotoThumb, TestPhotosPanel
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    state = ProjectState(
+        project_id="P1",
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[TestNode(test_name="高温试验")],
+            )
+        ],
+    )
+    node = state.legs[0].nodes[0]
+    create_template_albums(tmp_path, "Leg 1", "高温试验")
+    shot = _png(_dir(tmp_path, "高温试验") / "试验前" / "shot.png")
+    rel = shot.relative_to(tmp_path).as_posix()
+    move_photo_to_spare(tmp_path, None, rel)
+
+    panel = TestPhotosPanel(
+        tmp_path,
+        "Leg 1",
+        "高温试验",
+        "P1",
+        project_state=state,
+        node_data=node,
+    )
+    names = [row.album_name for row in panel._row_widgets()]
+    assert names[-1] == SPARE_ALBUM_NAME
+    assert names[:-1] == ["试验前", "试验中", "数据", "试验后"]
+    assert SPARE_ALBUM_NAME not in panel.current_album_order()
+    album_count, photo_count = panel.counts()
+    assert album_count == 4
+    assert photo_count == 0
+
+    spare = panel._spare_row()
+    assert spare is not None
+    assert spare.btn_delete.isHidden()
+    assert spare.btn_qr.isHidden()
+    assert spare.btn_rename_all.text() == "打开文件夹"
+    formal = next(row for row in panel._row_widgets() if not row.is_spare)
+    assert not formal.btn_qr.isHidden()
+    assert formal.btn_qr.text() == "QR"
+    thumbs = [
+        spare.thumb_layout.itemAt(i).widget()
+        for i in range(spare.thumb_layout.count())
+    ]
+    assert len(thumbs) == 1
+    assert isinstance(thumbs[0], PhotoThumb)
+    assert thumbs[0].path.name == "shot.png"
+    assert thumbs[0].findChild(QPushButton, "photoThumbDelete") is None
+
+
 def test_apply_album_order_and_export_respects_preferred():
     assert apply_album_order(
         ["曲线", "试验前", "数据"], None

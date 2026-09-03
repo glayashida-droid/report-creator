@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ from src.models.project_state import ProjectState
 
 PathLike = Union[str, Path]
 PROJECT_STATE_NAME = "project_state.json"
+PENDING_REMOTE_JSON_NAME = ".pending_remote_json"
 THUMBS_DIR_NAME = ".thumbs"
 # Nightly purge targets: images, spreadsheets, or oversized (aligned with TKT-2 + xlsx).
 _PURGE_EXTS = IMAGE_EXTS | {".xlsx", ".xls"}
@@ -93,7 +95,7 @@ def save_json_to_remote_then_local(
     """Write project_state.json to remote first, then local cache.
 
     If the remote write fails, the local cache is left unchanged and
-    RemoteJsonError is raised so callers can keep dirty state.
+    RemoteJsonError is raised. On success, any pending-remote marker is cleared.
     """
     remote = Path(remote_root)
     local = Path(local_root)
@@ -111,11 +113,110 @@ def save_json_to_remote_then_local(
         raise RemoteJsonError(
             f"公盘已写入，但本地缓存失败: {exc}"
         ) from exc
+    clear_pending_remote_json(local)
 
 
 def write_local_json_cache(state: ProjectState, local_root: PathLike) -> None:
     """Persist a local cache copy after a successful remote load."""
     state.save_to_file(str(local_state_path(local_root)))
+
+
+def pending_remote_json_path(local_root: PathLike) -> Path:
+    return Path(local_root) / PENDING_REMOTE_JSON_NAME
+
+
+def is_pending_remote_json(local_root: PathLike) -> bool:
+    return pending_remote_json_path(local_root).is_file()
+
+
+def clear_pending_remote_json(local_root: PathLike) -> None:
+    path = pending_remote_json_path(local_root)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+
+
+def _json_mtime(path: Path) -> Optional[float]:
+    try:
+        if path.is_file():
+            return path.stat().st_mtime
+    except OSError:
+        return None
+    return None
+
+
+def pending_baseline_mtime(local_root: PathLike) -> Optional[float]:
+    """mtime of the last-synced remote/local JSON, or None if not pending."""
+    path = pending_remote_json_path(local_root)
+    if not path.is_file():
+        return None
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+        if not raw:
+            return 0.0
+        data = json.loads(raw)
+        return float(data.get("baseline_mtime") or 0.0)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return 0.0
+
+
+def _pending_baseline_mtime(
+    local_root: PathLike,
+    remote_root: Optional[PathLike] = None,
+) -> float:
+    if remote_root is not None:
+        remote_mtime = _json_mtime(remote_state_path(remote_root))
+        if remote_mtime is not None:
+            return remote_mtime
+    local_mtime = _json_mtime(local_state_path(local_root))
+    return local_mtime if local_mtime is not None else 0.0
+
+
+def save_json_local_pending_remote(
+    state: ProjectState,
+    local_root: PathLike,
+    remote_root: Optional[PathLike] = None,
+    *,
+    preserve_baseline: bool = False,
+) -> None:
+    """Write the local JSON cache and mark it pending upload to remote.
+
+    ``baseline_mtime`` is the last-known remote (or local cache) mtime *before*
+    this write, so reconnect can detect whether 公盘 changed in the meantime.
+    Pass ``preserve_baseline=True`` to refresh the local file without treating
+    the current remote mtime as a new sync point.
+    """
+    local = Path(local_root)
+    if preserve_baseline and is_pending_remote_json(local):
+        baseline = pending_baseline_mtime(local)
+        if baseline is None:
+            baseline = _pending_baseline_mtime(local, remote_root)
+    else:
+        baseline = _pending_baseline_mtime(local, remote_root)
+    write_local_json_cache(state, local)
+    pending_remote_json_path(local).write_text(
+        json.dumps({"baseline_mtime": baseline}),
+        encoding="utf-8",
+    )
+
+
+def remote_diverged_from_pending(
+    local_root: PathLike,
+    remote_root: PathLike,
+) -> bool:
+    """True when pending local JSON and remote JSON has moved past the baseline."""
+    if not is_pending_remote_json(local_root):
+        return False
+    baseline = pending_baseline_mtime(local_root)
+    if baseline is None:
+        return False
+    remote_mtime = _json_mtime(remote_state_path(remote_root))
+    if remote_mtime is None:
+        return False
+    return remote_mtime > baseline
 
 
 def is_purge_candidate(path: Path) -> bool:

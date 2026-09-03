@@ -36,6 +36,7 @@ from src.io.project_assets import (
     download_photo_to_album,
     list_merged_albums,
     list_merged_photos,
+    list_merged_spare_photos,
     move_photo_to_spare,
     original_view_path,
     preview_path_for_photo,
@@ -60,6 +61,7 @@ from src.io.test_photos import (
 )
 from src.ui.gantt_utils import find_leg_for_node
 from src.models.project_state import DUPLICATE_TEST_NAME_MESSAGE
+from src.ui.photo_inbox_dialog import PhotoInboxDialog
 
 # Sentinel from RenamePhotosDialog / _ask_prefix: keep source basenames on import.
 KEEP_ORIGINAL = object()
@@ -239,14 +241,19 @@ class FolderChip(QWidget):
 
     doubleClicked = Signal()
 
-    def __init__(self, name="", parent=None):
+    def __init__(self, name="", parent=None, locked=False):
         super().__init__(parent)
         self._name = name or ""
+        self._locked = bool(locked)
         self._drag_start: Optional[QPoint] = None
         self.setObjectName("photoFolderChip")
-        self.setCursor(Qt.OpenHandCursor)
-        self.setToolTip("拖动调整顺序；双击改名")
         self.setFixedSize(92, 64)
+        if self._locked:
+            self.setCursor(Qt.ArrowCursor)
+            self.setToolTip("系统保留；双击在访达中打开。把照片拖回正式相册即可还原")
+        else:
+            self.setCursor(Qt.OpenHandCursor)
+            self.setToolTip("拖动调整顺序；双击改名")
 
     def setText(self, name):
         self._name = name or ""
@@ -264,6 +271,8 @@ class FolderChip(QWidget):
         if (
             event.position().toPoint() - self._drag_start
         ).manhattanLength() < QApplication.startDragDistance():
+            return
+        if self._locked:
             return
         name = (self._name or "").strip()
         if not name:
@@ -442,17 +451,21 @@ class PhotoThumb(QFrame):
         local_root: Path,
         parent=None,
         remote_root: Optional[Path] = None,
+        in_spare: bool = False,
     ):
         super().__init__(parent)
         self.path = Path(photo.read_path)
         self.relative_path = photo.relative_path
         self.is_cloud_only = bool(photo.is_cloud_only)
+        self._in_spare = bool(in_spare)
         self._local_root = Path(local_root)
         self._remote_root = Path(remote_root) if remote_root else None
         self._popup = None
         self.setObjectName("photoThumb")
         self.setFixedSize(THUMB + 18, THUMB + 10 + NAME_H)
-        if self.is_cloud_only:
+        if self._in_spare:
+            tip = f"已在「{SPARE_ALBUM_NAME}」中 · 单击预览 · 拖回正式相册可还原"
+        elif self.is_cloud_only:
             tip = "云端照片 · 单击预览 · 双击查看原图"
         else:
             tip = "单击预览 · 双击重命名"
@@ -507,24 +520,26 @@ class PhotoThumb(QFrame):
             badge.raise_()
             badge.setToolTip("仅公盘")
 
-            dl = QPushButton("↓", self)
-            dl.setObjectName("photoThumbDownload")
-            dl.setFixedSize(18, 18)
-            dl.setCursor(Qt.PointingHandCursor)
-            dl.setToolTip("下载到本地相册")
-            dl.clicked.connect(self._download)
-            dl.move(4, 22)
-            dl.raise_()
+            if not self._in_spare:
+                dl = QPushButton("↓", self)
+                dl.setObjectName("photoThumbDownload")
+                dl.setFixedSize(18, 18)
+                dl.setCursor(Qt.PointingHandCursor)
+                dl.setToolTip("下载到本地相册")
+                dl.clicked.connect(self._download)
+                dl.move(4, 22)
+                dl.raise_()
 
-        btn = QPushButton("✕")
-        btn.setObjectName("photoThumbDelete")
-        btn.setFixedSize(18, 18)
-        btn.setCursor(Qt.PointingHandCursor)
-        btn.setToolTip(f"移入「{SPARE_ALBUM_NAME}」（可从该文件夹拖回还原）")
-        btn.clicked.connect(self._delete)
-        btn.setParent(self)
-        btn.move(self.width() - 20, 2)
-        btn.raise_()
+        if not self._in_spare:
+            btn = QPushButton("✕")
+            btn.setObjectName("photoThumbDelete")
+            btn.setFixedSize(18, 18)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setToolTip(f"移入「{SPARE_ALBUM_NAME}」（可从该文件夹拖回还原）")
+            btn.clicked.connect(self._delete)
+            btn.setParent(self)
+            btn.move(self.width() - 20, 2)
+            btn.raise_()
         self._elide_name()
 
     def resizeEvent(self, event):
@@ -655,8 +670,9 @@ class PhotoAlbumRow(QFrame):
         self.test_name = test_name
         self.album_name = album_name
         self.project_id = project_id
+        self._is_spare = album_name == SPARE_ALBUM_NAME
         self.setObjectName("photoAlbumRow")
-        self.setAcceptDrops(True)
+        self.setAcceptDrops(not self._is_spare)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         root = QHBoxLayout(self)
@@ -669,9 +685,12 @@ class PhotoAlbumRow(QFrame):
 
         folder_wrap = QWidget()
         folder_wrap.setFixedSize(102, 74)
-        self.chip = FolderChip(album_name, folder_wrap)
+        self.chip = FolderChip(album_name, folder_wrap, locked=self._is_spare)
         self.chip.move(0, 8)
-        self.chip.doubleClicked.connect(self._rename_folder)
+        if self._is_spare:
+            self.chip.doubleClicked.connect(self._open_in_finder)
+        else:
+            self.chip.doubleClicked.connect(self._rename_folder)
         self.btn_delete = QPushButton("✕", folder_wrap)
         self.btn_delete.setObjectName("photoThumbDelete")
         self.btn_delete.setFixedSize(18, 18)
@@ -680,13 +699,30 @@ class PhotoAlbumRow(QFrame):
         self.btn_delete.move(82, 0)
         self.btn_delete.clicked.connect(self._delete_folder)
         self.btn_delete.raise_()
+        self.btn_qr = QPushButton("QR", folder_wrap)
+        self.btn_qr.setObjectName("photoFolderQr")
+        self.btn_qr.setFixedSize(24, 18)
+        self.btn_qr.setCursor(Qt.PointingHandCursor)
+        self.btn_qr.setToolTip("手机扫码上传照片")
+        self.btn_qr.move(0, 0)
+        self.btn_qr.clicked.connect(self._open_qr_inbox)
+        self.btn_qr.raise_()
+        if self._is_spare:
+            self.btn_delete.hide()
+            self.btn_qr.hide()
         left.addWidget(folder_wrap, 0, Qt.AlignHCenter)
 
-        self.btn_rename_all = QPushButton("所有照片重命名")
+        self.btn_rename_all = QPushButton("打开文件夹" if self._is_spare else "所有照片重命名")
         self.btn_rename_all.setObjectName("photoRenameAllLink")
         self.btn_rename_all.setCursor(Qt.PointingHandCursor)
         self.btn_rename_all.setFixedWidth(102)
-        self.btn_rename_all.clicked.connect(self._rename_all)
+        if self._is_spare:
+            self.btn_rename_all.setToolTip(
+                f"在访达中打开「{SPARE_ALBUM_NAME}」；把照片拖回正式相册即可还原"
+            )
+            self.btn_rename_all.clicked.connect(self._open_in_finder)
+        else:
+            self.btn_rename_all.clicked.connect(self._rename_all)
         left.addWidget(self.btn_rename_all, 0, Qt.AlignHCenter)
         left.addStretch(1)
         root.addLayout(left, 0)
@@ -704,6 +740,10 @@ class PhotoAlbumRow(QFrame):
         root.addWidget(self.scroll, stretch=1)
         self.reload()
 
+    @property
+    def is_spare(self) -> bool:
+        return self._is_spare
+
     def folder(self) -> Path:
         return album_dir(self.project_root, self.leg_name, self.test_name, self.album_name)
 
@@ -714,19 +754,28 @@ class PhotoAlbumRow(QFrame):
             if widget is not None:
                 widget.setParent(None)
                 widget.deleteLater()
-        photos = list_merged_photos(
-            self.project_root,
-            self.remote_root,
-            self.leg_name,
-            self.test_name,
-            self.album_name,
-        )
+        if self._is_spare:
+            photos = list_merged_spare_photos(
+                self.project_root,
+                self.remote_root,
+                self.leg_name,
+                self.test_name,
+            )
+        else:
+            photos = list_merged_photos(
+                self.project_root,
+                self.remote_root,
+                self.leg_name,
+                self.test_name,
+                self.album_name,
+            )
         for photo in photos:
             thumb = PhotoThumb(
                 photo,
                 self.project_root,
                 self.thumb_host,
                 remote_root=self.remote_root,
+                in_spare=self._is_spare,
             )
             thumb.removed.connect(self._on_thumb_removed)
             thumb.renamed.connect(self._on_thumb_renamed)
@@ -759,6 +808,8 @@ class PhotoAlbumRow(QFrame):
         return dlg.choice()
 
     def _import_paths(self, paths):
+        if self._is_spare:
+            return
         images, skipped = collect_drop_images(paths)
         if not images:
             extra = f"\n已跳过：{', '.join(skipped[:6])}" if skipped else ""
@@ -774,7 +825,20 @@ class PhotoAlbumRow(QFrame):
         self.reload()
         self.changed.emit(False)
 
+    def _open_in_finder(self):
+        folder = self.folder()
+        folder.mkdir(parents=True, exist_ok=True)
+        target = str(folder)
+        if sys.platform == "darwin":
+            subprocess.run(["open", target], check=False)
+        elif sys.platform == "win32":
+            os.startfile(target)
+        else:
+            subprocess.run(["xdg-open", target], check=False)
+
     def _rename_all(self):
+        if self._is_spare:
+            return
         photos = [
             item.read_path
             for item in list_merged_photos(
@@ -801,6 +865,8 @@ class PhotoAlbumRow(QFrame):
         self.changed.emit(False)
 
     def _rename_folder(self):
+        if self._is_spare:
+            return
         old = self.album_name
         text, ok = QInputDialog.getText(self, "改名", "新的文件夹名称：", text=old)
         if not ok:
@@ -816,6 +882,8 @@ class PhotoAlbumRow(QFrame):
         self.albumRenamed.emit(old, new)
 
     def _delete_folder(self):
+        if self._is_spare:
+            return
         answer = QMessageBox.question(
             self,
             "删除照片文件夹",
@@ -829,11 +897,31 @@ class PhotoAlbumRow(QFrame):
         delete_album(self.project_root, self.leg_name, self.test_name, name)
         self.albumDeleted.emit(name)
 
+    def _open_qr_inbox(self):
+        if self._is_spare:
+            return
+        try:
+            dialog = PhotoInboxDialog(self.folder(), self.album_name, self)
+        except OSError as exc:
+            QMessageBox.warning(self, "提示", f"无法开启扫码上传：{exc}")
+            return
+
+        def _refresh():
+            self.reload()
+            self.changed.emit(False)
+
+        dialog.photosReceived.connect(_refresh)
+        dialog.exec()
+        _refresh()
+
     def _accepts_album_reorder(self, mime: QMimeData) -> bool:
         name = album_name_from_mime(mime)
-        return bool(name) and name != self.album_name
+        return bool(name) and name != self.album_name and name != SPARE_ALBUM_NAME
 
     def dragEnterEvent(self, event: QDragEnterEvent):
+        if self._is_spare:
+            event.ignore()
+            return
         if self._accepts_album_reorder(event.mimeData()):
             event.setDropAction(Qt.MoveAction)
             event.accept()
@@ -845,6 +933,9 @@ class PhotoAlbumRow(QFrame):
         event.ignore()
 
     def dragMoveEvent(self, event: QDragMoveEvent):
+        if self._is_spare:
+            event.ignore()
+            return
         if self._accepts_album_reorder(event.mimeData()):
             event.setDropAction(Qt.MoveAction)
             event.accept()
@@ -856,6 +947,9 @@ class PhotoAlbumRow(QFrame):
         event.ignore()
 
     def dropEvent(self, event: QDropEvent):
+        if self._is_spare:
+            event.ignore()
+            return
         name = album_name_from_mime(event.mimeData())
         if name and name != self.album_name:
             event.setDropAction(Qt.MoveAction)
@@ -963,7 +1057,9 @@ class TestPhotosPanel(QWidget):
     def _write_order(self, names: List[str]) -> None:
         if self.node_data is None:
             return
-        self.node_data.photo_album_order = list(names)
+        self.node_data.photo_album_order = [
+            n for n in names if n and n != SPARE_ALBUM_NAME
+        ]
 
     def _row_widgets(self) -> List[PhotoAlbumRow]:
         rows = []
@@ -973,10 +1069,21 @@ class TestPhotosPanel(QWidget):
                 rows.append(widget)
         return rows
 
+    def _formal_row_widgets(self) -> List[PhotoAlbumRow]:
+        return [row for row in self._row_widgets() if not row.is_spare]
+
+    def _spare_row(self) -> Optional[PhotoAlbumRow]:
+        for row in self._row_widgets():
+            if row.is_spare:
+                return row
+        return None
+
     def current_album_order(self) -> List[str]:
-        return [row.album_name for row in self._row_widgets()]
+        return [row.album_name for row in self._formal_row_widgets()]
 
     def _reorder_album(self, album_name: str, insert_at: int) -> None:
+        if album_name == SPARE_ALBUM_NAME:
+            return
         names = self.current_album_order()
         if album_name not in names:
             return
@@ -997,7 +1104,8 @@ class TestPhotosPanel(QWidget):
         self.changed.emit()
 
     def _host_accepts_reorder(self, mime: QMimeData) -> bool:
-        return bool(album_name_from_mime(mime))
+        name = album_name_from_mime(mime)
+        return bool(name) and name != SPARE_ALBUM_NAME
 
     def _host_drag_enter(self, event: QDragEnterEvent):
         if self._host_accepts_reorder(event.mimeData()):
@@ -1011,7 +1119,7 @@ class TestPhotosPanel(QWidget):
             self._hide_drop_indicator()
             event.ignore()
             return
-        rows = self._row_widgets()
+        rows = self._formal_row_widgets()
         y = event.position().toPoint().y()
         index = insert_index_for_album_y(self.rows_host, rows, y)
         self._show_drop_indicator(index, rows)
@@ -1025,10 +1133,10 @@ class TestPhotosPanel(QWidget):
     def _host_drop(self, event: QDropEvent):
         name = album_name_from_mime(event.mimeData())
         self._hide_drop_indicator()
-        if not name:
+        if not name or name == SPARE_ALBUM_NAME:
             event.ignore()
             return
-        rows = self._row_widgets()
+        rows = self._formal_row_widgets()
         y = event.position().toPoint().y()
         insert_at = insert_index_for_album_y(self.rows_host, rows, y)
         event.setDropAction(Qt.MoveAction)
@@ -1143,27 +1251,33 @@ class TestPhotosPanel(QWidget):
             self.lbl_hint.setText("还没有照片文件夹。可用「模版新建」一次开出试验前 / 中 / 数据 / 后。")
         self.lbl_hint.show()
         for name in albums:
-            row = PhotoAlbumRow(
-                self.project_root,
-                self.leg_name,
-                self.test_name,
-                name,
-                self.project_id,
-                self.rows_host,
-                remote_root=self.remote_root,
-            )
-            row.changed.connect(self._on_row_changed)
-            row.albumReorderDrop.connect(self._on_row_relative_reorder)
-            row.albumRenamed.connect(self._on_album_renamed)
-            row.albumDeleted.connect(self._on_album_deleted)
-            self.rows_layout.addWidget(row)
+            self._append_album_row(name)
+        self._append_album_row(SPARE_ALBUM_NAME)
         if self._drop_indicator is not None:
             self._drop_indicator.setParent(self.rows_host)
             self._drop_indicator.hide()
 
+    def _append_album_row(self, name: str) -> PhotoAlbumRow:
+        row = PhotoAlbumRow(
+            self.project_root,
+            self.leg_name,
+            self.test_name,
+            name,
+            self.project_id,
+            self.rows_host,
+            remote_root=self.remote_root,
+        )
+        row.changed.connect(self._on_row_changed)
+        if not row.is_spare:
+            row.albumReorderDrop.connect(self._on_row_relative_reorder)
+            row.albumRenamed.connect(self._on_album_renamed)
+            row.albumDeleted.connect(self._on_album_deleted)
+        self.rows_layout.addWidget(row)
+        return row
+
     def _on_row_relative_reorder(self, album_name: str, before_or_after: int):
         sender = self.sender()
-        rows = self._row_widgets()
+        rows = self._formal_row_widgets()
         if not isinstance(sender, PhotoAlbumRow) or sender not in rows:
             return
         insert_at = rows.index(sender) + before_or_after
@@ -1189,6 +1303,11 @@ class TestPhotosPanel(QWidget):
     def _on_row_changed(self, rebuild_rows=False):
         if rebuild_rows:
             self._reload_preserve_scroll()
+        else:
+            spare = self._spare_row()
+            sender = self.sender()
+            if spare is not None and sender is not spare:
+                spare.reload()
         self.changed.emit()
 
     def _open_spare_folder(self):

@@ -164,19 +164,15 @@ def list_merged_albums(
     return apply_album_order(sorted(names), order)
 
 
-def list_merged_photos(
+def _merge_photos_in_album(
     local_root: Optional[PathLike],
     remote_root: Optional[PathLike],
     leg_name: str,
     test_name: str,
     album_name: str,
 ) -> List[MergedPhoto]:
-    """Merge album photos: local wins; remote-only → is_cloud_only.
-
-    Album name ``备用`` always returns empty (formal view excludes spare).
-    """
     album = (album_name or "").strip()
-    if not album or album == SPARE_DIR_NAME:
+    if not album:
         return []
     if not (leg_name or "").strip() or not is_usable_test_name(test_name):
         return []
@@ -214,6 +210,37 @@ def list_merged_photos(
                 )
             )
     return out
+
+
+def list_merged_photos(
+    local_root: Optional[PathLike],
+    remote_root: Optional[PathLike],
+    leg_name: str,
+    test_name: str,
+    album_name: str,
+) -> List[MergedPhoto]:
+    """Merge album photos: local wins; remote-only → is_cloud_only.
+
+    Album name ``备用`` always returns empty (formal view excludes spare).
+    """
+    album = (album_name or "").strip()
+    if not album or album == SPARE_DIR_NAME:
+        return []
+    return _merge_photos_in_album(
+        local_root, remote_root, leg_name, test_name, album
+    )
+
+
+def list_merged_spare_photos(
+    local_root: Optional[PathLike],
+    remote_root: Optional[PathLike],
+    leg_name: str,
+    test_name: str,
+) -> List[MergedPhoto]:
+    """Photos in 备用/ for the recycle-bin preview. Not used by export."""
+    return _merge_photos_in_album(
+        local_root, remote_root, leg_name, test_name, SPARE_DIR_NAME
+    )
 
 
 def resolve_photo_path(

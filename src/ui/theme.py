@@ -265,6 +265,18 @@ QPushButton#photoThumbDownload {{
     background-color: {BG_PANEL};
 }}
 
+QPushButton#photoFolderQr {{
+    padding: 0px;
+    min-height: 16px;
+    min-width: 24px;
+    border-radius: 6px;
+    font-size: 9px;
+    font-weight: 700;
+    color: {CYAN};
+    border: 1px solid {CYAN_DIM};
+    background-color: {BG_PANEL};
+}}
+
 QLabel#photoThumbName {{
     color: {TEXT_DIM};
     background: transparent;

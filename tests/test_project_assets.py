@@ -11,6 +11,7 @@ from src.io.project_assets import (
     list_merged_albums,
     list_merged_attachment_refs,
     list_merged_photos,
+    list_merged_spare_photos,
     move_photo_to_spare,
     original_view_path,
     preview_path_for_photo,
@@ -81,6 +82,24 @@ def test_merged_albums_exclude_spare_and_union_roots(tmp_path: Path):
     albums = list_merged_albums(local, remote, LEG, TEST)
     assert albums == ["试验前", "试验中"]
     assert list_merged_photos(local, remote, LEG, TEST, "备用") == []
+
+
+def test_list_merged_spare_photos_shows_recycle_not_export(tmp_path: Path):
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    _png(_album(local) / "keep.png")
+    _png(_album(local).parent / SPARE_ALBUM_NAME / "gone-local.png", "black")
+    _png(_album(remote).parent / SPARE_ALBUM_NAME / "gone-cloud.png", "gray")
+    _png(_album(remote).parent / SPARE_ALBUM_NAME / "gone-local.png", "yellow")
+
+    spare = list_merged_spare_photos(local, remote, LEG, TEST)
+    by_name = {Path(item.relative_path).name: item for item in spare}
+    assert set(by_name) == {"gone-local.png", "gone-cloud.png"}
+    assert by_name["gone-local.png"].is_cloud_only is False
+    assert by_name["gone-cloud.png"].is_cloud_only is True
+    assert list_merged_photos(local, remote, LEG, TEST, SPARE_ALBUM_NAME) == []
+    assert SPARE_ALBUM_NAME not in list_merged_albums(local, remote, LEG, TEST)
+    assert "gone-local.png" not in [p.name for p in iter_export_photos(local, LEG, TEST, remote_root=remote)]
 
 
 def test_thumbnail_caches_under_local_thumbs(tmp_path: Path):

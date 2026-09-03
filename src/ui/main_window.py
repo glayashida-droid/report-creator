@@ -28,9 +28,13 @@ from src.io.project_mirror import incremental_copy, list_saved_projects, local_p
 from src.io.project_sync import (
     RemoteJsonError,
     SyncReport,
+    clear_pending_remote_json,
+    is_pending_remote_json,
     is_remote_json_newer,
     load_json_from_remote,
     local_state_path,
+    remote_diverged_from_pending,
+    save_json_local_pending_remote,
     save_json_to_remote_then_local,
     sync_project_to_remote,
     write_local_json_cache,
@@ -233,7 +237,7 @@ class NightlySyncWorker(QThread):
             self.failed.emit(str(exc))
 
 
-APP_VERSION = "1.3.4"
+APP_VERSION = "1.3.5"
 # Calendar popup floor. Dates before this are treated as "no end date"
 # because QDateEdit may clamp the blank sentinel to 1752-09-14.
 _EARLIEST_REAL_YEAR = 1990
@@ -305,6 +309,8 @@ class MainWindow(QMainWindow):
         self._mirror_gen = 0
         self._abandoned_workers = []
         self._is_dirty = False
+        self._json_save_kind = "full"
+        self._remote_was_reachable = None  # type: Optional[bool]
         self._network_config = load_network_sources_config()
         self._network_probe_worker = None  # type: Optional[NetworkProbeWorker]
         self._network_all_connected = False
@@ -1562,11 +1568,20 @@ class MainWindow(QMainWindow):
         """One short line about 公盘 reachability for the 本地镜像 tooltip."""
         remote = self._source_project_path()
         configured = (self.state.source_path or "").strip()
+        pending = (
+            self._local_path is not None and is_pending_remote_json(self._local_path)
+        )
         if remote is not None and remote.is_dir():
+            if pending:
+                if remote_diverged_from_pending(self._local_path, remote):
+                    return "公盘 可达 · 明细待同步（公盘有更新）"
+                return "公盘 可达 · 明细待同步"
             if (remote / "project_state.json").is_file():
                 return "公盘 可达 · project_state.json"
             return "公盘 可达"
         if configured or remote is not None:
+            if pending:
+                return "公盘 不可达 · 明细待同步"
             return "公盘 不可达"
         return ""
 
@@ -1585,8 +1600,16 @@ class MainWindow(QMainWindow):
         self.chk_mirror_conn.setToolTip("\n".join(lines))
 
     def _refresh_remote_json_status(self):
-        """Refresh 本地镜像 tooltip (公盘 status folded in)."""
+        """Refresh 本地镜像 tooltip (公盘 status folded in) and flush pending JSON."""
         self._refresh_mirror_tooltip()
+        reachable = self._source_project_path() is not None
+        was = self._remote_was_reachable
+        self._remote_was_reachable = reachable
+        if not reachable:
+            return
+        self._try_flush_pending_remote_json(
+            interactive=(was is False and self.isVisible())
+        )
 
     def _backup_scope_all_projects(self) -> bool:
         return bool(self.combo_backup_scope.currentData())
@@ -1743,6 +1766,8 @@ class MainWindow(QMainWindow):
             _templates_tooltip(result, cfg) or (result.templates_error or "模板未连接")
         )
         self._schedule_network_probe()
+        if self.state.project_id:
+            self._refresh_remote_json_status()
 
     def _schedule_network_probe(self):
         check = self._network_config.connection_check
@@ -1840,15 +1865,16 @@ class MainWindow(QMainWindow):
             return False
         self._is_dirty = False
         self._refresh_remote_json_status()
-        if show_success:
+        if show_success and self._json_save_kind == "full":
             SaveSuccessDialog(self).exec()
         return True
 
     def _persist_project_json(self) -> bool:
-        """Write JSON: remote first when source_path is set, then local cache."""
+        """Write JSON: remote first when reachable; else local cache + pending sync."""
         local = self._local_path
         if local is None:
             return False
+        self._json_save_kind = "full"
         remote = self._source_project_path()
         configured = (self.state.source_path or "").strip()
         if remote is not None:
@@ -1857,16 +1883,7 @@ class MainWindow(QMainWindow):
             except OSError:
                 same_as_local = False
             if not same_as_local:
-                try:
-                    save_json_to_remote_then_local(self.state, local, remote)
-                except RemoteJsonError as exc:
-                    QMessageBox.warning(
-                        self,
-                        "保存失败",
-                        f"明细未保存（修改仍保留）。\n{exc}",
-                    )
-                    return False
-                return True
+                return self._persist_remote_then_local(local, remote)
         elif configured:
             try:
                 configured_path = Path(configured)
@@ -1874,14 +1891,148 @@ class MainWindow(QMainWindow):
             except OSError:
                 same_as_local = False
             if not same_as_local:
-                QMessageBox.warning(
-                    self,
-                    "保存失败",
-                    "公盘路径不可访问，明细未保存（本地未更新，修改仍保留）。\n请检查网络后重试。",
+                return self._persist_local_pending(
+                    local,
+                    remote_root=None,
+                    message=(
+                        "公盘路径不可访问，明细已保存到本地（待同步公盘）。\n"
+                        "公盘恢复后将自动补传；若公盘期间有更新会再询问。"
+                    ),
                 )
-                return False
         self.state.save_to_file(str(local_state_path(local)))
         return True
+
+    def _persist_remote_then_local(self, local: Path, remote: Path) -> bool:
+        if is_pending_remote_json(local) and remote_diverged_from_pending(local, remote):
+            choice = self._ask_pending_json_conflict()
+            if choice == "remote":
+                if self._apply_remote_json_as_authority():
+                    self._json_save_kind = "took_remote"
+                    return True
+                QMessageBox.warning(
+                    self, "保存失败", "无法读取公盘明细，本地修改仍保留。"
+                )
+                return False
+            if choice == "later":
+                return self._persist_local_pending(
+                    local,
+                    remote_root=remote,
+                    preserve_baseline=True,
+                    message=(
+                        "明细已保存到本地（待同步公盘）。\n"
+                        "公盘仍有更新未处理，之后保存或重连时会再询问。"
+                    ),
+                )
+        try:
+            save_json_to_remote_then_local(self.state, local, remote)
+        except RemoteJsonError as exc:
+            return self._persist_local_pending(
+                local,
+                remote_root=remote,
+                message=(
+                    f"公盘写入失败，明细已保存到本地（待同步公盘）。\n{exc}\n"
+                    "公盘恢复后将自动补传；若公盘期间有更新会再询问。"
+                ),
+            )
+        self._json_save_kind = "full"
+        return True
+
+    def _persist_local_pending(
+        self,
+        local: Path,
+        *,
+        remote_root: Optional[Path],
+        message: str,
+        preserve_baseline: bool = False,
+    ) -> bool:
+        try:
+            save_json_local_pending_remote(
+                self.state,
+                local,
+                remote_root,
+                preserve_baseline=preserve_baseline,
+            )
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                "保存失败",
+                f"明细未保存（修改仍保留）。\n{exc}",
+            )
+            return False
+        self._json_save_kind = "local_pending"
+        QMessageBox.warning(self, "已保存到本地", message)
+        return True
+
+    def _ask_pending_json_conflict(self) -> str:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("公盘有更新")
+        box.setText("本地有未同步到公盘的保存，且公盘期间也有更新。")
+        box.setInformativeText("请选择以哪一侧为准。")
+        btn_local = box.addButton("用本地覆盖公盘", QMessageBox.AcceptRole)
+        btn_remote = box.addButton("使用公盘版本", QMessageBox.DestructiveRole)
+        btn_later = box.addButton("稍后", QMessageBox.RejectRole)
+        box.setDefaultButton(btn_later)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is btn_local:
+            return "local"
+        if clicked is btn_remote:
+            return "remote"
+        return "later"
+
+    def _apply_remote_json_as_authority(self) -> bool:
+        remote = self._source_project_path()
+        local = self._local_path
+        if remote is None:
+            return False
+        remote_state = load_json_from_remote(remote)
+        if remote_state is None:
+            return False
+        remote_state.project_id = remote_state.project_id or self.state.project_id
+        source_raw = (self.state.source_path or "").strip()
+        remote_state.source_path = source_raw or remote_state.source_path
+        if local is not None:
+            remote_state.project_path = str(local)
+            write_local_json_cache(remote_state, local)
+            clear_pending_remote_json(local)
+        self.state = remote_state
+        refresh_special_profile(self.state)
+        self._mount_tester_on_project()
+        self._apply_state_to_ui()
+        self._is_dirty = False
+        return True
+
+    def _try_flush_pending_remote_json(self, *, interactive: bool) -> None:
+        local = self._local_path
+        if local is None or not is_pending_remote_json(local):
+            return
+        if self._is_dirty:
+            return
+        remote = self._source_project_path()
+        if remote is None:
+            return
+        try:
+            if remote.resolve() == local.resolve():
+                clear_pending_remote_json(local)
+                return
+        except OSError:
+            pass
+        if remote_diverged_from_pending(local, remote):
+            if not interactive:
+                self._refresh_mirror_tooltip()
+                return
+            choice = self._ask_pending_json_conflict()
+            if choice == "remote":
+                self._apply_remote_json_as_authority()
+                return
+            if choice != "local":
+                return
+        try:
+            save_json_to_remote_then_local(self.state, local, remote)
+        except RemoteJsonError:
+            return
+        self._refresh_mirror_tooltip()
 
     def load_saved_state(self):
         if not self._confirm_discard_if_dirty():
@@ -1903,9 +2054,23 @@ class MainWindow(QMainWindow):
         source_raw = (loaded.source_path or "").strip()
         remote_path = Path(source_raw) if source_raw else None
         remote_available = remote_path is not None and remote_path.is_dir()
+        flush_pending = False
         if remote_available:
             use_remote = True
-            if is_remote_json_newer(saved.local_path, remote_path):
+            pending = is_pending_remote_json(saved.local_path)
+            if pending and remote_diverged_from_pending(saved.local_path, remote_path):
+                choice = self._ask_pending_json_conflict()
+                if choice == "remote":
+                    use_remote = True
+                elif choice == "local":
+                    use_remote = False
+                    flush_pending = True
+                else:
+                    use_remote = False
+            elif pending:
+                use_remote = False
+                flush_pending = True
+            elif is_remote_json_newer(saved.local_path, remote_path):
                 reply = QMessageBox.question(
                     self,
                     "公盘有更新",
@@ -1922,11 +2087,13 @@ class MainWindow(QMainWindow):
                     remote_state.project_path = str(saved.local_path)
                     loaded = remote_state
                     write_local_json_cache(loaded, saved.local_path)
+                    clear_pending_remote_json(saved.local_path)
+                    flush_pending = False
         elif source_raw:
             QMessageBox.warning(
                 self,
                 "公盘不可用",
-                "公盘路径不可访问，将使用本地缓存打开。\n公盘恢复后请重新加载或保存以同步。",
+                "公盘路径不可访问，将使用本地缓存打开。\n公盘恢复后将自动补传待同步明细。",
             )
 
         self.state = loaded
@@ -1936,10 +2103,17 @@ class MainWindow(QMainWindow):
         self._project_path = saved.local_path
         self._source_path = Path(loaded.source_path) if loaded.source_path else saved.local_path
         self._mirror_ready = True
+        self._remote_was_reachable = remote_available
         self._set_path_text(loaded.source_path or str(saved.local_path))
         self._set_mirror_status("", "ok")
         self._apply_state_to_ui()
         self._is_dirty = False
+        if flush_pending and remote_available and remote_path is not None:
+            try:
+                save_json_to_remote_then_local(self.state, saved.local_path, remote_path)
+            except RemoteJsonError:
+                pass
+            self._refresh_mirror_tooltip()
 
     def save_leg_template(self):
         if not self.state.project_id:
