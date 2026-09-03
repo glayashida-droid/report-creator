@@ -128,6 +128,7 @@ if errorlevel 1 (
     set "RC_FAIL_STEP=write run.bat failed"
     goto Fail
 )
+call :WriteDesktopShortcut "!RC_INSTALL_DIR!"
 call :WriteInstallMarker "!RC_INSTALL_DIR!"
 echo         [OK] update complete
 
@@ -137,7 +138,9 @@ echo   Update complete
 echo ============================================================
 echo.
 echo Install folder: !RC_INSTALL_DIR!
-echo Start app: !RC_INSTALL_DIR!\run.vbs  (or run.bat)
+echo Start app:
+echo   1. Desktop shortcut "%RC_APP_NAME%"
+echo   2. !RC_INSTALL_DIR!\run.vbs  (or run.bat)
 echo.
 pause
 exit /b 0
@@ -164,6 +167,10 @@ exit /b %ERRORLEVEL%
 
 :WriteRunLauncher
 call "%RC_COMMON%" WriteRunLauncher %*
+exit /b %ERRORLEVEL%
+
+:WriteDesktopShortcut
+call "%RC_COMMON%" WriteDesktopShortcut %*
 exit /b %ERRORLEVEL%
 
 :WriteInstallMarker

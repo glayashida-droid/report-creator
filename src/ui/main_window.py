@@ -70,6 +70,7 @@ from src.ui.project_board import ClickableLabel, ProjectBoardPage
 from src.ui.leg_template_dialog import ImportTemplateDialog
 from src.ui.save_success_dialog import SaveSuccessDialog
 from src.ui.candidate_pool import CandidatePoolList
+from src.ui.app_icon import load_app_icon
 from src.ui.theme import polish_date_edit_calendar, plus_icon, refresh_icon, set_calendar_selectable_range
 from src.language_copy import field_label
 from src.sample_columns import ALL_SAMPLE_COLUMNS
@@ -289,6 +290,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"Report Creator---Ver{APP_VERSION}  Design by IKARUGA")
+        _icon = load_app_icon()
+        if _icon is not None:
+            self.setWindowIcon(_icon)
         self.setAttribute(Qt.WA_AlwaysShowToolTips)
         self.resize(1100, 620)
         self.setMinimumSize(880, 480)
@@ -2148,9 +2152,12 @@ def _open_in_file_manager(path: Path, *, reveal: bool = False) -> None:
 
 
 if __name__ == "__main__":
+    from src.ui.app_icon import apply_app_icon, set_windows_app_id
     from src.ui.theme import apply_cyberpunk_theme
+    set_windows_app_id()
     app = QApplication(sys.argv)
     apply_cyberpunk_theme(app)
     window = MainWindow()
+    apply_app_icon(app, window)
     window.show()
     sys.exit(app.exec())

@@ -67,6 +67,7 @@ if defined PROJECT_ROOT (
     if exist "%PROJECT_ROOT%\run.py" (echo   [OK] PROJECT_ROOT\run.py) else (echo   [MISS] PROJECT_ROOT\run.py)
     if exist "%PROJECT_ROOT%\requirements.txt" (echo   [OK] requirements.txt) else (echo   [MISS] requirements.txt)
     if exist "%PROJECT_ROOT%\src" (echo   [OK] src\) else (echo   [MISS] src\)
+    if exist "%PROJECT_ROOT%\assets\app.ico" (echo   [OK] assets\app.ico) else (echo   [MISS] assets\app.ico)
 ) else (
     echo   [MISS] PROJECT_ROOT is not set
 )
@@ -377,7 +378,13 @@ if not exist "%DEPLOY_DIR%\_lib\create_shortcut.ps1" (
     echo [ERROR] create_shortcut.ps1 not found
     exit /b 1
 )
-powershell -NoProfile -ExecutionPolicy Bypass -File "%DEPLOY_DIR%\_lib\create_shortcut.ps1" -TargetPath "%RC_TARGET%\run.vbs" -ShortcutName "%RC_APP_NAME%"
+set "RC_ICON=%RC_TARGET%\assets\app.ico"
+if not exist "%RC_ICON%" (
+    echo [WARN] app.ico not found, shortcut will use the default icon
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%DEPLOY_DIR%\_lib\create_shortcut.ps1" -TargetPath "%RC_TARGET%\run.vbs" -ShortcutName "%RC_APP_NAME%"
+) else (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%DEPLOY_DIR%\_lib\create_shortcut.ps1" -TargetPath "%RC_TARGET%\run.vbs" -ShortcutName "%RC_APP_NAME%" -IconPath "%RC_ICON%"
+)
 if errorlevel 1 (
     echo [WARN] desktop shortcut failed, you can still use run.vbs or run.bat
     exit /b 0
