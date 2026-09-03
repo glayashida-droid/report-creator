@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 路径形态与「删卡片不删目录」由 [ADR-0002](0002-leg-scoped-test-dirs.md) 修订；本 ADR 关于「照片只在磁盘、取消明细不回滚」仍然有效。
+Accepted — 路径形态与「删卡片不删目录」由 [ADR-0002](0002-leg-scoped-test-dirs.md) 修订；合并视图与公盘备份由 [ADR-0003](0003-merge-view-cloud-backup.md) 扩展。本 ADR 关于「照片清单不进 JSON、取消明细不回滚」仍然有效。
 
 ## Context
 

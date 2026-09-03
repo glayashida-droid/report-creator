@@ -36,13 +36,15 @@ from src.io.data_tables import (
     find_decimal_inconsistencies,
     find_out_of_range,
     import_sample_ids,
-    list_attachment_refs,
     list_data_table_templates,
     open_attachment,
     parse_numeric_display,
     read_preview_snapshot,
-    resolve_attachment_path,
     upload_existing_xlsx,
+)
+from src.io.project_assets import (
+    list_merged_attachment_refs,
+    resolve_data_table_path,
 )
 from src.io.test_photos import is_usable_test_name
 from src.io.special_rules import profile_from_state
@@ -2281,6 +2283,17 @@ class TestDetailDialog(QDialog):
             raw = getattr(self._project_state, "project_path", "") or ""
         return Path(raw) if raw else None
 
+    def _remote_root(self):
+        raw = ""
+        if self._project_state is not None:
+            raw = (getattr(self._project_state, "source_path", "") or "").strip()
+        return Path(raw) if raw else None
+
+    def _resolve_data_table(self, ref: DataTableRef):
+        return resolve_data_table_path(
+            self._project_root(), self._remote_root(), ref.relative_path
+        )
+
     def _leg_name(self) -> str:
         if self._project_state is None:
             return ""
@@ -2288,13 +2301,14 @@ class TestDetailDialog(QDialog):
         return (leg.leg_name if leg is not None else "") or ""
 
     def _sync_data_tables_from_disk(self) -> bool:
-        """Replace index with a filename-sorted scan of 数据表附件. No-op without mirror."""
+        """Replace index with merge scan of local + remote 数据表附件."""
         root = self._project_root()
+        remote = self._remote_root()
         leg = self._leg_name()
         test = self.node_data.test_name
-        if root is None or not leg or not is_usable_test_name(test):
+        if (root is None and remote is None) or not leg or not is_usable_test_name(test):
             return False
-        self._data_tables = list_attachment_refs(root, leg, test)
+        self._data_tables = list_merged_attachment_refs(root, remote, leg, test)
         return True
 
     def _sync_data_table_button(self):
@@ -2321,12 +2335,11 @@ class TestDetailDialog(QDialog):
         key = ref.relative_path
         if not force and key in self._data_table_preview_cache:
             return self._data_table_preview_cache[key]
-        root = self._project_root()
-        if root is None:
+        path = self._resolve_data_table(ref)
+        if path is None:
             snap = PreviewSnapshot(sheet_name="", values=[], merges=[])
             self._data_table_preview_cache[key] = snap
             return snap
-        path = resolve_attachment_path(root, ref)
         try:
             snap = read_preview_snapshot(path)
         except DataTableError:
@@ -2719,7 +2732,8 @@ class TestDetailDialog(QDialog):
                 continue
             if sample_ids:
                 try:
-                    import_sample_ids(resolve_attachment_path(root, ref), sample_ids)
+                    path = self._resolve_data_table(ref) or (root / ref.relative_path)
+                    import_sample_ids(path, sample_ids)
                 except DataTableError as exc:
                     QMessageBox.warning(self, "提示", str(exc))
             last_rel = ref.relative_path
@@ -2732,11 +2746,10 @@ class TestDetailDialog(QDialog):
         self._expand_data_table_rel(last_rel)
 
     def _open_data_table(self, ref: DataTableRef):
-        root = self._project_root()
-        if root is None:
-            QMessageBox.warning(self, "提示", "请先加载项目以确定本地镜像路径")
+        path = self._resolve_data_table(ref)
+        if path is None:
+            QMessageBox.warning(self, "提示", "找不到数据表附件（本地与公盘均无）")
             return
-        path = resolve_attachment_path(root, ref)
         try:
             open_attachment(path)
         except DataTableError as exc:
@@ -2746,15 +2759,19 @@ class TestDetailDialog(QDialog):
         answer = QMessageBox.question(
             self,
             "删除数据表",
-            f"是否删除「{ref.title}」？\n本地附件文件将一并删除。",
+            f"是否删除「{ref.title}」？\n本地与公盘上的附件文件将一并删除。",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if answer != QMessageBox.Yes:
             return
-        root = self._project_root()
-        if root is not None:
-            delete_attachment(resolve_attachment_path(root, ref))
+        rel = Path(ref.relative_path)
+        for root in (self._project_root(), self._remote_root()):
+            if root is None:
+                continue
+            candidate = root / rel
+            if candidate.is_file():
+                delete_attachment(candidate)
         self._data_table_preview_cache.pop(ref.relative_path, None)
         if not self._sync_data_tables_from_disk():
             self._data_tables = [
@@ -2763,15 +2780,14 @@ class TestDetailDialog(QDialog):
         self._refresh_data_table_list()
 
     def _import_sample_ids_to_data_table(self, ref: DataTableRef):
-        root = self._project_root()
-        if root is None:
-            QMessageBox.warning(self, "提示", "请先加载项目以确定本地镜像路径")
+        path = self._resolve_data_table(ref)
+        if path is None:
+            QMessageBox.warning(self, "提示", "找不到数据表附件（本地与公盘均无）")
             return
         ids = self._existing_sample_ids()
         if not ids:
             QMessageBox.warning(self, "提示", "当前样品表没有可用的样品编号")
             return
-        path = resolve_attachment_path(root, ref)
         try:
             import_sample_ids(path, ids)
         except DataTableError as exc:

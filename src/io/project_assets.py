@@ -11,6 +11,7 @@ from typing import List, Optional, Sequence, Union
 
 from PIL import Image
 
+from src.io.data_tables import list_attachment_refs
 from src.io.test_photos import (
     IMAGE_EXTS,
     SPARE_ALBUM_NAME,
@@ -26,6 +27,7 @@ from src.io.test_photos import (
     unique_dest_name,
     validate_album_name,
 )
+from src.models.project_state import DataTableRef
 
 PathLike = Union[str, Path]
 
@@ -220,6 +222,23 @@ def resolve_photo_path(
     relative_path: str,
 ) -> Optional[Path]:
     """Local file if present, else remote; None if missing on both."""
+    return _resolve_project_file(local_root, remote_root, relative_path)
+
+
+def resolve_data_table_path(
+    local_root: Optional[PathLike],
+    remote_root: Optional[PathLike],
+    relative_path: str,
+) -> Optional[Path]:
+    """Local xlsx if present, else remote; None if missing on both."""
+    return _resolve_project_file(local_root, remote_root, relative_path)
+
+
+def _resolve_project_file(
+    local_root: Optional[PathLike],
+    remote_root: Optional[PathLike],
+    relative_path: str,
+) -> Optional[Path]:
     rel = Path(relative_path)
     if not rel.parts or rel.is_absolute() or ".." in rel.parts:
         return None
@@ -234,6 +253,32 @@ def resolve_photo_path(
         if candidate.is_file():
             return candidate
     return None
+
+
+def list_merged_attachment_refs(
+    local_root: Optional[PathLike],
+    remote_root: Optional[PathLike],
+    leg_name: str,
+    test_name: str,
+) -> List[DataTableRef]:
+    """Union of 数据表附件 refs under local and remote; local title wins on clash."""
+    by_rel: dict[str, DataTableRef] = {}
+    remote = _as_root(remote_root)
+    if remote is not None:
+        for ref in list_attachment_refs(remote, leg_name, test_name):
+            by_rel[ref.relative_path] = DataTableRef(
+                title=ref.title, relative_path=ref.relative_path
+            )
+    local = _as_root(local_root)
+    if local is not None:
+        for ref in list_attachment_refs(local, leg_name, test_name):
+            by_rel[ref.relative_path] = DataTableRef(
+                title=ref.title, relative_path=ref.relative_path
+            )
+    return sorted(
+        by_rel.values(),
+        key=lambda r: Path(r.relative_path).name.casefold(),
+    )
 
 
 def download_photo_to_album(

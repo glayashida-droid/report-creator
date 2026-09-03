@@ -19,11 +19,13 @@ from openpyxl.utils.cell import range_boundaries
 
 from src.io.data_tables import (
     infer_header_row_count,
-    list_attachment_refs,
     read_preview_snapshot,
-    resolve_attachment_path,
 )
-from src.io.project_assets import iter_merged_export_photos
+from src.io.project_assets import (
+    iter_merged_export_photos,
+    list_merged_attachment_refs,
+    resolve_data_table_path,
+)
 from src.io.test_photos import uses_data_photo_layout
 from src.language_copy import (
     field_label,
@@ -1186,7 +1188,9 @@ class WordGenerator:
             doc, anchor, f"（7）{self._L('检测结果', 'Test result')}：", size=SIZE_BODY
         )
         self._insert_sample_result_table(doc, anchor, node)
-        self._insert_data_tables(doc, anchor, node, project_path, leg.leg_name)
+        self._insert_data_tables(
+            doc, anchor, node, project_path, leg.leg_name, remote_root=remote_root
+        )
 
         conclusion = self._node_conclusion(node)
         self._add_para_before(
@@ -1433,14 +1437,16 @@ class WordGenerator:
         node: TestNode,
         project_path: Optional[str],
         leg_name: str = "",
+        remote_root: Optional[str] = None,
     ):
-        root = Path(project_path) if project_path else None
+        local = Path(project_path) if project_path else None
+        remote = Path(remote_root) if remote_root else None
         refs: List[DataTableRef] = []
-        if root is not None and leg_name and node.test_name:
-            refs = list_attachment_refs(root, leg_name, node.test_name)
+        if (local is not None or remote is not None) and leg_name and node.test_name:
+            refs = list_merged_attachment_refs(local, remote, leg_name, node.test_name)
         if not refs:
             refs = list(getattr(node, "data_tables", None) or [])
-        if not refs or root is None:
+        if not refs:
             return
         self._add_para_before(
             doc,
@@ -1451,7 +1457,9 @@ class WordGenerator:
         )
         for ref in refs:
             try:
-                path = resolve_attachment_path(root, ref)
+                path = resolve_data_table_path(local, remote, ref.relative_path)
+                if path is None:
+                    continue
                 snap = read_preview_snapshot(path)
             except Exception:
                 continue

@@ -394,6 +394,7 @@ class MainWindow(QMainWindow):
         meta_row.setSpacing(8)
         self.lbl_project_id = QLabel("项目号: —")
         self.lbl_project_id.setObjectName("dimLabel")
+        self.lbl_project_id.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         self.chk_equipment_conn = QCheckBox("设备清单连接ok")
         self.chk_equipment_conn.setObjectName("connectionStatus")
         self.chk_equipment_conn.setEnabled(False)
@@ -413,6 +414,7 @@ class MainWindow(QMainWindow):
             self.chk_mirror_conn,
         ):
             chk.setAttribute(Qt.WA_AlwaysShowToolTips)
+            chk.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         self.chk_mirror_conn.setToolTip("尚未加载项目")
         self.lbl_mirror_status = QLabel("")
         self.lbl_mirror_status.setObjectName("dimLabel")
@@ -423,31 +425,43 @@ class MainWindow(QMainWindow):
         self.btn_open_local.setVisible(False)
         self.btn_open_local.setToolTip("在访达中打开本地镜像文件夹")
         self.btn_open_local.clicked.connect(self._open_local_project_folder)
-        connection_row = QHBoxLayout()
-        connection_row.setContentsMargins(0, 0, 0, 0)
-        connection_row.setSpacing(10)
-        connection_row.addWidget(self.chk_equipment_conn)
-        connection_row.addWidget(self.chk_standards_conn)
-        connection_row.addWidget(self.chk_templates_conn)
-        connection_row.addWidget(self.chk_mirror_conn)
-        mirror_row = QHBoxLayout()
-        mirror_row.setContentsMargins(0, 0, 0, 0)
-        mirror_row.setSpacing(4)
-        mirror_row.addWidget(self.lbl_mirror_status)
-        mirror_row.addWidget(self.btn_open_local)
 
-        self.chk_nightly_sync = QCheckBox("夜间同步")
+        backup_sep = QFrame()
+        backup_sep.setFrameShape(QFrame.VLine)
+        backup_sep.setFrameShadow(QFrame.Sunken)
+        backup_sep.setObjectName("backupRowSep")
+
+        self.chk_nightly_sync = QCheckBox("自动备份")
+        self.chk_nightly_sync.setObjectName("autoBackupCheck")
         self.chk_nightly_sync.setChecked(nightly_sync_enabled())
         self.chk_nightly_sync.setToolTip("程序运行到设定时刻时增量备份到公盘并清理本地大文件")
+        self.chk_nightly_sync.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         self.edit_nightly_time = QLineEdit(nightly_sync_time())
+        self.edit_nightly_time.setObjectName("compactTimeEdit")
         self.edit_nightly_time.setFixedWidth(52)
+        self.edit_nightly_time.setFixedHeight(22)
         self.edit_nightly_time.setMaxLength(5)
         self.edit_nightly_time.setPlaceholderText("HH:MM")
-        self.edit_nightly_time.setToolTip("夜间同步时刻（HH:MM）")
-        self.chk_nightly_all = QCheckBox("全部项目")
-        self.chk_nightly_all.setChecked(nightly_sync_all_projects())
-        self.chk_nightly_all.setToolTip("勾选：同步本地 data/ 下全部缓存项目；否则仅当前项目")
-        self.btn_backup_now = QPushButton("立即备份到公盘")
+        self.edit_nightly_time.setToolTip("自动备份时刻（HH:MM）")
+        self.edit_nightly_time.setAlignment(Qt.AlignCenter)
+        lbl_backup_scope = QLabel("备份范围")
+        lbl_backup_scope.setObjectName("dimLabel")
+        self.combo_backup_scope = QComboBox()
+        self.combo_backup_scope.setObjectName("compactBackupScope")
+        self.combo_backup_scope.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.combo_backup_scope.setFixedHeight(22)
+        self.combo_backup_scope.setMaxVisibleItems(2)
+        self.combo_backup_scope.addItem("当前项目", False)
+        self.combo_backup_scope.addItem("全部项目", True)
+        self.combo_backup_scope.setCurrentIndex(
+            1 if nightly_sync_all_projects() else 0
+        )
+        self.combo_backup_scope.setToolTip(
+            "当前项目：仅备份已打开项目；全部项目：本地 data/ 下全部缓存项目"
+        )
+        # Popup must show both options without scrolling (stylesheet alone is flaky on macOS).
+        self.combo_backup_scope.view().setMinimumHeight(48)
+        self.btn_backup_now = QPushButton("立刻备份")
         self.btn_backup_now.setObjectName("mirrorOpenLink")
         self.btn_backup_now.setFlat(True)
         self.btn_backup_now.setCursor(Qt.PointingHandCursor)
@@ -456,23 +470,27 @@ class MainWindow(QMainWindow):
         self.lbl_sync_status.setObjectName("dimLabel")
         self.chk_nightly_sync.stateChanged.connect(self._persist_nightly_sync_prefs)
         self.edit_nightly_time.editingFinished.connect(self._persist_nightly_sync_prefs)
-        self.chk_nightly_all.stateChanged.connect(self._persist_nightly_sync_prefs)
+        self.combo_backup_scope.currentIndexChanged.connect(
+            self._persist_nightly_sync_prefs
+        )
         self.btn_backup_now.clicked.connect(self._start_manual_backup)
-        sync_row = QHBoxLayout()
-        sync_row.setContentsMargins(0, 0, 0, 0)
-        sync_row.setSpacing(6)
-        sync_row.addWidget(self.chk_nightly_sync)
-        sync_row.addWidget(self.edit_nightly_time)
-        sync_row.addWidget(self.chk_nightly_all)
-        sync_row.addWidget(self.btn_backup_now)
-        sync_row.addWidget(self.lbl_sync_status)
 
         meta_row.addWidget(self.lbl_project_id)
-        meta_row.addStretch()
-        meta_row.addLayout(connection_row)
-        meta_row.addLayout(mirror_row)
+        meta_row.addWidget(self.chk_equipment_conn)
+        meta_row.addWidget(self.chk_standards_conn)
+        meta_row.addWidget(self.chk_templates_conn)
+        meta_row.addWidget(self.chk_mirror_conn)
+        meta_row.addWidget(self.lbl_mirror_status)
+        meta_row.addWidget(self.btn_open_local)
+        meta_row.addStretch(1)
+        meta_row.addWidget(backup_sep)
+        meta_row.addWidget(self.chk_nightly_sync)
+        meta_row.addWidget(self.edit_nightly_time)
+        meta_row.addWidget(lbl_backup_scope)
+        meta_row.addWidget(self.combo_backup_scope)
+        meta_row.addWidget(self.btn_backup_now)
+        meta_row.addWidget(self.lbl_sync_status)
         top_outer.addLayout(meta_row)
-        top_outer.addLayout(sync_row)
 
         main_layout.addWidget(top_panel)
 
@@ -1538,18 +1556,46 @@ class MainWindow(QMainWindow):
         )
         self.btn_open_local.setVisible(ready)
         self.chk_mirror_conn.setChecked(ready)
-        if ready:
-            self.chk_mirror_conn.setToolTip(f"本地\n{self._local_path}")
+        self._refresh_mirror_tooltip(ready=ready)
+
+    def _remote_brief_for_tooltip(self) -> str:
+        """One short line about 公盘 reachability for the 本地镜像 tooltip."""
+        remote = self._source_project_path()
+        configured = (self.state.source_path or "").strip()
+        if remote is not None and remote.is_dir():
+            if (remote / "project_state.json").is_file():
+                return "公盘 可达 · project_state.json"
+            return "公盘 可达"
+        if configured or remote is not None:
+            return "公盘 不可达"
+        return ""
+
+    def _refresh_mirror_tooltip(self, *, ready: Optional[bool] = None):
+        if ready is None:
+            ready = self.chk_mirror_conn.isChecked()
+        if ready and self._local_path is not None:
+            lines = [f"本地 {self._local_path}"]
         elif self._local_path is not None:
-            self.chk_mirror_conn.setToolTip(f"本地镜像未就绪\n{self._local_path}")
+            lines = ["本地镜像未就绪", str(self._local_path)]
         else:
-            self.chk_mirror_conn.setToolTip("尚未加载项目")
+            lines = ["尚未加载项目"]
+        remote_line = self._remote_brief_for_tooltip()
+        if remote_line:
+            lines.append(remote_line)
+        self.chk_mirror_conn.setToolTip("\n".join(lines))
+
+    def _refresh_remote_json_status(self):
+        """Refresh 本地镜像 tooltip (公盘 status folded in)."""
+        self._refresh_mirror_tooltip()
+
+    def _backup_scope_all_projects(self) -> bool:
+        return bool(self.combo_backup_scope.currentData())
 
     def _persist_nightly_sync_prefs(self):
         save_nightly_sync_prefs(
             enabled=self.chk_nightly_sync.isChecked(),
             time_hhmm=self.edit_nightly_time.text(),
-            all_projects=self.chk_nightly_all.isChecked(),
+            all_projects=self._backup_scope_all_projects(),
         )
         self.edit_nightly_time.setText(nightly_sync_time())
 
@@ -1568,15 +1614,17 @@ class MainWindow(QMainWindow):
         if now.strftime("%H:%M") != target:
             return
         self._last_nightly_fire_key = key
-        self._start_backup_jobs(self._collect_sync_jobs(), label="夜间同步")
+        self._start_backup_jobs(self._collect_sync_jobs(), label="自动备份")
 
     def _start_manual_backup(self):
         self._persist_nightly_sync_prefs()
-        jobs = self._collect_sync_jobs(all_projects=self.chk_nightly_all.isChecked())
+        jobs = self._collect_sync_jobs(
+            all_projects=self._backup_scope_all_projects()
+        )
         if not jobs:
             self.lbl_sync_status.setText("无可用公盘项目可备份")
             return
-        self._start_backup_jobs(jobs, label="立即备份")
+        self._start_backup_jobs(jobs, label="立刻备份")
 
     def _collect_sync_jobs(self, *, all_projects: Optional[bool] = None):
         jobs = []
@@ -1645,10 +1693,12 @@ class MainWindow(QMainWindow):
                 f"上次同步 {stamp} · 上传 {len(report.uploaded)} · 清理 {len(report.purged)}"
             )
             self.lbl_sync_status.setToolTip("")
+        self._refresh_remote_json_status()
 
     def _on_sync_failed(self, message: str):
         self.btn_backup_now.setEnabled(True)
         self.lbl_sync_status.setText(f"同步失败: {message}")
+        self._refresh_remote_json_status()
 
     def _start_network_probe(self):
         if self._network_probe_worker is not None and self._network_probe_worker.isRunning():
@@ -1789,6 +1839,7 @@ class MainWindow(QMainWindow):
         if not self._persist_project_json():
             return False
         self._is_dirty = False
+        self._refresh_remote_json_status()
         if show_success:
             SaveSuccessDialog(self).exec()
         return True

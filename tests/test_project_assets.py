@@ -9,10 +9,12 @@ from PIL import Image
 from src.io.project_assets import (
     download_photo_to_album,
     list_merged_albums,
+    list_merged_attachment_refs,
     list_merged_photos,
     move_photo_to_spare,
     original_view_path,
     preview_path_for_photo,
+    resolve_data_table_path,
     resolve_photo_path,
     restore_photo_from_spare,
     thumbnail_for_photo,
@@ -177,3 +179,46 @@ def test_preview_and_original_do_not_pollute_album(tmp_path: Path):
     assert view.parent != album
     assert not (album / "cloud.png").exists()
     assert {p.name for p in album.iterdir()} == before
+
+
+def _attach(root: Path, name: str = "工况.xlsx") -> Path:
+    folder = root / "3.测试组" / leg_test_dir_key(LEG, TEST) / "数据表附件"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / name
+    path.write_bytes(b"xlsx-bytes")
+    return path
+
+
+def test_resolve_data_table_path_remote_only_and_local_wins(tmp_path: Path):
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    local.mkdir()
+    cloud = _attach(remote, "cloud.xlsx")
+    both_remote = _attach(remote, "both.xlsx")
+    both_local = _attach(local, "both.xlsx")
+    both_local.write_bytes(b"local-xlsx")
+
+    cloud_rel = cloud.relative_to(remote).as_posix()
+    both_rel = both_local.relative_to(local).as_posix()
+
+    assert resolve_data_table_path(local, remote, cloud_rel) == cloud
+    assert resolve_data_table_path(local, remote, both_rel) == both_local
+    assert resolve_data_table_path(local, remote, both_rel) != both_remote
+    assert resolve_data_table_path(local, None, cloud_rel) is None
+
+
+def test_list_merged_attachment_refs_unions_local_and_remote(tmp_path: Path):
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    local.mkdir()
+    _attach(remote, "cloud.xlsx")
+    _attach(local, "local.xlsx")
+    _attach(remote, "both.xlsx")
+    _attach(local, "both.xlsx")
+
+    cloud = _attach(remote, "cloud.xlsx")
+    refs = list_merged_attachment_refs(local, remote, LEG, TEST)
+    names = {Path(r.relative_path).name for r in refs}
+    assert names == {"cloud.xlsx", "local.xlsx", "both.xlsx"}
+    cloud_ref = next(r for r in refs if Path(r.relative_path).name == "cloud.xlsx")
+    assert resolve_data_table_path(local, remote, cloud_ref.relative_path) == cloud

@@ -373,7 +373,12 @@ QLabel#errorLabel {{
     color: {MAGENTA};
 }}
 
+QCheckBox {{
+    background: transparent;
+}}
+
 QCheckBox#connectionStatus {{
+    background: transparent;
     color: {TEXT_DIM};
     spacing: 4px;
 }}
@@ -385,6 +390,28 @@ QCheckBox#connectionStatus::indicator {{
 
 QCheckBox#connectionStatus:checked {{
     color: {CYAN};
+}}
+
+QCheckBox#autoBackupCheck {{
+    background: transparent;
+    spacing: 4px;
+}}
+
+QCheckBox#autoBackupCheck::indicator {{
+    width: 14px;
+    height: 14px;
+    border: 1px solid {CYAN_DIM};
+    border-radius: 3px;
+    background-color: {BG_INPUT};
+}}
+
+QCheckBox#autoBackupCheck::indicator:hover {{
+    border: 1px solid {CYAN};
+}}
+
+QCheckBox#autoBackupCheck::indicator:checked {{
+    background-color: {CYAN};
+    border: 1px solid {CYAN};
 }}
 
 QPushButton#mirrorOpenLink {{
@@ -403,6 +430,38 @@ QPushButton#mirrorOpenLink:hover {{
 
 QPushButton#mirrorOpenLink:pressed {{
     color: {CYAN};
+}}
+
+QFrame#backupRowSep {{
+    color: {BORDER};
+    max-width: 1px;
+    margin: 0 4px;
+}}
+
+QLineEdit#compactTimeEdit {{
+    padding: 1px 4px;
+    border-radius: 6px;
+    min-height: 20px;
+    max-height: 22px;
+}}
+
+QComboBox#compactBackupScope {{
+    padding: 1px 6px;
+    border-radius: 6px;
+    min-height: 20px;
+}}
+
+QComboBox#compactBackupScope QAbstractItemView {{
+    background-color: {BG_PANEL};
+    border: 1px solid {CYAN};
+    padding: 2px;
+    min-height: 44px;
+}}
+
+QComboBox#compactBackupScope QAbstractItemView::item {{
+    min-height: 20px;
+    padding: 2px 8px;
+    background-color: {BG_PANEL};
 }}
 
 QLabel#expiredFollowTip {{

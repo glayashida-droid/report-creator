@@ -187,3 +187,30 @@ def test_main_window_save_keeps_dirty_when_remote_unwritable(tmp_path: Path):
 
     assert (local / "project_state.json").read_text(encoding="utf-8") == '{"sample_name":"旧"}'
     assert win._is_dirty is True
+    win._refresh_remote_json_status()
+    assert "公盘 不可达" in win.chk_mirror_conn.toolTip()
+
+
+def test_main_window_remote_json_status_ok_when_source_reachable(tmp_path: Path):
+    import sys
+
+    from PySide6.QtWidgets import QApplication
+
+    from src.ui.main_window import MainWindow
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    (remote / "project_state.json").write_text("{}", encoding="utf-8")
+
+    win = MainWindow()
+    win.state = _state()
+    win.state.source_path = str(remote)
+    win._source_path = remote
+    win._refresh_remote_json_status()
+    tip = win.chk_mirror_conn.toolTip()
+    assert "公盘 可达" in tip
+    assert "project_state.json" in tip

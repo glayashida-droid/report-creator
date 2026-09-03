@@ -8,9 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
-    QDialog,
     QLabel,
-    QLineEdit,
     QProgressBar,
     QWidget,
 )
@@ -24,7 +22,6 @@ from src.models.project_state import (
     TestSample,
     TestStandard,
 )
-from src.ui.board_gate_dialog import BoardGateDialog
 from src.ui.main_window import MainWindow
 from src.ui.project_board import (
     COL_END,
@@ -71,30 +68,6 @@ def _complete_node(name: str, start: str, end: str) -> TestNode:
         equipments=[TestEquipment(name="温箱", code="H001")],
         samples=[TestSample(sample_id="A01")],
     )
-
-
-def test_board_gate_dialog_f_enters_without_input():
-    _app()
-    dialog = BoardGateDialog()
-    dialog.show()
-    QApplication.processEvents()
-    assert dialog.findChild(QLineEdit) is None
-    assert dialog.lbl_hint.text() == "按【F】键进入坦克"
-    QTest.keyClick(dialog, Qt.Key_F)
-    QApplication.processEvents()
-    assert dialog.result() == QDialog.Accepted
-    dialog.close()
-
-
-def test_board_gate_dialog_escape_cancels():
-    _app()
-    dialog = BoardGateDialog()
-    dialog.show()
-    QApplication.processEvents()
-    QTest.keyClick(dialog, Qt.Key_Escape)
-    QApplication.processEvents()
-    assert dialog.result() == QDialog.Rejected
-    dialog.close()
 
 
 def test_board_page_one_row_per_card_and_progress(tmp_path):
@@ -243,7 +216,7 @@ def test_board_tree_expand_shows_per_test_to(tmp_path):
     assert parent.text(COL_END) == "2026-09-10"
 
 
-def test_f_unlocks_board_and_back_returns():
+def test_hotzone_unlocks_board_and_back_returns():
     _app()
     win = MainWindow()
     assert win._stack.currentWidget() is win._report_page
@@ -292,25 +265,14 @@ def test_tester_title_click_opens_rename_not_board(monkeypatch):
     win.close()
 
 
-def test_board_gate_click_opens_gate_dialog(monkeypatch):
+def test_board_gate_click_enters_board_directly(monkeypatch):
     _app()
     win = MainWindow()
-    accepted = {"ok": False}
-
-    class FakeGate:
-        def exec(self):
-            accepted["ok"] = True
-            return QDialog.Accepted
-
-    monkeypatch.setattr(
-        "src.ui.main_window.BoardGateDialog", lambda parent=None: FakeGate()
-    )
     unlocked = {"ok": False}
     monkeypatch.setattr(
         win, "_unlock_project_board", lambda: unlocked.__setitem__("ok", True) or True
     )
     win._on_board_gate_clicked()
-    assert accepted["ok"] is True
     assert unlocked["ok"] is True
     win.close()
 
