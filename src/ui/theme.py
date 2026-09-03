@@ -395,12 +395,12 @@ QCheckBox#connectionStatus {{
     spacing: 4px;
 }}
 
-QCheckBox#connectionStatus::indicator {{
-    width: 14px;
-    height: 14px;
+QCheckBox#connectionStatus:disabled {{
+    color: {TEXT_DIM};
 }}
 
-QCheckBox#connectionStatus:checked {{
+QCheckBox#connectionStatus:checked,
+QCheckBox#connectionStatus:checked:disabled {{
     color: {CYAN};
 }}
 
@@ -474,6 +474,34 @@ QComboBox#compactBackupScope QAbstractItemView::item {{
     min-height: 20px;
     padding: 2px 8px;
     background-color: {BG_PANEL};
+}}
+
+QComboBox#boardStatusFilter {{
+    min-width: 88px;
+    padding: 6px 10px;
+    combobox-popup: 0;
+}}
+
+QComboBox#boardStatusFilter QAbstractItemView {{
+    background-color: {BG_PANEL};
+    color: {TEXT};
+    border: 1px solid {CYAN};
+    padding: 2px;
+    outline: 0;
+    selection-background-color: {BG_HOVER};
+    selection-color: {TEXT};
+}}
+
+QComboBox#boardStatusFilter QAbstractItemView::item {{
+    min-height: 24px;
+    padding: 3px 10px;
+    color: {TEXT};
+}}
+
+QComboBox#boardStatusFilter QAbstractItemView::item:hover,
+QComboBox#boardStatusFilter QAbstractItemView::item:selected {{
+    background-color: {BG_HOVER};
+    color: {CYAN};
 }}
 
 QLabel#expiredFollowTip {{
@@ -1313,7 +1341,24 @@ def polish_date_edit_calendar(date_edit, *, blank_opens_at_default_year: bool = 
         date_edit._blank_date_calendar_filter = popup_filter
 
 
+def _connection_status_indicator_qss():
+    """Hide the native checkbox; ConnectionStatusCheck paints the ✓ itself."""
+    return f"""
+QCheckBox#connectionStatus::indicator,
+QCheckBox#connectionStatus::indicator:unchecked,
+QCheckBox#connectionStatus::indicator:unchecked:disabled,
+QCheckBox#connectionStatus::indicator:checked,
+QCheckBox#connectionStatus::indicator:checked:disabled {{
+    width: 14px;
+    height: 14px;
+    border: none;
+    background: transparent;
+    image: none;
+}}
+"""
+
+
 def apply_cyberpunk_theme(app):
     """Apply the cyberpunk QSS to a QApplication."""
     app.setStyle("Fusion")
-    app.setStyleSheet(CYBERPUNK_QSS)
+    app.setStyleSheet(CYBERPUNK_QSS + _connection_status_indicator_qss())

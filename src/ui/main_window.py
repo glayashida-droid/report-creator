@@ -12,9 +12,10 @@ from PySide6.QtWidgets import (
     QLineEdit, QPushButton, QGroupBox, QSplitter, QComboBox, QMessageBox,
     QDateEdit, QFileDialog, QFormLayout, QScrollArea, QSizePolicy, QFrame,
     QInputDialog, QButtonGroup, QToolButton, QDialog, QCheckBox,
-    QStackedWidget,
+    QStackedWidget, QStyle, QStyleOptionButton,
 )
 from PySide6.QtCore import Qt, QDate, QThread, Signal, QEvent, QObject, QSize, QTimer
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
@@ -38,14 +39,17 @@ from src.io.project_sync import (
     save_json_to_remote_then_local,
     sync_project_to_remote,
     write_local_json_cache,
+    remember_board_after_local_json,
 )
 from src.io.sample_files import find_sample_files
 from src.io.network_sources import (
     NetworkSourcesConfig,
     ProbeResult,
+    attempt_mount_network_shares,
     connection_kind,
+    disconnected_probe_result,
+    isolated_probe_network_sources,
     load_network_sources_config,
-    probe_network_sources,
     resolve_report_template_for_language,
 )
 from src.io.special_rules import profile_from_state, refresh_special_profile, state_has_forbidden_na
@@ -69,13 +73,19 @@ from src.parsers.db_loader import DuplicateStandardError, duplicate_standard_mes
 from src.ui.leg_graph import LegGraphArea
 from src.ui.load_state_dialog import LoadStateDialog
 from src.ui.tester_name_dialog import TesterNameDialog
-from src.ui.board_gate_dialog import BoardGateDialog
 from src.ui.project_board import ClickableLabel, ProjectBoardPage
 from src.ui.leg_template_dialog import ImportTemplateDialog
 from src.ui.save_success_dialog import SaveSuccessDialog
 from src.ui.candidate_pool import CandidatePoolList
 from src.ui.app_icon import load_app_icon
-from src.ui.theme import polish_date_edit_calendar, plus_icon, refresh_icon, set_calendar_selectable_range
+from src.ui.theme import (
+    CYAN,
+    TEXT_DIM,
+    polish_date_edit_calendar,
+    plus_icon,
+    refresh_icon,
+    set_calendar_selectable_range,
+)
 from src.language_copy import field_label
 from src.sample_columns import ALL_SAMPLE_COLUMNS
 
@@ -168,20 +178,14 @@ class NetworkProbeWorker(QThread):
 
     def run(self):
         try:
-            self.finished.emit(probe_network_sources(self._config))
-        except Exception as exc:
             self.finished.emit(
-                ProbeResult(
-                    equipment_ok=False,
-                    standards_ok=False,
-                    templates_ok=False,
-                    equipment_path=None,
-                    standards_path=None,
-                    equipment_error=str(exc),
-                    standards_error=str(exc),
-                    templates_error=str(exc),
+                isolated_probe_network_sources(
+                    self._config,
+                    timeout_sec=self._config.connection_check.probe_timeout_sec,
                 )
             )
+        except Exception as exc:
+            self.finished.emit(disconnected_probe_result(str(exc)))
 
 
 class MirrorWorker(QThread):
@@ -258,6 +262,61 @@ def _conn_tooltip(kind: str, path: Optional[str], error: str, ok: bool) -> str:
     return "\n".join(lines)
 
 
+def _is_network_connection(source: str, configured_raw: str) -> bool:
+    return connection_kind(source, configured_raw) == "网络"
+
+
+def _templates_are_network(result: ProbeResult, cfg: NetworkSourcesConfig) -> bool:
+    return all(
+        _is_network_connection(source, raw)
+        for source, raw in (
+            (result.report_templates_source, cfg.report_templates.directory),
+            (result.leg_templates_source, cfg.leg_templates.directory),
+            (result.data_tables_source, cfg.data_tables.directory),
+        )
+    )
+
+
+def _apply_connection_status(chk, *, ok: bool, network: bool = False) -> None:
+    chk.setChecked(ok)
+    chk.setProperty("network", "true" if ok and network else "false")
+    style = chk.style()
+    if style is not None:
+        style.unpolish(chk)
+        style.polish(chk)
+    chk.update()
+
+
+class ConnectionStatusCheck(QCheckBox):
+    """Status chip: text turns cyan when connected; ✓ is painted (QSS file:// icons fail on macOS)."""
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self.isChecked():
+            return
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        rect = self.style().subElementRect(QStyle.SE_CheckBoxIndicator, opt, self)
+        if not rect.isValid() or rect.isEmpty():
+            return
+        color = QColor(CYAN) if self.property("network") == "true" else QColor(TEXT_DIM)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setClipRect(rect)
+        pen = QPen(color)
+        pen.setWidthF(max(1.8, rect.width() / 7.0))
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        w, h = float(rect.width()), float(rect.height())
+        path = QPainterPath()
+        path.moveTo(rect.x() + 3.0 / 14.0 * w, rect.y() + 7.2 / 14.0 * h)
+        path.lineTo(rect.x() + 5.8 / 14.0 * w, rect.y() + 10.0 / 14.0 * h)
+        path.lineTo(rect.x() + 11.0 / 14.0 * w, rect.y() + 3.5 / 14.0 * h)
+        painter.drawPath(path)
+        painter.end()
+
+
 def _templates_tooltip(result: ProbeResult, config: NetworkSourcesConfig) -> str:
     rows = (
         (
@@ -314,10 +373,12 @@ class MainWindow(QMainWindow):
         self._network_config = load_network_sources_config()
         self._network_probe_worker = None  # type: Optional[NetworkProbeWorker]
         self._network_all_connected = False
+        self._network_startup_started = False
         self._connection_timer = QTimer(self)
         self._connection_timer.timeout.connect(self._start_network_probe)
-        self._session_tester_name = ""
-        self._tester_prompt_pending = True
+        saved_tester = default_tester_name()
+        self._session_tester_name = saved_tester
+        self._tester_prompt_pending = not bool(saved_tester)
         self._sync_worker = None  # type: Optional[NightlySyncWorker]
         self._nightly_sync_timer = QTimer(self)
         self._nightly_sync_timer.setInterval(30_000)
@@ -325,8 +386,7 @@ class MainWindow(QMainWindow):
         self._last_nightly_fire_key = ""
 
         self.init_ui()
-        self._start_network_probe()
-        self._schedule_network_probe()
+        self._refresh_tester_title_label()
         self._nightly_sync_timer.start()
 
     def init_ui(self):
@@ -401,16 +461,16 @@ class MainWindow(QMainWindow):
         self.lbl_project_id = QLabel("项目号: —")
         self.lbl_project_id.setObjectName("dimLabel")
         self.lbl_project_id.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
-        self.chk_equipment_conn = QCheckBox("设备清单连接ok")
+        self.chk_equipment_conn = ConnectionStatusCheck("设备清单连接ok")
         self.chk_equipment_conn.setObjectName("connectionStatus")
         self.chk_equipment_conn.setEnabled(False)
-        self.chk_standards_conn = QCheckBox("标准库连接ok")
+        self.chk_standards_conn = ConnectionStatusCheck("标准库连接ok")
         self.chk_standards_conn.setObjectName("connectionStatus")
         self.chk_standards_conn.setEnabled(False)
-        self.chk_templates_conn = QCheckBox("模板连接ok")
+        self.chk_templates_conn = ConnectionStatusCheck("模板连接ok")
         self.chk_templates_conn.setObjectName("connectionStatus")
         self.chk_templates_conn.setEnabled(False)
-        self.chk_mirror_conn = QCheckBox("本地镜像ok")
+        self.chk_mirror_conn = ConnectionStatusCheck("本地镜像ok")
         self.chk_mirror_conn.setObjectName("connectionStatus")
         self.chk_mirror_conn.setEnabled(False)
         for chk in (
@@ -421,6 +481,7 @@ class MainWindow(QMainWindow):
         ):
             chk.setAttribute(Qt.WA_AlwaysShowToolTips)
             chk.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+            _apply_connection_status(chk, ok=False, network=False)
         self.chk_mirror_conn.setToolTip("尚未加载项目")
         self.lbl_mirror_status = QLabel("")
         self.lbl_mirror_status.setObjectName("dimLabel")
@@ -745,12 +806,21 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         self._apply_golden_split()
         self.list_candidates.fit_grid()
+        if not self._network_startup_started:
+            self._network_startup_started = True
+            QTimer.singleShot(0, self._start_deferred_network_connect)
         if self._tester_prompt_pending:
             self._tester_prompt_pending = False
             QTimer.singleShot(0, self._prompt_tester_name)
 
+    def _start_deferred_network_connect(self):
+        """Mount then probe after the first paint so SMB cannot delay the window."""
+        attempt_mount_network_shares(self._network_config)
+        self._start_network_probe()
+        self._schedule_network_probe()
+
     def _prompt_tester_name(self, *, mount_project: bool = False) -> bool:
-        """Confirm session tester name; optionally write into current project."""
+        """Ask for tester name on first launch, or when the title is clicked."""
         preset = self._session_tester_name or default_tester_name()
         dialog = TesterNameDialog(preset, self)
         if dialog.exec() != QDialog.Accepted:
@@ -810,9 +880,6 @@ class MainWindow(QMainWindow):
         self._prompt_tester_name(mount_project=True)
 
     def _on_board_gate_clicked(self):
-        dialog = BoardGateDialog(self)
-        if dialog.exec() != QDialog.Accepted:
-            return
         self._unlock_project_board()
 
     def _unlock_project_board(self) -> bool:
@@ -1561,7 +1628,7 @@ class MainWindow(QMainWindow):
             and self._local_path.is_dir()
         )
         self.btn_open_local.setVisible(ready)
-        self.chk_mirror_conn.setChecked(ready)
+        _apply_connection_status(self.chk_mirror_conn, ok=ready, network=False)
         self._refresh_mirror_tooltip(ready=ready)
 
     def _remote_brief_for_tooltip(self) -> str:
@@ -1740,10 +1807,26 @@ class MainWindow(QMainWindow):
             equipment_ok=result.equipment_ok,
         )
         self._network_all_connected = result.all_configured_connected
-        self.chk_equipment_conn.setChecked(result.equipment_ok)
-        self.chk_standards_conn.setChecked(result.standards_ok)
-        self.chk_templates_conn.setChecked(result.templates_ok)
         cfg = self._network_config
+        _apply_connection_status(
+            self.chk_equipment_conn,
+            ok=result.equipment_ok,
+            network=_is_network_connection(
+                result.equipment_source, cfg.equipment_list.directory
+            ),
+        )
+        _apply_connection_status(
+            self.chk_standards_conn,
+            ok=result.standards_ok,
+            network=_is_network_connection(
+                result.standards_source, cfg.standards_library.file
+            ),
+        )
+        _apply_connection_status(
+            self.chk_templates_conn,
+            ok=result.templates_ok,
+            network=_templates_are_network(result, cfg),
+        )
         self.chk_equipment_conn.setToolTip(
             _conn_tooltip(
                 connection_kind(result.equipment_source, cfg.equipment_list.directory),
@@ -1900,6 +1983,7 @@ class MainWindow(QMainWindow):
                     ),
                 )
         self.state.save_to_file(str(local_state_path(local)))
+        remember_board_after_local_json(local)
         return True
 
     def _persist_remote_then_local(self, local: Path, remote: Path) -> bool:

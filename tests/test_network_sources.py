@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,7 +14,10 @@ from src.io.network_sources import (
     _safe_is_dir,
     attempt_mount_network_shares,
     connection_kind,
+    isolated_probe_network_sources,
     load_network_sources_config,
+    network_config_from_payload,
+    network_config_to_payload,
     normalize_config_path,
     probe_network_sources,
     probe_template_sources,
@@ -156,6 +160,7 @@ def _write_config(tmp_path: Path, **overrides) -> Path:
         "connection_check": {
             "retry_interval_disconnected_sec": 30,
             "retry_interval_connected_sec": 60,
+            "probe_timeout_sec": 8,
         },
     }
     payload["network_sources"].update(overrides.get("network_sources") or {})
@@ -449,3 +454,62 @@ def test_conn_tooltip_shows_kind_and_path():
     assert "报告模板 [本地]" in tip
     assert "/tmp/report" in tip
     assert "Leg模板 [本地]" in tip
+
+
+def test_probe_timeout_sec_from_config(tmp_path: Path):
+    cfg_path = _write_config(tmp_path)
+    assert load_network_sources_config(cfg_path).connection_check.probe_timeout_sec == 8
+    raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+    raw["connection_check"]["probe_timeout_sec"] = 12
+    cfg_path.write_text(json.dumps(raw), encoding="utf-8")
+    assert load_network_sources_config(cfg_path).connection_check.probe_timeout_sec == 12
+
+
+def test_network_config_payload_roundtrip(tmp_path: Path):
+    config = load_network_sources_config(_write_config(tmp_path))
+    restored = network_config_from_payload(network_config_to_payload(config))
+    assert restored.equipment_list.directory == config.equipment_list.directory
+    assert restored.standards_library.file == config.standards_library.file
+    assert restored.connection_check.probe_timeout_sec == config.connection_check.probe_timeout_sec
+
+
+def test_isolated_probe_timeout_returns_disconnected(tmp_path: Path):
+    config = load_network_sources_config(_write_config(tmp_path))
+
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout", 1))
+
+    result = isolated_probe_network_sources(config, timeout_sec=1, run=fake_run)
+    assert result.equipment_ok is False
+    assert result.standards_ok is False
+    assert result.templates_ok is False
+    assert "超时" in result.equipment_error
+
+
+def test_isolated_probe_parses_child_json(tmp_path: Path):
+    from dataclasses import asdict
+
+    config = load_network_sources_config(_write_config(tmp_path))
+    child = probe_network_sources(config)
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout=json.dumps(asdict(child), ensure_ascii=False),
+            stderr="",
+        )
+
+    result = isolated_probe_network_sources(config, timeout_sec=8, run=fake_run)
+    assert result.equipment_ok is True
+    assert result.equipment_path == child.equipment_path
+    assert result.templates_ok is True
+
+
+def test_isolated_probe_subprocess_with_local_files(tmp_path: Path):
+    config = load_network_sources_config(_write_config(tmp_path))
+    result = isolated_probe_network_sources(config, timeout_sec=15)
+    assert result.equipment_ok is True
+    assert result.standards_ok is True
+    assert result.templates_ok is True
+    assert result.all_configured_connected is True

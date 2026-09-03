@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable, Optional, Tuple
+from typing import Callable, Iterable, Optional, Tuple
 
 from src.io.project_mirror import repo_root
 
@@ -54,6 +55,7 @@ class DirectorySource:
 class ConnectionCheckConfig:
     retry_interval_disconnected_sec: int = 30
     retry_interval_connected_sec: int = 60
+    probe_timeout_sec: int = 8
 
 
 @dataclass(frozen=True)
@@ -163,8 +165,143 @@ def load_network_sources_config(path: Optional[Path] = None) -> NetworkSourcesCo
             retry_interval_connected_sec=int(
                 check.get("retry_interval_connected_sec") or 60
             ),
+            probe_timeout_sec=int(check.get("probe_timeout_sec") or 8),
         ),
     )
+
+
+def network_config_to_payload(config: NetworkSourcesConfig) -> dict:
+    return {
+        "equipment_list": {
+            "directory": config.equipment_list.directory,
+            "file_prefix": config.equipment_list.file_prefix,
+            "extension": config.equipment_list.extension,
+        },
+        "standards_library": {"file": config.standards_library.file},
+        "leg_templates": {"directory": config.leg_templates.directory},
+        "report_templates": {"directory": config.report_templates.directory},
+        "data_tables": {"directory": config.data_tables.directory},
+        "connection_check": {
+            "retry_interval_disconnected_sec": (
+                config.connection_check.retry_interval_disconnected_sec
+            ),
+            "retry_interval_connected_sec": (
+                config.connection_check.retry_interval_connected_sec
+            ),
+            "probe_timeout_sec": config.connection_check.probe_timeout_sec,
+        },
+    }
+
+
+def network_config_from_payload(payload: dict) -> NetworkSourcesConfig:
+    equipment = payload.get("equipment_list") or {}
+    standards = payload.get("standards_library") or {}
+    check = payload.get("connection_check") or {}
+    return NetworkSourcesConfig(
+        equipment_list=EquipmentListSource(
+            directory=str(equipment.get("directory") or "").strip(),
+            file_prefix=str(equipment.get("file_prefix") or "01-设备清单").strip(),
+            extension=str(equipment.get("extension") or ".xlsx").strip() or ".xlsx",
+        ),
+        standards_library=StandardsLibrarySource(
+            file=str(standards.get("file") or "").strip(),
+        ),
+        leg_templates=_directory_source(payload, "leg_templates"),
+        report_templates=_directory_source(payload, "report_templates"),
+        data_tables=_directory_source(payload, "data_tables"),
+        connection_check=ConnectionCheckConfig(
+            retry_interval_disconnected_sec=int(
+                check.get("retry_interval_disconnected_sec") or 30
+            ),
+            retry_interval_connected_sec=int(
+                check.get("retry_interval_connected_sec") or 60
+            ),
+            probe_timeout_sec=int(check.get("probe_timeout_sec") or 8),
+        ),
+    )
+
+
+def disconnected_probe_result(message: str) -> ProbeResult:
+    return ProbeResult(
+        equipment_ok=False,
+        standards_ok=False,
+        templates_ok=False,
+        equipment_path=None,
+        standards_path=None,
+        equipment_error=message,
+        standards_error=message,
+        templates_error=message,
+    )
+
+
+def probe_result_from_dict(data: dict) -> ProbeResult:
+    return ProbeResult(
+        equipment_ok=bool(data.get("equipment_ok")),
+        standards_ok=bool(data.get("standards_ok")),
+        templates_ok=bool(data.get("templates_ok")),
+        equipment_path=data.get("equipment_path"),
+        standards_path=data.get("standards_path"),
+        equipment_error=str(data.get("equipment_error") or ""),
+        standards_error=str(data.get("standards_error") or ""),
+        templates_error=str(data.get("templates_error") or ""),
+        equipment_source=str(data.get("equipment_source") or ""),
+        standards_source=str(data.get("standards_source") or ""),
+        templates_source=str(data.get("templates_source") or ""),
+        leg_templates_path=data.get("leg_templates_path"),
+        report_templates_path=data.get("report_templates_path"),
+        data_tables_path=data.get("data_tables_path"),
+        leg_templates_source=str(data.get("leg_templates_source") or ""),
+        report_templates_source=str(data.get("report_templates_source") or ""),
+        data_tables_source=str(data.get("data_tables_source") or ""),
+    )
+
+
+def isolated_probe_network_sources(
+    config: NetworkSourcesConfig,
+    *,
+    timeout_sec: Optional[float] = None,
+    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    python_executable: Optional[str] = None,
+) -> ProbeResult:
+    """Probe in a child process so hung SMB cannot freeze the GUI process."""
+    timeout = float(
+        timeout_sec
+        if timeout_sec is not None
+        else config.connection_check.probe_timeout_sec
+    )
+    root = repo_root()
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
+    cmd = [python_executable or sys.executable, str(Path(__file__).resolve())]
+    payload = json.dumps(network_config_to_payload(config), ensure_ascii=False)
+    try:
+        completed = run(
+            cmd,
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=max(timeout, 0.1),
+            env=env,
+            cwd=str(root),
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return disconnected_probe_result("公盘探测超时")
+    if completed.returncode != 0:
+        err = (completed.stderr or completed.stdout or "探测失败").strip()
+        return disconnected_probe_result(err)
+    try:
+        return probe_result_from_dict(json.loads(completed.stdout))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        return disconnected_probe_result(f"探测结果无法解析: {exc}")
+
+
+def _probe_cli(stdin=None, stdout=None) -> int:
+    raw = (stdin or sys.stdin).read()
+    config = network_config_from_payload(json.loads(raw))
+    result = probe_network_sources(config)
+    json.dump(asdict(result), stdout or sys.stdout, ensure_ascii=False)
+    return 0
 
 
 def _smb_url_to_unc(text: str) -> str:
@@ -305,8 +442,8 @@ def _needs_smb_mount(config: NetworkSourcesConfig) -> bool:
 def attempt_mount_network_shares(config: NetworkSourcesConfig) -> None:
     """On macOS, ask Finder to mount configured SMB shares when they are missing or stale.
 
-    Not used by background probes — those only check path readability so offline
-    editing is not interrupted by Finder/SMB mount dialogs stealing focus.
+    Called once after the main window is shown. Periodic probes only check path
+    readability so offline editing is not interrupted by Finder mount dialogs.
     """
     if sys.platform != "darwin":
         return
@@ -602,3 +739,7 @@ def probe_network_sources(config: Optional[NetworkSourcesConfig] = None) -> Prob
         report_templates_source=report_source,
         data_tables_source=data_source,
     )
+
+
+if __name__ == "__main__":
+    raise SystemExit(_probe_cli())

@@ -11,11 +11,13 @@ from PySide6.QtCore import QRect, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QIntValidator, QPalette, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListView,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -31,8 +33,11 @@ from PySide6.QtWidgets import (
 
 from src.io.project_board import (
     BOARD_COLUMNS,
+    BOARD_STATUS_ALL,
+    BOARD_STATUS_FILTERS,
     BoardGroup,
     BoardRow,
+    filter_board_groups,
     filter_board_rows,
     format_iso_date,
     group_board_rows,
@@ -50,7 +55,7 @@ from src.io.user_prefs import (
     parse_intranet_year,
     save_board_intranet_year,
 )
-from src.ui.theme import BG_INPUT, CYAN, OVERDUE, TEXT
+from src.ui.theme import BG_HOVER, BG_INPUT, CYAN, OVERDUE, TEXT
 
 
 COL_INDEX = 0
@@ -251,6 +256,29 @@ class ProjectBoardPage(QWidget):
         self.txt_year.setText(str(board_intranet_year(self._data_root)))
         self.txt_year.editingFinished.connect(self._persist_year)
         toolbar.addWidget(self.txt_year)
+        self.combo_status = QComboBox()
+        self.combo_status.setObjectName("boardStatusFilter")
+        self.combo_status.setFocusPolicy(Qt.StrongFocus)
+        self.combo_status.setMaxVisibleItems(len(BOARD_STATUS_FILTERS))
+        self.combo_status.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.combo_status.setMinimumContentsLength(4)
+        view = QListView(self.combo_status)
+        view.setObjectName("boardStatusFilterView")
+        view.setUniformItemSizes(True)
+        view.setSpacing(0)
+        palette = view.palette()
+        palette.setColor(QPalette.ColorRole.Text, QColor(TEXT))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor(TEXT))
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor(CYAN))
+        palette.setColor(QPalette.ColorRole.Highlight, QColor(BG_HOVER))
+        view.setPalette(palette)
+        self.combo_status.setView(view)
+        for label in BOARD_STATUS_FILTERS:
+            self.combo_status.addItem(label)
+        self.combo_status.setCurrentText(BOARD_STATUS_ALL)
+        self.combo_status.setToolTip("按排期进度筛选")
+        self.combo_status.currentTextChanged.connect(self._apply_filter)
+        toolbar.addWidget(self.combo_status)
         toolbar.addStretch(1)
         self.btn_back = QPushButton("返回当前项目")
         self.btn_back.setObjectName("poolToggle")
@@ -380,7 +408,10 @@ class ProjectBoardPage(QWidget):
         return filter_board_rows(self._rows, self.txt_search.text())
 
     def visible_groups(self) -> List[BoardGroup]:
-        return group_board_rows(self.visible_rows(), today=self._today)
+        return filter_board_groups(
+            group_board_rows(self.visible_rows(), today=self._today),
+            self.combo_status.currentText(),
+        )
 
     def _apply_filter(self) -> None:
         query = (self.txt_search.text() or "").strip()
@@ -487,7 +518,8 @@ class ProjectBoardPage(QWidget):
         item.setData(COL_INDEX, Qt.UserRole, index + 1)
         item.setData(COL_PROJECT, Qt.UserRole, group.project_id)
         item.setData(COL_QTY, _QTY_PATH_ROLE, str(group.json_path))
-        item.setFlags(item.flags() | Qt.ItemIsEditable)
+        if not group.archived:
+            item.setFlags(item.flags() | Qt.ItemIsEditable)
         item.setForeground(COL_INDEX, QBrush(QColor("#00FFFF")))
         return item
 
@@ -508,7 +540,11 @@ class ProjectBoardPage(QWidget):
             ]
         )
         item.setData(COL_QTY, _QTY_PATH_ROLE, str(row.json_path))
-        if row.leg_index is not None and row.node_index is not None:
+        if (
+            not row.archived
+            and row.leg_index is not None
+            and row.node_index is not None
+        ):
             item.setData(COL_QTY, _QTY_LEG_ROLE, row.leg_index)
             item.setData(COL_QTY, _QTY_NODE_ROLE, row.node_index)
             item.setFlags(item.flags() | Qt.ItemIsEditable)

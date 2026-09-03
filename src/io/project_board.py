@@ -37,6 +37,18 @@ BOARD_COLUMNS: Tuple[str, ...] = (
     "备注",
 )
 
+BOARD_STATUS_ALL = "全部"
+BOARD_STATUS_NOT_STARTED = "未开始"
+BOARD_STATUS_IN_PROGRESS = "进行中"
+BOARD_STATUS_DONE = "已完成"
+BOARD_STATUS_FILTERS: Tuple[str, ...] = (
+    BOARD_STATUS_ALL,
+    BOARD_STATUS_NOT_STARTED,
+    BOARD_STATUS_IN_PROGRESS,
+    BOARD_STATUS_DONE,
+)
+
+_LEDGER_FILENAME = "board_ledger.json"
 _STANDARD_HINT_KEYS = ("standard_id", "standard_chapter", "standard_test_name")
 _HIGHLIGHT_BG = "rgba(0, 255, 255, 0.55)"
 
@@ -295,6 +307,8 @@ class BoardRow:
     progress: Optional[float]
     leg_index: Optional[int] = None
     node_index: Optional[int] = None
+    archived: bool = False
+    complete: bool = False
 
     def search_blob(self) -> str:
         bits = [
@@ -330,6 +344,7 @@ class BoardGroup:
     overdue: bool
     progress: Optional[float]
     tests: Tuple[BoardRow, ...]
+    archived: bool = False
 
 
 def filter_board_rows(rows: Sequence[BoardRow], query: str) -> List[BoardRow]:
@@ -337,6 +352,24 @@ def filter_board_rows(rows: Sequence[BoardRow], query: str) -> List[BoardRow]:
     if not needle:
         return list(rows)
     return [row for row in rows if needle in row.search_blob()]
+
+
+def board_status_bucket(progress: Optional[float]) -> str:
+    if progress is None or progress <= 0:
+        return BOARD_STATUS_NOT_STARTED
+    if progress >= 1:
+        return BOARD_STATUS_DONE
+    return BOARD_STATUS_IN_PROGRESS
+
+
+def filter_board_groups(
+    groups: Sequence[BoardGroup],
+    status: str,
+) -> List[BoardGroup]:
+    needle = (status or "").strip() or BOARD_STATUS_ALL
+    if needle == BOARD_STATUS_ALL:
+        return list(groups)
+    return [group for group in groups if board_status_bucket(group.progress) == needle]
 
 
 def group_board_rows(
@@ -376,6 +409,7 @@ def _group_from_tests(tests: Sequence[BoardRow], today: date) -> BoardGroup:
         overdue=any(row.overdue for row in tests),
         progress=board_progress_ratio(start, end, today),
         tests=tuple(tests),
+        archived=first.archived,
     )
 
 
@@ -396,8 +430,157 @@ def list_board_rows(
     root = data_root or default_data_root()
     when = today or date.today()
     rows: List[BoardRow] = []
+    live_ids: set[str] = set()
+    ledger = _load_ledger(root)
     for saved in list_saved_projects(root):
-        rows.extend(_rows_from_json(saved.json_path, saved.project_id, when))
+        extracted = _rows_from_json(saved.json_path, saved.project_id, when)
+        if not extracted:
+            continue
+        rows.extend(extracted)
+        live_ids.add(extracted[0].project_id)
+        ledger[extracted[0].project_id] = _snapshot_from_rows(extracted)
+    _save_ledger(root, ledger)
+    for project_id in _ledger_project_order(ledger):
+        if project_id in live_ids:
+            continue
+        rows.extend(_rows_from_snapshot(ledger[project_id], when, archived=True))
+    return rows
+
+
+def board_ledger_path(data_root: Optional[Path] = None) -> Path:
+    return (data_root or default_data_root()) / _LEDGER_FILENAME
+
+
+def record_board_snapshot(
+    json_path: Path,
+    data_root: Optional[Path] = None,
+    *,
+    today: Optional[date] = None,
+) -> None:
+    """Upsert one project's board projection. Safe no-op if JSON is unreadable."""
+    path = Path(json_path)
+    root = data_root if data_root is not None else path.parent.parent
+    rows = _rows_from_json(path, path.parent.name, today or date.today())
+    if not rows:
+        return
+    ledger = _load_ledger(root)
+    ledger[rows[0].project_id] = _snapshot_from_rows(rows)
+    _save_ledger(root, ledger)
+
+
+def _ledger_project_order(ledger: dict) -> List[str]:
+    return sorted(ledger, key=lambda pid: pid.lower())
+
+
+def _load_ledger(data_root: Path) -> dict:
+    path = board_ledger_path(data_root)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    projects = data.get("projects")
+    if not isinstance(projects, dict):
+        return {}
+    out: dict = {}
+    for key, value in projects.items():
+        pid = str(key or "").strip()
+        if pid and isinstance(value, dict):
+            out[pid] = value
+    return out
+
+
+def _save_ledger(data_root: Path, ledger: dict) -> None:
+    path = board_ledger_path(data_root)
+    try:
+        data_root.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"version": 1, "projects": ledger}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        return
+
+
+def _snapshot_from_rows(rows: Sequence[BoardRow]) -> dict:
+    first = rows[0]
+    return {
+        "project_id": first.project_id,
+        "json_path": str(first.json_path),
+        "tests": [
+            {
+                "sample_name": row.sample_name,
+                "sample_qty": row.sample_qty,
+                "project_sample_qty": row.project_sample_qty,
+                "applicant": row.applicant,
+                "start": format_iso_date(row.start),
+                "end": format_iso_date(row.end),
+                "tester_name": row.tester_name,
+                "test_name": row.test_name,
+                "standards_text": row.standards_text,
+                "to_number": row.to_number,
+                "notes": row.notes,
+                "complete": row.complete,
+                "leg_index": row.leg_index,
+                "node_index": row.node_index,
+            }
+            for row in rows
+        ],
+    }
+
+
+def _rows_from_snapshot(entry: dict, today: date, *, archived: bool) -> List[BoardRow]:
+    tests = entry.get("tests")
+    if not isinstance(tests, list) or not tests:
+        return []
+    project_id = str(entry.get("project_id") or "").strip()
+    json_raw = str(entry.get("json_path") or "").strip()
+    json_path = Path(json_raw) if json_raw else Path(project_id)
+    rows: List[BoardRow] = []
+    for item in tests:
+        if not isinstance(item, dict):
+            continue
+        start = parse_iso_date(item.get("start"))
+        end = parse_iso_date(item.get("end"))
+        complete = bool(item.get("complete"))
+        overdue = end is not None and end < today and not complete
+        pid = str(item.get("project_id") or "").strip() or project_id
+        if not pid:
+            continue
+        leg_raw = item.get("leg_index")
+        node_raw = item.get("node_index")
+        try:
+            leg_index = int(leg_raw) if leg_raw is not None else None
+        except (TypeError, ValueError):
+            leg_index = None
+        try:
+            node_index = int(node_raw) if node_raw is not None else None
+        except (TypeError, ValueError):
+            node_index = None
+        rows.append(
+            BoardRow(
+                project_id=pid,
+                sample_name=str(item.get("sample_name") or "").strip(),
+                sample_qty=str(item.get("sample_qty") or "").strip(),
+                project_sample_qty=str(item.get("project_sample_qty") or "").strip(),
+                applicant=str(item.get("applicant") or "").strip(),
+                start=start,
+                end=end,
+                tester_name=str(item.get("tester_name") or "").strip(),
+                test_name=str(item.get("test_name") or "").strip(),
+                standards_text=str(item.get("standards_text") or "").strip(),
+                to_number=str(item.get("to_number") or "").strip(),
+                notes=str(item.get("notes") or "").strip(),
+                json_path=json_path,
+                overdue=overdue,
+                progress=board_progress_ratio(start, end, today),
+                leg_index=leg_index,
+                node_index=node_index,
+                archived=archived,
+                complete=complete,
+            )
+        )
     return rows
 
 
@@ -445,13 +628,15 @@ def _rows_from_json(json_path: Path, fallback_id: str, today: date) -> List[Boar
                 json_path=json_path,
                 overdue=overdue,
                 progress=board_progress_ratio(start, end, today),
+                complete=False,
             )
         ]
     rows: List[BoardRow] = []
     for leg_index, node_index, node in named:
         start = parse_iso_date(node.get("start_date"))
         end = parse_iso_date(node.get("end_date"))
-        overdue = end is not None and end < today and not _node_looks_complete(node)
+        complete = _node_looks_complete(node)
+        overdue = end is not None and end < today and not complete
         selected = str(node.get("selected_to") or "").strip()
         rows.append(
             BoardRow(
@@ -472,6 +657,7 @@ def _rows_from_json(json_path: Path, fallback_id: str, today: date) -> List[Boar
                 progress=board_progress_ratio(start, end, today),
                 leg_index=leg_index,
                 node_index=node_index,
+                complete=complete,
             )
         )
     return rows
@@ -516,6 +702,7 @@ def update_board_sample_qty(json_path: Path, sample_qty: str) -> bool:
         )
     except OSError:
         return False
+    record_board_snapshot(path, path.parent.parent)
     return True
 
 
@@ -563,6 +750,7 @@ def update_board_test_sample_qty(
         )
     except OSError:
         return False
+    record_board_snapshot(path, path.parent.parent)
     return True
 
 

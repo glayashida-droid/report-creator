@@ -2,10 +2,17 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 import json
+import shutil
 
 from src.io.project_board import (
     BOARD_COLUMNS,
+    BOARD_STATUS_ALL,
+    BOARD_STATUS_DONE,
+    BOARD_STATUS_IN_PROGRESS,
+    BOARD_STATUS_NOT_STARTED,
     board_progress_ratio,
+    board_status_bucket,
+    filter_board_groups,
     filter_board_rows,
     find_project_intranet_dir,
     group_board_rows,
@@ -15,6 +22,7 @@ from src.io.project_board import (
     locate_project_intranet_folder,
     open_folder_in_file_manager,
     project_intranet_year_root,
+    record_board_snapshot,
     resolve_intranet_year_root,
     update_board_sample_qty,
     update_board_test_sample_qty,
@@ -505,6 +513,134 @@ def test_update_board_test_sample_qty_persists_independently(tmp_path):
     assert data["application_fields"]["送样数量"] == "3"
     assert data["legs"][0]["nodes"][1]["sample_qty"] == "2+2"
     assert not str(data["legs"][0]["nodes"][0].get("sample_qty") or "").strip()
+
+
+def test_board_status_bucket_from_progress():
+    assert board_status_bucket(None) == BOARD_STATUS_NOT_STARTED
+    assert board_status_bucket(0.0) == BOARD_STATUS_NOT_STARTED
+    assert board_status_bucket(0.5) == BOARD_STATUS_IN_PROGRESS
+    assert board_status_bucket(1.0) == BOARD_STATUS_DONE
+
+
+def test_filter_board_groups_by_schedule_status(tmp_path):
+    _save(
+        tmp_path,
+        ProjectState(
+            project_id="DONE01",
+            sample_name="已完成件",
+            legs=[
+                TestLeg(
+                    leg_id="L1",
+                    leg_name="Leg 1",
+                    nodes=[_incomplete_node("高温", "2026-06-01", "2026-07-01")],
+                )
+            ],
+        ),
+    )
+    _save(
+        tmp_path,
+        ProjectState(
+            project_id="RUN01",
+            sample_name="进行中件",
+            legs=[
+                TestLeg(
+                    leg_id="L1",
+                    leg_name="Leg 1",
+                    nodes=[_incomplete_node("振动", "2026-08-01", "2026-09-15")],
+                )
+            ],
+        ),
+    )
+    _save(
+        tmp_path,
+        ProjectState(
+            project_id="WAIT01",
+            sample_name="未开始件",
+            legs=[
+                TestLeg(
+                    leg_id="L1",
+                    leg_name="Leg 1",
+                    nodes=[_incomplete_node("低温", "2026-10-01", "2026-10-20")],
+                )
+            ],
+        ),
+    )
+    _save(tmp_path, ProjectState(project_id="NODATE", sample_name="无日期"))
+    groups = group_board_rows(list_board_rows(tmp_path, today=TODAY), today=TODAY)
+    by_status = {
+        BOARD_STATUS_DONE: ["DONE01"],
+        BOARD_STATUS_IN_PROGRESS: ["RUN01"],
+        BOARD_STATUS_NOT_STARTED: ["NODATE", "WAIT01"],
+    }
+    assert [g.project_id for g in filter_board_groups(groups, BOARD_STATUS_ALL)] == [
+        g.project_id for g in groups
+    ]
+    for status, expected in by_status.items():
+        assert [g.project_id for g in filter_board_groups(groups, status)] == expected
+
+
+def test_list_board_rows_keeps_project_after_folder_deleted(tmp_path):
+    state = ProjectState(
+        project_id="A22600000080",
+        sample_name="历史气囊",
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[_incomplete_node("高温试验", "2026-06-01", "2026-07-01")],
+            )
+        ],
+    )
+    _save(tmp_path, state)
+    assert list_board_rows(tmp_path, today=TODAY)
+    shutil.rmtree(tmp_path / state.project_id)
+
+    rows = list_board_rows(tmp_path, today=TODAY)
+    assert len(rows) == 1
+    assert rows[0].project_id == "A22600000080"
+    assert rows[0].sample_name == "历史气囊"
+    assert rows[0].test_name == "高温试验"
+    assert rows[0].archived is True
+    assert rows[0].progress == 1.0
+
+
+def test_record_board_snapshot_survives_without_listing_first(tmp_path):
+    state = ProjectState(
+        project_id="A22600000081",
+        sample_name="未打开看板",
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[_incomplete_node("振动试验", "2026-08-01", "2026-09-10")],
+            )
+        ],
+    )
+    _save(tmp_path, state)
+    json_path = tmp_path / state.project_id / "project_state.json"
+    record_board_snapshot(json_path, tmp_path, today=TODAY)
+    shutil.rmtree(tmp_path / state.project_id)
+
+    rows = list_board_rows(tmp_path, today=TODAY)
+    assert [row.project_id for row in rows] == ["A22600000081"]
+    assert rows[0].archived is True
+    assert rows[0].sample_name == "未打开看板"
+
+
+def test_live_json_wins_over_ledger_and_updates_snapshot(tmp_path):
+    pid = "A22600000082"
+    _save(tmp_path, ProjectState(project_id=pid, sample_name="旧名称"))
+    list_board_rows(tmp_path, today=TODAY)
+    _save(tmp_path, ProjectState(project_id=pid, sample_name="新名称"))
+
+    live = list_board_rows(tmp_path, today=TODAY)
+    assert live[0].sample_name == "新名称"
+    assert live[0].archived is False
+
+    shutil.rmtree(tmp_path / pid)
+    archived = list_board_rows(tmp_path, today=TODAY)
+    assert archived[0].sample_name == "新名称"
+    assert archived[0].archived is True
 
 
 def test_overview_shows_compact_to_numbers():

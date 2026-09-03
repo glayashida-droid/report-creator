@@ -1,4 +1,4 @@
-"""Prompt for the tester name on startup / project load."""
+"""Prompt for the tester name on first launch, or when renaming."""
 
 from __future__ import annotations
 

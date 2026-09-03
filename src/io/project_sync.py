@@ -114,11 +114,27 @@ def save_json_to_remote_then_local(
             f"公盘已写入，但本地缓存失败: {exc}"
         ) from exc
     clear_pending_remote_json(local)
+    _remember_board_snapshot(local_path, local)
 
 
 def write_local_json_cache(state: ProjectState, local_root: PathLike) -> None:
     """Persist a local cache copy after a successful remote load."""
-    state.save_to_file(str(local_state_path(local_root)))
+    path = local_state_path(local_root)
+    state.save_to_file(str(path))
+    _remember_board_snapshot(path, local_root)
+
+
+def remember_board_after_local_json(local_root: PathLike) -> None:
+    _remember_board_snapshot(local_state_path(local_root), local_root)
+
+
+def _remember_board_snapshot(json_path: PathLike, local_root: PathLike) -> None:
+    try:
+        from src.io.project_board import record_board_snapshot
+
+        record_board_snapshot(Path(json_path), Path(local_root).parent)
+    except OSError:
+        return
 
 
 def pending_remote_json_path(local_root: PathLike) -> Path:

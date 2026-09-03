@@ -1,19 +1,28 @@
+import json
+import shutil
 import sys
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
-import json
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPalette
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QLabel,
     QProgressBar,
     QWidget,
 )
 
-from src.io.project_board import BOARD_COLUMNS
+from src.io.project_board import (
+    BOARD_COLUMNS,
+    BOARD_STATUS_ALL,
+    BOARD_STATUS_DONE,
+    BOARD_STATUS_IN_PROGRESS,
+    BOARD_STATUS_NOT_STARTED,
+)
 from src.models.project_state import (
     ProjectState,
     TestEquipment,
@@ -620,3 +629,111 @@ def test_intranet_lookup_not_ready_prompts_without_opening(tmp_path):
                     info.assert_called_once()
     assert opened == []
     assert page._lookup_busy is False
+
+
+def test_board_status_combo_filters_groups(tmp_path):
+    _app()
+    _save(
+        tmp_path,
+        ProjectState(
+            project_id="DONE01",
+            sample_name="已完成件",
+            legs=[
+                TestLeg(
+                    leg_id="L1",
+                    leg_name="Leg 1",
+                    nodes=[_incomplete_node("高温", "2026-06-01", "2026-07-01")],
+                )
+            ],
+        ),
+    )
+    _save(
+        tmp_path,
+        ProjectState(
+            project_id="RUN01",
+            sample_name="进行中件",
+            legs=[
+                TestLeg(
+                    leg_id="L1",
+                    leg_name="Leg 1",
+                    nodes=[_incomplete_node("振动", "2026-08-01", "2026-09-15")],
+                )
+            ],
+        ),
+    )
+    _save(
+        tmp_path,
+        ProjectState(
+            project_id="WAIT01",
+            sample_name="未开始件",
+            legs=[
+                TestLeg(
+                    leg_id="L1",
+                    leg_name="Leg 1",
+                    nodes=[_incomplete_node("低温", "2026-10-01", "2026-10-20")],
+                )
+            ],
+        ),
+    )
+    page = ProjectBoardPage(tmp_path)
+    page.reload(today=TODAY)
+    combo = page.combo_status
+    assert isinstance(combo, QComboBox)
+    assert combo.objectName() == "boardStatusFilter"
+    assert [combo.itemText(i) for i in range(combo.count())] == [
+        BOARD_STATUS_ALL,
+        BOARD_STATUS_NOT_STARTED,
+        BOARD_STATUS_IN_PROGRESS,
+        BOARD_STATUS_DONE,
+    ]
+    assert combo.currentText() == BOARD_STATUS_ALL
+    assert combo.maxVisibleItems() >= 4
+    assert combo.view().minimumHeight() == 0
+    highlight = combo.view().palette().color(QPalette.ColorRole.HighlightedText)
+    assert highlight.lightness() > 80
+    assert page.tree.topLevelItemCount() == 3
+
+    combo.setCurrentText(BOARD_STATUS_DONE)
+    QApplication.processEvents()
+    assert page.tree.topLevelItemCount() == 1
+    assert page.tree.topLevelItem(0).data(COL_PROJECT, Qt.UserRole) == "DONE01"
+
+    combo.setCurrentText(BOARD_STATUS_IN_PROGRESS)
+    QApplication.processEvents()
+    assert page.tree.topLevelItemCount() == 1
+    assert page.tree.topLevelItem(0).data(COL_PROJECT, Qt.UserRole) == "RUN01"
+
+    combo.setCurrentText(BOARD_STATUS_NOT_STARTED)
+    QApplication.processEvents()
+    assert page.tree.topLevelItemCount() == 1
+    assert page.tree.topLevelItem(0).data(COL_PROJECT, Qt.UserRole) == "WAIT01"
+    page.close()
+
+
+def test_archived_board_row_qty_not_editable(tmp_path):
+    _app()
+    state = ProjectState(
+        project_id="A22600000090",
+        sample_name="归档件",
+        application_fields={"送样数量": "4"},
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[_incomplete_node("高温试验", "2026-06-01", "2026-07-01")],
+            )
+        ],
+    )
+    _save(tmp_path, state)
+    page = ProjectBoardPage(tmp_path)
+    page.reload(today=TODAY)
+    live = page.tree.topLevelItem(0)
+    assert bool(live.flags() & Qt.ItemIsEditable)
+    shutil.rmtree(tmp_path / state.project_id)
+    page.reload(today=TODAY)
+    parent = page.tree.topLevelItem(0)
+    child = parent.child(0)
+    assert parent.data(COL_PROJECT, Qt.UserRole) == "A22600000090"
+    assert not bool(parent.flags() & Qt.ItemIsEditable)
+    assert not bool(child.flags() & Qt.ItemIsEditable)
+    page.close()
