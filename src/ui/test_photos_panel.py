@@ -15,20 +15,22 @@ from PySide6.QtGui import (
     QDragLeaveEvent,
     QDragMoveEvent,
     QDropEvent,
+    QIcon,
     QPainter,
     QPainterPath,
     QPen,
     QPixmap,
 )
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
     QDialog, QRadioButton, QLineEdit, QButtonGroup, QMessageBox, QInputDialog,
-    QSizePolicy, QLayout,
+    QSizePolicy, QListView, QListWidgetItem, QStyledItemDelegate,
 )
-from src.ui.scroll_contain import ContainedScrollArea
+from src.ui.scroll_contain import ContainedListWidget
 
-from src.ui.theme import BG_INPUT, CYAN
+from src.ui.theme import BG, BG_INPUT, BG_PANEL, BORDER, CYAN, TEXT_DIM
 from src.ui.window_focus import force_window_foreground
 
 from src.io.project_assets import (
@@ -40,6 +42,10 @@ from src.io.project_assets import (
     move_photo_to_spare,
     original_view_path,
     preview_path_for_photo,
+    rename_all_merged_in_album,
+    rename_merged_photo,
+    renumber_merged_photos,
+    resolve_photo_path,
     spare_dir,
     thumbnail_for_photo,
 )
@@ -52,11 +58,10 @@ from src.io.test_photos import (
     create_album,
     create_template_albums,
     delete_album,
+    infer_numbered_prefix,
     is_usable_test_name,
     remap_album_order,
     rename_album,
-    rename_all_in_album,
-    rename_photo,
     album_dir,
 )
 from src.ui.gantt_utils import find_leg_for_node
@@ -81,9 +86,14 @@ THUMB = 72
 NAME_H = 18
 THUMB_GAP = 6
 VISIBLE_ROWS = 2
+THUMB_CARD_W = THUMB + 18
 THUMB_CARD_H = THUMB + 10 + NAME_H
 GALLERY_H = VISIBLE_ROWS * THUMB_CARD_H + (VISIBLE_ROWS - 1) * THUMB_GAP
+PHOTO_REL_ROLE = Qt.UserRole
+PHOTO_CLOUD_ROLE = Qt.UserRole + 1
+PHOTO_PATH_ROLE = Qt.UserRole + 2
 _RADIO_QSS = None
+_CLOUD_PIX = None
 
 
 def _radio_indicator_qss():
@@ -133,89 +143,408 @@ def _paint_radio_pixmap(checked):
     return pix
 
 
-class FlowLayout(QLayout):
-    """Left-to-right wrap; used so the gallery can scroll vertically."""
+def _cloud_pixmap():
+    global _CLOUD_PIX
+    if _CLOUD_PIX is None:
+        _CLOUD_PIX = _paint_cloud_pixmap()
+    return _CLOUD_PIX
 
-    def __init__(self, parent=None, spacing=THUMB_GAP):
+
+def _delete_btn_rect(item_rect: QRect) -> QRect:
+    return QRect(item_rect.right() - 20, item_rect.top() + 2, 18, 18)
+
+
+def _cloud_btn_rect(item_rect: QRect) -> QRect:
+    return QRect(item_rect.left() + 4, item_rect.top() + 2, 18, 18)
+
+
+def _download_btn_rect(item_rect: QRect) -> QRect:
+    return QRect(item_rect.left() + 4, item_rect.top() + 22, 18, 18)
+
+
+class PhotoThumbDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = option.rect
+        cloud = bool(index.data(PHOTO_CLOUD_ROLE))
+        spare = bool(getattr(self.parent(), "_in_spare", False))
+        if cloud:
+            badge = _cloud_pixmap()
+            box = _cloud_btn_rect(rect)
+            painter.drawPixmap(box.topLeft(), badge.scaled(box.size()))
+            if not spare:
+                painter.setPen(QPen(QColor(CYAN), 1))
+                painter.setBrush(QColor(BG_PANEL))
+                dl = _download_btn_rect(rect)
+                painter.drawRoundedRect(dl, 9, 9)
+                painter.setPen(QColor(CYAN))
+                painter.drawText(dl, Qt.AlignCenter, "↓")
+        if not spare:
+            painter.setPen(QPen(QColor(BORDER), 1))
+            painter.setBrush(QColor(BG))
+            box = _delete_btn_rect(rect)
+            painter.drawRoundedRect(box, 9, 9)
+            painter.setPen(QColor(TEXT_DIM))
+            painter.drawText(box, Qt.AlignCenter, "✕")
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        return QSize(THUMB_CARD_W, THUMB_CARD_H)
+
+
+class PhotoThumbList(ContainedListWidget):
+    def __init__(self, row, in_spare=False, parent=None):
         super().__init__(parent)
-        self._items = []
-        self.setSpacing(spacing)
+        self._row = row
+        self._in_spare = bool(in_spare)
+        self._press_hit = None
+        self._press_global: Optional[QPoint] = None
+        self._dragging = False
+        self._dragging_rel = ""
+        self._visual_order: Optional[List[str]] = None
+        self._order_at_press: Optional[List[str]] = None
+        self._ignore_click = False
+        self.setObjectName("photoThumbList")
+        self.setViewMode(QListView.IconMode)
+        self.setFlow(QListView.LeftToRight)
+        self.setWrapping(True)
+        self.setResizeMode(QListView.Adjust)
+        self.setMovement(QListView.Static)
+        self.setDragEnabled(False)
+        self.setAcceptDrops(not self._in_spare)
+        self.viewport().setAcceptDrops(not self._in_spare)
+        self.setDropIndicatorShown(False)
+        self.setDragDropMode(
+            QAbstractItemView.DropOnly if not self._in_spare else QAbstractItemView.NoDragDrop
+        )
+        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setIconSize(QSize(THUMB, THUMB))
+        self.setGridSize(QSize(THUMB_CARD_W + THUMB_GAP, THUMB_CARD_H + THUMB_GAP))
+        self.setSpacing(THUMB_GAP)
+        self.setUniformItemSizes(True)
+        self.setWordWrap(True)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setFixedHeight(GALLERY_H)
+        self.setItemDelegate(PhotoThumbDelegate(self))
+        if not self._in_spare:
+            self.setCursor(Qt.OpenHandCursor)
+        self._click_timer = QTimer(self)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.setInterval(280)
+        self._click_timer.timeout.connect(self._emit_preview)
+        self._click_rel = ""
+        self.itemClicked.connect(self._on_item_clicked)
+        self.itemDoubleClicked.connect(self._on_item_double_clicked)
 
-    def addItem(self, item):
-        self._items.append(item)
+    def ordered_rels(self) -> List[str]:
+        out = []
+        for i in range(self.count()):
+            item = self.item(i)
+            if item is not None:
+                rel = item.data(PHOTO_REL_ROLE)
+                if rel:
+                    out.append(rel)
+        return out
 
-    def count(self):
-        return len(self._items)
+    def add_photo(self, photo: MergedPhoto, local_root: Path) -> None:
+        pix = QPixmap()
+        display = Path(photo.read_path)
+        try:
+            display = thumbnail_for_photo(
+                local_root, photo.relative_path, photo.read_path, size=THUMB * 2
+            )
+        except Exception:
+            pass
+        loaded = QPixmap(str(display))
+        if not loaded.isNull():
+            pix = loaded.scaled(THUMB, THUMB, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        item = QListWidgetItem(QIcon(pix), Path(photo.read_path).name)
+        item.setData(PHOTO_REL_ROLE, photo.relative_path)
+        item.setData(PHOTO_CLOUD_ROLE, bool(photo.is_cloud_only))
+        item.setData(PHOTO_PATH_ROLE, str(photo.read_path))
+        item.setSizeHint(QSize(THUMB_CARD_W, THUMB_CARD_H))
+        item.setToolTip(Path(photo.read_path).name)
+        self.addItem(item)
 
-    def itemAt(self, index):
-        if 0 <= index < len(self._items):
-            return self._items[index]
+    def supportedDropActions(self):
+        if self._in_spare:
+            return Qt.IgnoreAction
+        return Qt.CopyAction | Qt.MoveAction
+
+    def _viewport_pos(self, event) -> QPoint:
+        return self.viewport().mapFromGlobal(event.globalPosition().toPoint())
+
+    def _item_index_for_rel(self, rel: str) -> Optional[int]:
+        if not rel:
+            return None
+        for i in range(self.count()):
+            item = self.item(i)
+            if item is not None and item.data(PHOTO_REL_ROLE) == rel:
+                return i
         return None
 
-    def takeAt(self, index):
-        if 0 <= index < len(self._items):
-            return self._items.pop(index)
-        return None
+    def _dest_index_at(self, pos: QPoint) -> Optional[int]:
+        order = self._visual_order
+        rel = self._dragging_rel
+        if not order or rel not in order:
+            return None
+        old = order.index(rel)
+        hit = self.itemAt(pos)
+        if hit is not None:
+            hit_rel = hit.data(PHOTO_REL_ROLE) or ""
+            if hit_rel == rel:
+                return old
+            if hit_rel in order:
+                return order.index(hit_rel)
+        if not self.viewport().rect().contains(pos):
+            return old
+        rects = []
+        for i in range(self.count()):
+            item = self.item(i)
+            if item is not None:
+                rects.append(self.visualItemRect(item))
+        insert_at = insert_index_for_rects(rects, pos)
+        moved = move_list_item(order, old, insert_at)
+        return moved.index(rel) if rel in moved else old
 
-    def expandingDirections(self):
-        return Qt.Orientations(Qt.Orientation(0))
-
-    def hasHeightForWidth(self):
-        return True
-
-    def heightForWidth(self, width):
-        return self._do_layout(QRect(0, 0, width, 0), True)
-
-    def setGeometry(self, rect):
-        super().setGeometry(rect)
-        self._do_layout(rect, False)
-
-    def sizeHint(self):
-        return self.minimumSize()
-
-    def minimumSize(self):
-        size = QSize()
-        for item in self._items:
-            size = size.expandedTo(item.minimumSize())
-        margins = self.contentsMargins()
-        size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
-        return size
-
-    def _do_layout(self, rect, test_only):
-        x = rect.x()
-        y = rect.y()
-        line_height = 0
-        space = self.spacing()
-        for item in self._items:
-            hint = item.sizeHint()
-            next_x = x + hint.width() + space
-            if line_height > 0 and next_x - space > rect.right() + 1:
-                x = rect.x()
-                y = y + line_height + space
-                next_x = x + hint.width() + space
-                line_height = 0
-            if not test_only:
-                item.setGeometry(QRect(QPoint(x, y), hint))
-            x = next_x
-            line_height = max(line_height, hint.height())
-        return y + line_height - rect.y() if self._items else 0
-
-
-class ThumbGallery(ContainedScrollArea):
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._fit_host()
-
-    def _fit_host(self):
-        host = self.widget()
-        if host is None:
+    def _move_item(self, old: int, dest: int) -> None:
+        if old == dest or old < 0 or dest < 0:
             return
-        width = max(self.viewport().width(), 1)
-        layout = host.layout()
-        height = layout.heightForWidth(width) if layout is not None else host.sizeHint().height()
-        host.setFixedWidth(width)
-        host.setMinimumHeight(max(height, 1))
-        host.resize(width, max(height, 1))
+        if old >= self.count() or dest >= self.count():
+            return
+        self.blockSignals(True)
+        try:
+            item = self.takeItem(old)
+            if item is None:
+                return
+            self.insertItem(dest, item)
+            self.setCurrentItem(item)
+            self.doItemsLayout()
+        finally:
+            self.blockSignals(False)
+
+    def _nudge_order(self, pos: QPoint) -> None:
+        order = self._visual_order
+        rel = self._dragging_rel
+        dest = self._dest_index_at(pos)
+        if order is None or rel not in order or dest is None:
+            return
+        old = order.index(rel)
+        if dest == old:
+            return
+        dest = max(0, min(dest, len(order) - 1))
+        if dest == old:
+            return
+        order.pop(old)
+        order.insert(dest, rel)
+        widget_old = self._item_index_for_rel(rel)
+        if widget_old is not None:
+            self._move_item(widget_old, dest)
+
+    def _begin_reorder(self, rel: str) -> None:
+        self._click_timer.stop()
+        self._click_rel = ""
+        self._dragging = True
+        self._dragging_rel = rel
+        if self._visual_order is None:
+            self._visual_order = self.ordered_rels()
+        if self._order_at_press is None:
+            self._order_at_press = list(self._visual_order)
+        self.setCursor(Qt.ClosedHandCursor)
+
+    def _end_reorder(self) -> None:
+        order = list(self._visual_order or [])
+        origin = self._order_at_press
+        self._dragging = False
+        self._dragging_rel = ""
+        self._press_global = None
+        self._visual_order = None
+        self._order_at_press = None
+        try:
+            self.setCursor(Qt.OpenHandCursor if not self._in_spare else Qt.ArrowCursor)
+        except RuntimeError:
+            pass
+        if origin is not None and order and order != origin:
+            self._row._write_photo_order(order)
+
+    def mousePressEvent(self, event):
+        self._press_hit = None
+        self._press_global = None
+        self._click_timer.stop()
+        if event.button() == Qt.LeftButton:
+            pos = self._viewport_pos(event)
+            item = self.itemAt(pos)
+            if item is not None and not self._in_spare:
+                rect = self.visualItemRect(item)
+                if _delete_btn_rect(rect).contains(pos):
+                    self._press_hit = ("delete", item.data(PHOTO_REL_ROLE))
+                    event.accept()
+                    return
+                if item.data(PHOTO_CLOUD_ROLE) and _download_btn_rect(rect).contains(pos):
+                    self._press_hit = ("download", item.data(PHOTO_REL_ROLE))
+                    event.accept()
+                    return
+                rel = item.data(PHOTO_REL_ROLE) or ""
+                self._press_global = event.globalPosition().toPoint()
+                self._dragging_rel = rel
+                self._visual_order = self.ordered_rels()
+                self._order_at_press = list(self._visual_order)
+                self.blockSignals(True)
+                try:
+                    self.setCurrentItem(item)
+                finally:
+                    self.blockSignals(False)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging or (
+            not self._in_spare
+            and self._press_global is not None
+            and (event.buttons() & Qt.LeftButton)
+            and self._dragging_rel
+        ):
+            if not self._dragging:
+                delta = event.globalPosition().toPoint() - self._press_global
+                if delta.manhattanLength() < QApplication.startDragDistance():
+                    event.accept()
+                    return
+                self._begin_reorder(self._dragging_rel)
+            view_pos = self._viewport_pos(event)
+            if self.viewport().rect().contains(view_pos):
+                self._nudge_order(view_pos)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            super().mouseReleaseEvent(event)
+            return
+        if self._ignore_click:
+            self._ignore_click = False
+            self._press_hit = None
+            self._press_global = None
+            self._dragging_rel = ""
+            self._visual_order = None
+            self._order_at_press = None
+            event.accept()
+            return
+        if self._dragging:
+            self._end_reorder()
+            event.accept()
+            return
+        hit = self._press_hit
+        pressed_rel = self._dragging_rel if self._press_global is not None else ""
+        self._press_hit = None
+        self._press_global = None
+        self._dragging_rel = ""
+        self._visual_order = None
+        self._order_at_press = None
+        if hit is not None:
+            kind, rel = hit
+            item = self.itemAt(self._viewport_pos(event))
+            if item is not None and item.data(PHOTO_REL_ROLE) == rel:
+                if kind == "delete":
+                    self._row._delete_photo(rel)
+                elif kind == "download":
+                    self._row._download_photo(rel)
+            event.accept()
+            return
+        if pressed_rel:
+            self._click_rel = pressed_rel
+            self._click_timer.start()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton and not self._in_spare:
+            item = self.itemAt(self._viewport_pos(event))
+            if item is not None:
+                self._ignore_click = True
+                self._on_item_double_clicked(item)
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
+    def _on_item_clicked(self, item):
+        if self._press_hit is not None or self._dragging:
+            return
+        self._click_rel = item.data(PHOTO_REL_ROLE) or ""
+        if self._click_rel:
+            self._click_timer.start()
+
+    def _on_item_double_clicked(self, item):
+        self._click_timer.stop()
+        rel = item.data(PHOTO_REL_ROLE) or ""
+        if not rel:
+            return
+        if self._in_spare:
+            if item.data(PHOTO_CLOUD_ROLE):
+                self._row._show_original(rel)
+            else:
+                self._row._show_preview(rel)
+            return
+        self._row._rename_photo(rel)
+
+    def _emit_preview(self):
+        rel = self._click_rel
+        self._click_rel = ""
+        if rel:
+            self._row._show_preview(rel)
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if self._in_spare:
+            event.ignore()
+            return
+        if self._row._accepts_album_reorder(event.mimeData()):
+            event.setDropAction(Qt.MoveAction)
+            event.accept()
+            return
+        if event.mimeData().hasUrls():
+            event.setDropAction(Qt.CopyAction)
+            event.accept()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event: QDragMoveEvent):
+        if self._in_spare:
+            event.ignore()
+            return
+        if self._row._accepts_album_reorder(event.mimeData()):
+            event.setDropAction(Qt.MoveAction)
+            event.accept()
+            return
+        if event.mimeData().hasUrls():
+            event.setDropAction(Qt.CopyAction)
+            event.accept()
+            return
+        event.ignore()
+
+    def dragLeaveEvent(self, event: QDragLeaveEvent):
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event: QDropEvent):
+        if self._in_spare:
+            event.ignore()
+            return
+        if self._row._accepts_album_reorder(event.mimeData()):
+            self._row.dropEvent(event)
+            return
+        urls = event.mimeData().urls()
+        paths = [Path(url.toLocalFile()) for url in urls if url.isLocalFile()]
+        event.setDropAction(Qt.CopyAction)
+        event.accept()
+        if paths:
+            QTimer.singleShot(0, lambda: self._row._import_paths(paths))
+
 
 def album_name_from_mime(mime: QMimeData) -> str:
     raw = mime.data(ALBUM_ORDER_MIME)
@@ -234,6 +563,30 @@ def insert_index_for_album_y(host: QWidget, row_widgets: list, y: int) -> int:
         if y < center:
             return i
     return len(row_widgets)
+
+
+def insert_index_for_rects(rects: list, pos: QPoint) -> int:
+    """Insert-before index for a wrapped left-to-right flow of *rects*."""
+    if not rects:
+        return 0
+    for i, geom in enumerate(rects):
+        if pos.y() < geom.top() or (
+            geom.top() <= pos.y() <= geom.bottom() and pos.x() < geom.center().x()
+        ):
+            return i
+    return len(rects)
+
+
+def move_list_item(items: list, old: int, insert_at: int) -> list:
+    """Move *items[old]* so it lands at gap *insert_at* in the original list."""
+    if not items or old < 0 or old >= len(items):
+        return list(items)
+    out = list(items)
+    item = out.pop(old)
+    dest = insert_at if insert_at <= old else insert_at - 1
+    dest = max(0, min(dest, len(out)))
+    out.insert(dest, item)
+    return out
 
 
 class FolderChip(QWidget):
@@ -440,212 +793,6 @@ def _paint_cloud_pixmap():
     return pix
 
 
-class PhotoThumb(QFrame):
-    removed = Signal()
-    renamed = Signal()
-    downloaded = Signal()
-
-    def __init__(
-        self,
-        photo: MergedPhoto,
-        local_root: Path,
-        parent=None,
-        remote_root: Optional[Path] = None,
-        in_spare: bool = False,
-    ):
-        super().__init__(parent)
-        self.path = Path(photo.read_path)
-        self.relative_path = photo.relative_path
-        self.is_cloud_only = bool(photo.is_cloud_only)
-        self._in_spare = bool(in_spare)
-        self._local_root = Path(local_root)
-        self._remote_root = Path(remote_root) if remote_root else None
-        self._popup = None
-        self.setObjectName("photoThumb")
-        self.setFixedSize(THUMB + 18, THUMB + 10 + NAME_H)
-        if self._in_spare:
-            tip = f"已在「{SPARE_ALBUM_NAME}」中 · 单击预览 · 拖回正式相册可还原"
-        elif self.is_cloud_only:
-            tip = "云端照片 · 单击预览 · 双击查看原图"
-        else:
-            tip = "单击预览 · 双击重命名"
-        self.setToolTip(tip)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 2)
-        layout.setSpacing(2)
-
-        self.lbl = QLabel()
-        self.lbl.setAlignment(Qt.AlignCenter)
-        self.lbl.setCursor(Qt.PointingHandCursor)
-        display = self.path
-        try:
-            display = thumbnail_for_photo(
-                self._local_root,
-                self.relative_path,
-                self.path,
-                size=THUMB * 2,
-            )
-        except Exception:
-            pass
-        pix = QPixmap(str(display))
-        if not pix.isNull():
-            self.lbl.setPixmap(
-                pix.scaled(THUMB, THUMB, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            )
-        self.lbl.mousePressEvent = self._on_press
-        self.lbl.mouseDoubleClickEvent = self._on_double_click
-        layout.addWidget(self.lbl)
-
-        self.lbl_name = QLabel()
-        self.lbl_name.setObjectName("photoThumbName")
-        self.lbl_name.setAlignment(Qt.AlignCenter)
-        self.lbl_name.setToolTip(self.path.name + ("（云端）" if self.is_cloud_only else "（双击重命名）"))
-        self.lbl_name.setCursor(Qt.PointingHandCursor)
-        self.lbl_name.mousePressEvent = self._on_press
-        self.lbl_name.mouseDoubleClickEvent = self._on_double_click
-        layout.addWidget(self.lbl_name)
-
-        self._click_timer = QTimer(self)
-        self._click_timer.setSingleShot(True)
-        self._click_timer.setInterval(280)
-        self._click_timer.timeout.connect(self._show_preview)
-
-        if self.is_cloud_only:
-            badge = QLabel(self)
-            badge.setObjectName("photoCloudBadge")
-            badge.setFixedSize(18, 18)
-            badge.setPixmap(_paint_cloud_pixmap())
-            badge.setScaledContents(True)
-            badge.move(4, 2)
-            badge.raise_()
-            badge.setToolTip("仅公盘")
-
-            if not self._in_spare:
-                dl = QPushButton("↓", self)
-                dl.setObjectName("photoThumbDownload")
-                dl.setFixedSize(18, 18)
-                dl.setCursor(Qt.PointingHandCursor)
-                dl.setToolTip("下载到本地相册")
-                dl.clicked.connect(self._download)
-                dl.move(4, 22)
-                dl.raise_()
-
-        if not self._in_spare:
-            btn = QPushButton("✕")
-            btn.setObjectName("photoThumbDelete")
-            btn.setFixedSize(18, 18)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setToolTip(f"移入「{SPARE_ALBUM_NAME}」（可从该文件夹拖回还原）")
-            btn.clicked.connect(self._delete)
-            btn.setParent(self)
-            btn.move(self.width() - 20, 2)
-            btn.raise_()
-        self._elide_name()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        btn = self.findChild(QPushButton, "photoThumbDelete")
-        if btn is not None:
-            btn.move(self.width() - 20, 2)
-        self._elide_name()
-
-    def _elide_name(self):
-        if not hasattr(self, "lbl_name"):
-            return
-        width = max(self.lbl_name.width(), self.width() - 8, 1)
-        self.lbl_name.setText(
-            self.lbl_name.fontMetrics().elidedText(self.path.name, Qt.ElideMiddle, width)
-        )
-
-    def _on_press(self, event):
-        if event.button() != Qt.LeftButton:
-            return
-        self._click_timer.start()
-
-    def _on_double_click(self, event):
-        if event.button() != Qt.LeftButton:
-            return
-        self._click_timer.stop()
-        if self.is_cloud_only:
-            self._show_original()
-        else:
-            self._rename()
-        event.accept()
-
-    def _show_image_popup(self, path: Path):
-        from src.ui.test_detail_dialog import StdImagePopup
-
-        pix = QPixmap(str(path))
-        if pix.isNull():
-            return
-        host = self.window()
-        max_w = max(int((host.width() if host else 800) * 0.75), 240)
-        max_h = max(int((host.height() if host else 600) * 0.75), 180)
-        if pix.width() > max_w or pix.height() > max_h:
-            pix = pix.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        popup = StdImagePopup(pix, host)
-        self._popup = popup
-        if host is not None:
-            popup.move(host.mapToGlobal(host.rect().center()) - popup.rect().center())
-        popup.show()
-        popup.raise_()
-
-    def _show_preview(self):
-        try:
-            path = preview_path_for_photo(
-                self._local_root, self._remote_root, self.relative_path
-            )
-        except PhotoError as exc:
-            QMessageBox.warning(self, "提示", str(exc))
-            return
-        self._show_image_popup(path)
-
-    def _show_original(self):
-        try:
-            path = original_view_path(
-                self._local_root, self._remote_root, self.relative_path
-            )
-        except PhotoError as exc:
-            QMessageBox.warning(self, "提示", str(exc))
-            return
-        self._show_image_popup(path)
-
-    def _download(self):
-        self._click_timer.stop()
-        try:
-            download_photo_to_album(
-                self._local_root, self._remote_root, self.relative_path
-            )
-        except PhotoError as exc:
-            QMessageBox.warning(self, "提示", str(exc))
-            return
-        self.downloaded.emit()
-
-    def _rename(self):
-        text, ok = QInputDialog.getText(
-            self, "重命名照片", "新的文件名：", text=self.path.name
-        )
-        if not ok:
-            return
-        try:
-            self.path = rename_photo(self.path, text)
-        except PhotoError as exc:
-            QMessageBox.warning(self, "提示", str(exc))
-            return
-        self.lbl_name.setToolTip(self.path.name + "（双击重命名）")
-        self._elide_name()
-        self.renamed.emit()
-
-    def _delete(self):
-        self._click_timer.stop()
-        try:
-            move_photo_to_spare(self._local_root, self._remote_root, self.relative_path)
-        except PhotoError as exc:
-            QMessageBox.warning(self, "提示", str(exc))
-            return
-        self.removed.emit()
-
-
 class PhotoAlbumRow(QFrame):
     # True when the album list or row order must be rebuilt (delete/rename folder).
     changed = Signal(bool)
@@ -712,7 +859,7 @@ class PhotoAlbumRow(QFrame):
             self.btn_qr.hide()
         left.addWidget(folder_wrap, 0, Qt.AlignHCenter)
 
-        self.btn_rename_all = QPushButton("打开文件夹" if self._is_spare else "所有照片重命名")
+        self.btn_rename_all = QPushButton("打开文件夹" if self._is_spare else "重置照片排序")
         self.btn_rename_all.setObjectName("photoRenameAllLink")
         self.btn_rename_all.setCursor(Qt.PointingHandCursor)
         self.btn_rename_all.setFixedWidth(102)
@@ -722,22 +869,16 @@ class PhotoAlbumRow(QFrame):
             )
             self.btn_rename_all.clicked.connect(self._open_in_finder)
         else:
+            self.btn_rename_all.setToolTip("按拍摄时间从 001 重新编号（含云端照片）")
             self.btn_rename_all.clicked.connect(self._rename_all)
         left.addWidget(self.btn_rename_all, 0, Qt.AlignHCenter)
         left.addStretch(1)
         root.addLayout(left, 0)
         root.setAlignment(Qt.AlignTop)
 
-        self.thumb_host = QWidget()
-        self.thumb_layout = FlowLayout(self.thumb_host, spacing=THUMB_GAP)
-        self.scroll = ThumbGallery()
-        self.scroll.setWidgetResizable(False)
-        self.scroll.setFrameShape(QFrame.NoFrame)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.scroll.setFixedHeight(GALLERY_H)
-        self.scroll.setWidget(self.thumb_host)
-        root.addWidget(self.scroll, stretch=1)
+        self.gallery = PhotoThumbList(self, in_spare=self._is_spare)
+        root.addWidget(self.gallery, stretch=1)
+        self._popup = None
         self.reload()
 
     @property
@@ -748,12 +889,7 @@ class PhotoAlbumRow(QFrame):
         return album_dir(self.project_root, self.leg_name, self.test_name, self.album_name)
 
     def reload(self):
-        while self.thumb_layout.count():
-            item = self.thumb_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
+        self.gallery.clear()
         if self._is_spare:
             photos = list_merged_spare_photos(
                 self.project_root,
@@ -770,25 +906,15 @@ class PhotoAlbumRow(QFrame):
                 self.album_name,
             )
         for photo in photos:
-            thumb = PhotoThumb(
-                photo,
-                self.project_root,
-                self.thumb_host,
-                remote_root=self.remote_root,
-                in_spare=self._is_spare,
-            )
-            thumb.removed.connect(self._on_thumb_removed)
-            thumb.renamed.connect(self._on_thumb_renamed)
-            thumb.downloaded.connect(self._on_thumb_downloaded)
-            self.thumb_layout.addWidget(thumb)
+            self.gallery.add_photo(photo, self.project_root)
         self.chip.setText(self.album_name)
-        QTimer.singleShot(0, self.scroll._fit_host)
 
     def _on_thumb_removed(self):
         self.reload()
         self.changed.emit(False)
 
     def _on_thumb_renamed(self):
+        self.reload()
         self.changed.emit(False)
 
     def _on_thumb_downloaded(self):
@@ -839,25 +965,28 @@ class PhotoAlbumRow(QFrame):
     def _rename_all(self):
         if self._is_spare:
             return
-        photos = [
-            item.read_path
-            for item in list_merged_photos(
+        photos = list_merged_photos(
+            self.project_root,
+            self.remote_root,
+            self.leg_name,
+            self.test_name,
+            self.album_name,
+        )
+        if not photos:
+            QMessageBox.information(self, "提示", "这个文件夹里还没有照片。")
+            return
+        prefix = self._ask_prefix("重置照片排序")
+        if not prefix:
+            return
+        try:
+            rename_all_merged_in_album(
                 self.project_root,
                 self.remote_root,
                 self.leg_name,
                 self.test_name,
                 self.album_name,
+                prefix,
             )
-            if not item.is_cloud_only
-        ]
-        if not photos:
-            QMessageBox.information(self, "提示", "这个文件夹里还没有本地照片。")
-            return
-        prefix = self._ask_prefix("所有照片重命名")
-        if not prefix:
-            return
-        try:
-            rename_all_in_album(self.folder(), prefix)
         except PhotoError as exc:
             QMessageBox.warning(self, "提示", str(exc))
             return
@@ -918,6 +1047,124 @@ class PhotoAlbumRow(QFrame):
         name = album_name_from_mime(mime)
         return bool(name) and name != self.album_name and name != SPARE_ALBUM_NAME
 
+    def _show_image_popup(self, path: Path):
+        from src.ui.test_detail_dialog import StdImagePopup
+
+        pix = QPixmap(str(path))
+        if pix.isNull():
+            return
+        host = self.window()
+        max_w = max(int((host.width() if host else 800) * 0.75), 240)
+        max_h = max(int((host.height() if host else 600) * 0.75), 180)
+        if pix.width() > max_w or pix.height() > max_h:
+            pix = pix.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        popup = StdImagePopup(pix, host)
+        self._popup = popup
+        if host is not None:
+            popup.move(host.mapToGlobal(host.rect().center()) - popup.rect().center())
+        popup.show()
+        popup.raise_()
+
+    def _show_preview(self, rel: str):
+        try:
+            path = preview_path_for_photo(self.project_root, self.remote_root, rel)
+        except PhotoError as exc:
+            QMessageBox.warning(self, "提示", str(exc))
+            return
+        self._show_image_popup(path)
+
+    def _show_original(self, rel: str):
+        try:
+            path = original_view_path(self.project_root, self.remote_root, rel)
+        except PhotoError as exc:
+            QMessageBox.warning(self, "提示", str(exc))
+            return
+        self._show_image_popup(path)
+
+    def _rename_photo(self, rel: str):
+        current = Path(rel).name
+        text, ok = QInputDialog.getText(self, "重命名照片", "新的文件名：", text=current)
+        if not ok:
+            return
+        try:
+            rename_merged_photo(self.project_root, self.remote_root, rel, text)
+        except PhotoError as exc:
+            QMessageBox.warning(self, "提示", str(exc))
+            return
+        self._on_thumb_renamed()
+
+    def _delete_photo(self, rel: str):
+        try:
+            move_photo_to_spare(self.project_root, self.remote_root, rel)
+        except PhotoError as exc:
+            QMessageBox.warning(self, "提示", str(exc))
+            return
+        self._on_thumb_removed()
+
+    def _download_photo(self, rel: str):
+        try:
+            download_photo_to_album(self.project_root, self.remote_root, rel)
+        except PhotoError as exc:
+            QMessageBox.warning(self, "提示", str(exc))
+            return
+        self._on_thumb_downloaded()
+
+    def _renumber_from_gallery(self):
+        if self._is_spare:
+            return
+        self._write_photo_order(self.gallery.ordered_rels())
+
+    def _apply_photo_reorder(self, src_rel: str, dest: int):
+        current = self.gallery.ordered_rels()
+        if src_rel not in current:
+            return
+        old = current.index(src_rel)
+        items = list(current)
+        item = items.pop(old)
+        dest = max(0, min(int(dest), len(items)))
+        items.insert(dest, item)
+        if items == current:
+            return
+        self._write_photo_order(items)
+
+    def _write_photo_order(self, items: List[str]):
+        if self._is_spare or not items:
+            return
+        disk = [
+            photo.relative_path
+            for photo in list_merged_photos(
+                self.project_root,
+                self.remote_root,
+                self.leg_name,
+                self.test_name,
+                self.album_name,
+            )
+        ]
+        if items == disk:
+            return
+        prefix = infer_numbered_prefix([Path(rel).name for rel in items]) or self.album_name
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            renumber_merged_photos(
+                self.project_root,
+                self.remote_root,
+                self.leg_name,
+                self.test_name,
+                self.album_name,
+                items,
+                prefix,
+            )
+        except PhotoError as exc:
+            QMessageBox.warning(self, "提示", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        QTimer.singleShot(0, self._finish_photo_reorder)
+
+    def _finish_photo_reorder(self):
+        self.reload()
+        self.changed.emit(False)
+
     def dragEnterEvent(self, event: QDragEnterEvent):
         if self._is_spare:
             event.ignore()
@@ -946,6 +1193,9 @@ class PhotoAlbumRow(QFrame):
             return
         event.ignore()
 
+    def dragLeaveEvent(self, event: QDragLeaveEvent):
+        event.accept()
+
     def dropEvent(self, event: QDropEvent):
         if self._is_spare:
             event.ignore()
@@ -954,8 +1204,7 @@ class PhotoAlbumRow(QFrame):
         if name and name != self.album_name:
             event.setDropAction(Qt.MoveAction)
             event.accept()
-            # Insert before this row if pointer is in the upper half; else after.
-            local_y = event.position().toPoint().y()
+            local_y = self.mapFromGlobal(event.globalPosition().toPoint()).y()
             insert_at = 0 if local_y < self.height() // 2 else 1
             self.albumReorderDrop.emit(name, insert_at)
             return
@@ -1245,7 +1494,7 @@ class TestPhotosPanel(QWidget):
         )
         if albums:
             self.lbl_hint.setText(
-                "把图片或一层文件夹拖到某一行即可导入；拖动左侧文件夹可调整贴图顺序。"
+                "把图片或一层文件夹拖到某一行即可导入；拖动照片可调整先后，拖动左侧文件夹可调整贴图顺序。"
             )
         else:
             self.lbl_hint.setText("还没有照片文件夹。可用「模版新建」一次开出试验前 / 中 / 数据 / 后。")

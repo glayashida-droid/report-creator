@@ -21,6 +21,7 @@ from src.ui.main_window import (
     _apply_connection_status,
     _is_network_connection,
     _templates_are_network,
+    resolve_project_folder_to_open,
 )
 from src.ui.theme import apply_cyberpunk_theme
 
@@ -226,4 +227,92 @@ def test_main_window_mounts_then_probes_after_first_show():
         app.processEvents()
     assert order == ["mount", "probe"]
     assert win._connection_timer.isActive()
+    win.close()
+
+
+def test_resolve_project_folder_prefers_reachable_remote(tmp_path: Path):
+    remote = tmp_path / "remote"
+    local = tmp_path / "local"
+    remote.mkdir()
+    local.mkdir()
+    path, kind = resolve_project_folder_to_open(remote, local)
+    assert kind == "remote"
+    assert path == remote
+
+
+def test_resolve_project_folder_falls_back_to_local(tmp_path: Path):
+    remote = tmp_path / "missing-remote"
+    local = tmp_path / "local"
+    local.mkdir()
+    path, kind = resolve_project_folder_to_open(remote, local)
+    assert kind == "local"
+    assert path == local
+
+
+def test_resolve_project_folder_none_when_both_missing(tmp_path: Path):
+    path, kind = resolve_project_folder_to_open(
+        tmp_path / "no-remote", tmp_path / "no-local"
+    )
+    assert kind == "none"
+    assert path is None
+
+
+def test_open_button_visible_when_remote_ready_before_mirror(tmp_path: Path):
+    _app()
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    win = MainWindow()
+    win._source_path = remote
+    win.state.source_path = str(remote)
+    win._local_path = tmp_path / "local"
+    win._set_mirror_status("镜像中...", kind="dim")
+    assert not win.btn_open_local.isHidden()
+    assert "公盘" in win.btn_open_local.toolTip()
+    win.close()
+
+
+def test_open_button_hidden_until_a_folder_exists():
+    _app()
+    win = MainWindow()
+    win._set_mirror_status("尚未加载项目", kind="dim")
+    assert win.btn_open_local.isHidden()
+    win.close()
+
+
+def test_open_project_folder_opens_remote_without_prompt(tmp_path: Path):
+    from PySide6.QtWidgets import QMessageBox
+
+    _app()
+    remote = tmp_path / "remote"
+    local = tmp_path / "local"
+    remote.mkdir()
+    local.mkdir()
+    win = MainWindow()
+    win._source_path = remote
+    win.state.source_path = str(remote)
+    win._local_path = local
+    with patch("src.ui.main_window._open_in_file_manager") as mock_open:
+        with patch.object(QMessageBox, "information") as mock_info:
+            win._open_project_folder()
+    mock_open.assert_called_once_with(remote)
+    mock_info.assert_not_called()
+    win.close()
+
+
+def test_open_project_folder_falls_back_to_local_with_prompt(tmp_path: Path):
+    from PySide6.QtWidgets import QMessageBox
+
+    _app()
+    local = tmp_path / "local"
+    local.mkdir()
+    win = MainWindow()
+    win._source_path = tmp_path / "offline-remote"
+    win.state.source_path = str(tmp_path / "offline-remote")
+    win._local_path = local
+    with patch("src.ui.main_window._open_in_file_manager") as mock_open:
+        with patch.object(QMessageBox, "information") as mock_info:
+            win._open_project_folder()
+    mock_info.assert_called_once()
+    assert "公盘不可达" in mock_info.call_args.args[2]
+    mock_open.assert_called_once_with(local)
     win.close()

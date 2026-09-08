@@ -546,6 +546,9 @@ def parse_numeric_display(text: str) -> float | None:
         return None
 
 
+# Range separators: fullwidth tilde, ASCII tilde, wave dash.
+_LIMIT_RANGE_SEPS = ("～", "~", "〜")
+
 # One-sided limit prefixes, longest first.
 _LIMIT_ONE_SIDED = (
     ("大于等于", "ge"),
@@ -590,6 +593,8 @@ def parse_limit_expression(text: str) -> LimitRule | None:
     s = (text or "").strip()
     if not s:
         return None
+    for sep in _LIMIT_RANGE_SEPS[1:]:
+        s = s.replace(sep, "～")
     if "～" in s:
         left, _, right = s.partition("～")
         lo = parse_numeric_display(left.strip())

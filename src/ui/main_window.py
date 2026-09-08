@@ -241,7 +241,7 @@ class NightlySyncWorker(QThread):
             self.failed.emit(str(exc))
 
 
-APP_VERSION = "1.3.5"
+APP_VERSION = "1.3.6"
 # Calendar popup floor. Dates before this are treated as "no end date"
 # because QDateEdit may clamp the blank sentinel to 1752-09-14.
 _EARLIEST_REAL_YEAR = 1990
@@ -490,8 +490,10 @@ class MainWindow(QMainWindow):
         self.btn_open_local.setFlat(True)
         self.btn_open_local.setCursor(Qt.PointingHandCursor)
         self.btn_open_local.setVisible(False)
-        self.btn_open_local.setToolTip("在访达中打开本地镜像文件夹")
-        self.btn_open_local.clicked.connect(self._open_local_project_folder)
+        self.btn_open_local.setToolTip(
+            "优先在访达中打开公盘项目文件夹；不可达则打开本地镜像"
+        )
+        self.btn_open_local.clicked.connect(self._open_project_folder)
 
         backup_sep = QFrame()
         backup_sep.setFrameShape(QFrame.VLine)
@@ -1627,9 +1629,9 @@ class MainWindow(QMainWindow):
             and self._local_path is not None
             and self._local_path.is_dir()
         )
-        self.btn_open_local.setVisible(ready)
         _apply_connection_status(self.chk_mirror_conn, ok=ready, network=False)
         self._refresh_mirror_tooltip(ready=ready)
+        self._refresh_open_folder_button()
 
     def _remote_brief_for_tooltip(self) -> str:
         """One short line about 公盘 reachability for the 本地镜像 tooltip."""
@@ -1666,9 +1668,23 @@ class MainWindow(QMainWindow):
             lines.append(remote_line)
         self.chk_mirror_conn.setToolTip("\n".join(lines))
 
+    def _refresh_open_folder_button(self):
+        remote = self._source_project_path()
+        local_ready = self._local_path is not None and self._local_path.is_dir()
+        self.btn_open_local.setVisible(remote is not None or local_ready)
+        if remote is not None:
+            self.btn_open_local.setToolTip("在访达中打开公盘项目文件夹")
+        elif local_ready:
+            self.btn_open_local.setToolTip("公盘不可达，在访达中打开本地镜像文件夹")
+        else:
+            self.btn_open_local.setToolTip(
+                "优先在访达中打开公盘项目文件夹；不可达则打开本地镜像"
+            )
+
     def _refresh_remote_json_status(self):
         """Refresh 本地镜像 tooltip (公盘 status folded in) and flush pending JSON."""
         self._refresh_mirror_tooltip()
+        self._refresh_open_folder_button()
         reachable = self._source_project_path() is not None
         was = self._remote_was_reachable
         self._remote_was_reachable = reachable
@@ -1861,11 +1877,21 @@ class MainWindow(QMainWindow):
         ) * 1000
         self._connection_timer.start(max(interval_ms, 1000))
 
-    def _open_local_project_folder(self):
-        path = self._local_path
-        if path is None or not path.is_dir():
-            QMessageBox.warning(self, "提示", "本地镜像尚未就绪")
+    def _open_project_folder(self):
+        remote = self._source_path
+        if remote is None:
+            raw = (self.state.source_path or "").strip()
+            remote = Path(raw) if raw else None
+        path, kind = resolve_project_folder_to_open(remote, self._local_path)
+        if path is None:
+            QMessageBox.warning(
+                self,
+                "提示",
+                "没有可打开的项目文件夹（公盘不可达，本地镜像尚未就绪）",
+            )
             return
+        if kind == "local":
+            QMessageBox.information(self, "提示", "公盘不可达，将打开本地镜像")
         _open_in_file_manager(path)
 
     def _drop_abandoned(self, worker):
@@ -2444,6 +2470,18 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             QMessageBox.critical(self, "导出失败", f"生成报告时发生错误:\n{str(e)}")
+
+
+def resolve_project_folder_to_open(
+    remote: Optional[Path],
+    local: Optional[Path],
+) -> tuple[Optional[Path], str]:
+    """Prefer a reachable 公盘 folder; fall back to the local mirror."""
+    if remote is not None and remote.is_dir():
+        return remote, "remote"
+    if local is not None and local.is_dir():
+        return local, "local"
+    return None, "none"
 
 
 def _open_in_file_manager(path: Path, *, reveal: bool = False) -> None:

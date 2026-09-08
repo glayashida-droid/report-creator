@@ -6,10 +6,16 @@ These subclasses always accept the wheel so the outer form stays put until
 the cursor leaves the inner widget.
 """
 
-from PySide6.QtWidgets import QScrollArea, QTableWidget, QTextEdit
+from PySide6.QtWidgets import QListWidget, QScrollArea, QTableWidget, QTextEdit
 
 
 class ContainedTableWidget(QTableWidget):
+    def wheelEvent(self, event):
+        super().wheelEvent(event)
+        event.accept()
+
+
+class ContainedListWidget(QListWidget):
     def wheelEvent(self, event):
         super().wheelEvent(event)
         event.accept()

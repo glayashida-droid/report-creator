@@ -247,6 +247,32 @@ QFrame#photoThumb {{
     border-radius: 8px;
 }}
 
+QListWidget#photoThumbList {{
+    background: transparent;
+    border: none;
+    padding: 0px;
+    outline: 0;
+}}
+
+QListWidget#photoThumbList::item {{
+    background-color: {BG_PANEL};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: 4px;
+    margin: 0px;
+}}
+
+QListWidget#photoThumbList::item:hover {{
+    border: 1px solid {CYAN_DIM};
+    color: {TEXT};
+}}
+
+QListWidget#photoThumbList::item:selected {{
+    border: 1px solid {CYAN};
+    color: {TEXT};
+}}
+
 QPushButton#photoThumbDelete {{
     padding: 0px;
     min-height: 16px;

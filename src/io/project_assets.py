@@ -5,9 +5,10 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence, Union
+from typing import List, Optional, Sequence, Tuple, Union
 
 from PIL import Image
 
@@ -17,10 +18,16 @@ from src.io.test_photos import (
     SPARE_ALBUM_NAME,
     SPARE_DIR_NAME,
     PhotoError,
+    _rename_path,
     album_dir,
     apply_album_order,
+    canonical_image_suffix,
     is_image_file,
     is_usable_test_name,
+    numbered_name,
+    photo_sort_key,
+    photo_stem_key,
+    planned_photo_name,
     require_leg_name,
     require_usable_test_name,
     test_dir,
@@ -243,6 +250,187 @@ def list_merged_spare_photos(
     )
 
 
+def _require_relative(relative_path: str) -> Path:
+    rel = Path(relative_path)
+    if not rel.parts or rel.is_absolute() or ".." in rel.parts:
+        raise PhotoError("照片路径不合法")
+    return rel
+
+
+def _iter_existing_roots(
+    local_root: Optional[PathLike], remote_root: Optional[PathLike]
+):
+    for root in (_as_root(local_root), _as_root(remote_root)):
+        if root is not None:
+            yield root
+
+
+def _merged_other_stems(
+    local_root: Optional[PathLike],
+    remote_root: Optional[PathLike],
+    relative_path: Path,
+) -> set[str]:
+    current = relative_path.name
+    stems: set[str] = set()
+    for root in _iter_existing_roots(local_root, remote_root):
+        folder = (root / relative_path).parent
+        if not folder.is_dir():
+            continue
+        for name in _list_image_names(folder):
+            if name == current:
+                continue
+            stems.add(photo_stem_key(name))
+    return stems
+
+
+def rename_merged_photo(
+    local_root: Optional[PathLike],
+    remote_root: Optional[PathLike],
+    relative_path: str,
+    new_name: str,
+) -> str:
+    """Rename a photo on every root that has it. Returns the new relative path."""
+    rel = _require_relative(relative_path)
+    if SPARE_DIR_NAME in rel.parts:
+        raise PhotoError("不能重命名备用中的照片")
+    candidate = planned_photo_name(rel.name, new_name)
+    dest_rel = rel.with_name(candidate)
+    sources = []
+    for root in _iter_existing_roots(local_root, remote_root):
+        src = root / rel
+        if src.is_file():
+            sources.append((root, src))
+    if not sources:
+        raise PhotoError("找不到照片")
+    if candidate == rel.name:
+        return rel.as_posix()
+    if photo_stem_key(candidate) in _merged_other_stems(
+        local_root, remote_root, rel
+    ):
+        raise PhotoError(f"已存在同名文件：{candidate}")
+    for root, src in sources:
+        dest = root / dest_rel
+        try:
+            same = dest.exists() and dest.resolve() == src.resolve()
+        except OSError:
+            same = dest == src
+        if dest.exists() and not same:
+            raise PhotoError(f"已存在同名文件：{candidate}")
+        _rename_path(src, dest)
+    return dest_rel.as_posix()
+
+
+def _rollback_renames(applied: List[Tuple[Path, Path]]) -> None:
+    for temp, orig in reversed(applied):
+        try:
+            if temp.exists() and not orig.exists():
+                temp.rename(orig)
+        except OSError:
+            pass
+
+
+def renumber_merged_photos(
+    local_root: Optional[PathLike],
+    remote_root: Optional[PathLike],
+    leg_name: str,
+    test_name: str,
+    album_name: str,
+    ordered_relative_paths: Sequence[str],
+    prefix: str,
+) -> List[str]:
+    """Number merge-view photos as prefix-001… in *ordered_relative_paths* order."""
+    album = validate_album_name(album_name)
+    if album == SPARE_ALBUM_NAME:
+        raise PhotoError("不能重命名备用中的照片")
+    photos = list_merged_photos(
+        local_root, remote_root, leg_name, test_name, album
+    )
+    by_rel = {item.relative_path: item for item in photos}
+    ordered: List[MergedPhoto] = []
+    seen: set[str] = set()
+    for raw in ordered_relative_paths:
+        key = Path(raw).as_posix()
+        item = by_rel.get(key) or by_rel.get(raw)
+        if item is None or item.relative_path in seen:
+            continue
+        ordered.append(item)
+        seen.add(item.relative_path)
+    for item in photos:
+        if item.relative_path not in seen:
+            ordered.append(item)
+            seen.add(item.relative_path)
+    if not ordered:
+        return []
+
+    applied: List[Tuple[Path, Path]] = []
+    finals: List[Tuple[Path, Path]] = []
+    try:
+        for index, item in enumerate(ordered):
+            rel = Path(item.relative_path)
+            suffix = canonical_image_suffix(rel.suffix)
+            dest_name = numbered_name(prefix, index + 1, suffix)
+            for root in _iter_existing_roots(local_root, remote_root):
+                src = root / rel
+                if not src.is_file():
+                    continue
+                temp = src.parent / (
+                    f".__renaming_{uuid.uuid4().hex}_{index}{suffix}"
+                )
+                _rename_path(src, temp)
+                applied.append((temp, src))
+                finals.append((temp, src.parent / dest_name))
+    except PhotoError:
+        _rollback_renames(applied)
+        raise
+
+    try:
+        for temp, dest in finals:
+            _rename_path(temp, dest)
+    except PhotoError:
+        _rollback_renames(applied)
+        raise
+
+    new_rels = [
+        Path(item.relative_path)
+        .with_name(
+            numbered_name(
+                prefix, index, canonical_image_suffix(Path(item.relative_path).suffix)
+            )
+        )
+        .as_posix()
+        for index, item in enumerate(ordered, start=1)
+    ]
+    invalidate_photo_thumbs(
+        local_root,
+        [item.relative_path for item in ordered] + new_rels,
+    )
+    return new_rels
+
+
+def rename_all_merged_in_album(
+    local_root: Optional[PathLike],
+    remote_root: Optional[PathLike],
+    leg_name: str,
+    test_name: str,
+    album_name: str,
+    prefix: str,
+) -> List[str]:
+    """EXIF (else mtime) order, then prefix-001… on local and remote copies."""
+    photos = list_merged_photos(
+        local_root, remote_root, leg_name, test_name, album_name
+    )
+    photos = sorted(photos, key=lambda item: photo_sort_key(item.read_path))
+    return renumber_merged_photos(
+        local_root,
+        remote_root,
+        leg_name,
+        test_name,
+        album_name,
+        [item.relative_path for item in photos],
+        prefix,
+    )
+
+
 def resolve_photo_path(
     local_root: Optional[PathLike],
     remote_root: Optional[PathLike],
@@ -403,6 +591,37 @@ def thumbnail_cache_path(
     if suffix not in IMAGE_EXTS:
         suffix = ".jpg"
     return thumbs_dir(local_root) / f"{stem}_{size}{suffix}"
+
+
+def invalidate_photo_thumbs(
+    local_root: Optional[PathLike], relative_paths: Sequence[str]
+) -> None:
+    """Drop `.thumbs` files keyed by *relative_paths* (all sizes)."""
+    local = _as_root(local_root)
+    if local is None:
+        return
+    folder = thumbs_dir(local)
+    if not folder.is_dir():
+        return
+    prefixes = []
+    for raw in relative_paths:
+        if not raw:
+            continue
+        safe = "__".join(Path(raw).parts)
+        stem = Path(safe).stem
+        if stem:
+            prefixes.append(f"{stem}_")
+    if not prefixes:
+        return
+    for path in folder.iterdir():
+        if not path.is_file():
+            continue
+        name = path.name
+        if any(name.startswith(prefix) for prefix in prefixes):
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
 
 def thumbnail_for_photo(

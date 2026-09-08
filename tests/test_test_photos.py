@@ -15,6 +15,7 @@ from src.io.test_photos import (
     create_template_albums,
     delete_test_dir,
     hooked_test_dir_key,
+    infer_numbered_prefix,
     iter_export_photos,
     list_albums,
     list_photos,
@@ -25,6 +26,7 @@ from src.io.test_photos import (
     rename_all_in_album,
     rename_photo,
     rename_test_dir,
+    renumber_photos,
     RENAME_CONFLICT_MESSAGE,
     test_dir_key as leg_test_dir_key,
     uses_data_photo_layout,
@@ -41,6 +43,12 @@ def _dir(root: Path, test_name: str, leg_name: str = LEG) -> Path:
 def _png(path: Path, color="red"):
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (8, 8), color).save(path, "PNG")
+    return path
+
+
+def _jpeg(path: Path, color="red"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (8, 8), color).save(path, "JPEG")
     return path
 
 
@@ -153,6 +161,70 @@ def test_rename_all_uses_exif_then_mtime():
             "试验前-003.jpg",
         ]
         assert numbered_name("A2260613686101", 1, ".JPG") == "A2260613686101-001.jpg"
+        assert numbered_name("试验前", 1, ".jpeg") == "试验前-001.jpg"
+        assert numbered_name("试验前", 2, ".PNG") == "试验前-002.png"
+
+
+def test_rename_photo_stem_identity_and_jpeg_suffix():
+    with tempfile.TemporaryDirectory() as tmp:
+        album = Path(tmp) / "album"
+        album.mkdir()
+        _png(album / "试验前-001.png", "red")
+        src = _jpeg(album / "cam.jpeg", "green")
+        try:
+            rename_photo(src, "试验前-001")
+            raise AssertionError("expected stem conflict")
+        except PhotoError:
+            pass
+        renamed = rename_photo(src, "样品")
+        assert renamed.name == "样品.jpg"
+        assert renamed.exists()
+        assert not (album / "cam.jpeg").exists()
+
+
+def test_keep_original_stem_collision_ignores_extension():
+    with tempfile.TemporaryDirectory() as tmp:
+        album = Path(tmp) / "album"
+        album.mkdir()
+        _png(album / "shot.png", "red")
+        src = _jpeg(Path(tmp) / "src" / "shot.jpg", "green")
+        written = copy_into_album_keep_names(album, [src])
+        assert written[0].name == "shot_1.jpg"
+
+
+def test_copy_into_album_canonicalizes_jpeg_suffix():
+    with tempfile.TemporaryDirectory() as tmp:
+        album = Path(tmp) / "album"
+        album.mkdir()
+        src = _jpeg(Path(tmp) / "src" / "cam.jpeg", "blue")
+        written = copy_into_album(album, [src], "试验前")
+        assert written[0].name == "试验前-001.jpg"
+
+
+def test_renumber_photos_keeps_given_order_not_exif():
+    with tempfile.TemporaryDirectory() as tmp:
+        album = Path(tmp) / "album"
+        album.mkdir()
+        later = _jpeg_with_exif(album / "later.jpg", "2026:02:01 10:00:00", "red")
+        earlier = _jpeg_with_exif(album / "earlier.jpg", "2026:01:01 10:00:00", "green")
+        jpeg = _jpeg(album / "mid.jpeg", "blue")
+        renamed = renumber_photos(album, "试验前", [later, jpeg, earlier])
+        assert [p.name for p in renamed] == [
+            "试验前-001.jpg",
+            "试验前-002.jpg",
+            "试验前-003.jpg",
+        ]
+        with Image.open(album / "试验前-001.jpg") as img:
+            assert img.getpixel((0, 0))[0] >= 200
+        with Image.open(album / "试验前-002.jpg") as img:
+            assert img.getpixel((0, 0))[2] >= 200
+
+
+def test_infer_numbered_prefix():
+    assert infer_numbered_prefix(["试验前-001.jpg", "试验前-002.png"]) == "试验前"
+    assert infer_numbered_prefix(["a.png", "b.jpg"]) is None
+    assert infer_numbered_prefix(["试验前-001.jpg", "样品-002.jpg"]) is None
+    assert infer_numbered_prefix(["试验前-001.jpg", "notes.png"]) == "试验前"
 
 
 def test_rename_test_dir_blocks_existing_target():
@@ -359,12 +431,12 @@ def test_add_template_blocked_when_same_leg_duplicate(tmp_path):
 def test_photos_panel_shows_spare_album_last(tmp_path):
     import sys
 
-    from PySide6.QtWidgets import QApplication, QPushButton
+    from PySide6.QtWidgets import QApplication
 
     from src.io.project_assets import move_photo_to_spare
     from src.io.test_photos import SPARE_ALBUM_NAME, create_template_albums
     from src.models.project_state import ProjectState, TestLeg, TestNode
-    from src.ui.test_photos_panel import PhotoThumb, TestPhotosPanel
+    from src.ui.test_photos_panel import PHOTO_PATH_ROLE, TestPhotosPanel
 
     app = QApplication.instance()
     if app is None:
@@ -409,14 +481,126 @@ def test_photos_panel_shows_spare_album_last(tmp_path):
     formal = next(row for row in panel._row_widgets() if not row.is_spare)
     assert not formal.btn_qr.isHidden()
     assert formal.btn_qr.text() == "QR"
-    thumbs = [
-        spare.thumb_layout.itemAt(i).widget()
-        for i in range(spare.thumb_layout.count())
-    ]
-    assert len(thumbs) == 1
-    assert isinstance(thumbs[0], PhotoThumb)
-    assert thumbs[0].path.name == "shot.png"
-    assert thumbs[0].findChild(QPushButton, "photoThumbDelete") is None
+    thumbs = spare.gallery
+    assert thumbs.count() == 1
+    item = thumbs.item(0)
+    assert Path(item.data(PHOTO_PATH_ROLE)).name == "shot.png"
+    assert item.toolTip() == "shot.png"
+    assert thumbs.dragEnabled() is False
+
+
+def test_insert_index_for_thumbs_reading_order():
+    from PySide6.QtCore import QPoint, QRect
+
+    from src.ui.test_photos_panel import insert_index_for_rects, move_list_item
+
+    names = ["a", "b", "c"]
+    assert move_list_item(names, 0, 2) == ["b", "a", "c"]
+    assert move_list_item(names, 0, 3) == ["b", "c", "a"]
+    assert move_list_item(names, 2, 0) == ["c", "a", "b"]
+    assert move_list_item(names, 1, 1) == ["a", "b", "c"]
+    assert move_list_item(names, 1, 2) == ["a", "b", "c"]
+    rects = [QRect(0, 0, 80, 80), QRect(90, 0, 80, 80)]
+    assert insert_index_for_rects(rects, QPoint(10, 40)) == 0
+    assert insert_index_for_rects(rects, QPoint(120, 40)) == 1
+    assert insert_index_for_rects(rects, QPoint(200, 40)) == 2
+
+
+def test_photo_thumb_tooltip_shows_filename(tmp_path):
+    import sys
+
+    from PySide6.QtWidgets import QApplication
+
+    from src.io.test_photos import create_album
+    from src.ui.test_photos_panel import PhotoAlbumRow
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    album = create_album(tmp_path, "Leg 1", "高温试验", "试验前")
+    _png(album / "试验前-001.png")
+    row = PhotoAlbumRow(tmp_path, "Leg 1", "高温试验", "试验前", "P1")
+    item = row.gallery.item(0)
+    assert item is not None
+    assert item.text() == "试验前-001.png"
+    assert item.toolTip() == "试验前-001.png"
+
+
+def test_photo_thumb_cloud_tooltip_allows_rename(tmp_path):
+    import sys
+
+    from PySide6.QtWidgets import QApplication
+
+    from src.io.test_photos import create_album
+    from src.ui.test_photos_panel import PhotoAlbumRow
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    local.mkdir()
+    create_album(remote, "Leg 1", "高温试验", "试验前")
+    _png(_dir(remote, "高温试验") / "试验前" / "cloud.png")
+    row = PhotoAlbumRow(
+        local, "Leg 1", "高温试验", "试验前", "P1", remote_root=remote
+    )
+    item = row.gallery.item(0)
+    assert item is not None
+    assert item.toolTip() == "cloud.png"
+    assert row.gallery.dragEnabled() is False
+    assert row.gallery.acceptDrops() is True
+
+
+def test_photo_album_row_reorder_rewrites_sequence(tmp_path):
+    import sys
+
+    from PySide6.QtWidgets import QApplication
+
+    from src.io.test_photos import create_album
+    from src.ui.test_photos_panel import PhotoAlbumRow
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    album = create_album(tmp_path, "Leg 1", "高温试验", "试验前")
+    _png(album / "试验前-001.png", "red")
+    _png(album / "试验前-002.png", "blue")
+    row = PhotoAlbumRow(tmp_path, "Leg 1", "高温试验", "试验前", "P1")
+    rels = row.gallery.ordered_rels()
+    assert len(rels) == 2
+    row._apply_photo_reorder(rels[0], 2)
+    with Image.open(album / "试验前-001.png") as img:
+        assert img.getpixel((0, 0))[2] >= 200
+    with Image.open(album / "试验前-002.png") as img:
+        assert img.getpixel((0, 0))[0] >= 200
+
+
+def test_photo_thumb_live_move_commits_visual_order(tmp_path):
+    import sys
+
+    from PySide6.QtWidgets import QApplication
+
+    from src.io.test_photos import create_album
+    from src.ui.test_photos_panel import PhotoAlbumRow
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    album = create_album(tmp_path, "Leg 1", "高温试验", "试验前")
+    _png(album / "试验前-001.png", "red")
+    _png(album / "试验前-002.png", "blue")
+    row = PhotoAlbumRow(tmp_path, "Leg 1", "高温试验", "试验前", "P1")
+    gallery = row.gallery
+    rels = gallery.ordered_rels()
+    assert len(rels) == 2
+    gallery._order_at_press = list(rels)
+    gallery._visual_order = [rels[1], rels[0]]
+    gallery._end_reorder()
+    with Image.open(album / "试验前-001.png") as img:
+        assert img.getpixel((0, 0))[2] >= 200
+    with Image.open(album / "试验前-002.png") as img:
+        assert img.getpixel((0, 0))[0] >= 200
 
 
 def test_apply_album_order_and_export_respects_preferred():
@@ -484,6 +668,11 @@ if __name__ == "__main__":
     test_template_skips_existing_and_custom_rejects_duplicate()
     test_copy_continues_sequence_and_drop_reads_one_level()
     test_rename_all_uses_exif_then_mtime()
+    test_rename_photo_stem_identity_and_jpeg_suffix()
+    test_keep_original_stem_collision_ignores_extension()
+    test_copy_into_album_canonicalizes_jpeg_suffix()
+    test_renumber_photos_keeps_given_order_not_exif()
+    test_infer_numbered_prefix()
     test_rename_test_dir_blocks_existing_target()
     test_rename_test_dir_success_moves_hooked_dir()
     test_rename_test_dir_noop_when_source_missing()

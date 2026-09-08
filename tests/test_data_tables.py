@@ -625,6 +625,13 @@ def test_parse_limit_expression_range_and_one_sided():
     assert value_violates_limit(-5.0, neg) is False
     assert value_violates_limit(-6.0, neg) is True
 
+    ascii_tilde = parse_limit_expression("1~5")
+    assert ascii_tilde == parse_limit_expression("1～5")
+    wave = parse_limit_expression("1〜5")
+    assert wave == parse_limit_expression("1～5")
+    neg_ascii = parse_limit_expression("-5~0")
+    assert neg_ascii == parse_limit_expression("-5～0")
+
     assert value_violates_limit(5.0, parse_limit_expression("大于5")) is True
     assert value_violates_limit(5.1, parse_limit_expression(">5")) is False
     assert value_violates_limit(5.0, parse_limit_expression("小于5")) is True
@@ -670,6 +677,19 @@ def test_find_out_of_range_by_limits_single_cell_applies_whole_table():
         merges=[],
     )
     assert set(find_out_of_range_by_limits(snap)) == {(2, 2), (3, 1)}
+
+
+def test_find_out_of_range_by_limits_mixed_tilde_seps_are_per_column():
+    snap = PreviewSnapshot(
+        sheet_name="S",
+        values=[
+            ["样品编号", "桥路", "短路"],
+            ["限值", "1～4", "1~5"],
+            ["A01", "4", "6"],
+        ],
+        merges=[],
+    )
+    assert set(find_out_of_range_by_limits(snap)) == {(2, 2)}
 
 
 def test_find_out_of_range_by_limits_no_limit_row_returns_empty():
@@ -773,6 +793,7 @@ if __name__ == "__main__":
     test_parse_limit_expression_range_and_one_sided()
     test_find_out_of_range_by_limits_per_column_and_skips()
     test_find_out_of_range_by_limits_single_cell_applies_whole_table()
+    test_find_out_of_range_by_limits_mixed_tilde_seps_are_per_column()
     test_import_sample_ids_preserves_limit_row()
     test_prepare_display_snapshot_drops_limit_row_when_excluded()
     test_prepare_display_snapshot_single_limit_spans_data_cols()

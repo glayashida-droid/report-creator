@@ -15,7 +15,9 @@ TEST_GROUP_DIR = "3.测试组"
 RENAME_CONFLICT_MESSAGE = "同名试验项目已存在，请重新命名"
 TEMPLATE_ALBUMS = ("试验前", "试验中", "数据", "试验后")
 IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
+JPEG_EXTS = {".jpg", ".jpeg"}
 SPARE_DIR_NAME = "备用"
+_NUMBERED_STEM = re.compile(r"^(.+)-(\d+)$")
 SPARE_ALBUM_NAME = SPARE_DIR_NAME  # alias — 试验目录下与数据表附件同级
 PLACEHOLDER_TEST_NAME = "请选择试验..."
 CUSTOM_TEST_NAME = "自定义"
@@ -317,26 +319,82 @@ def next_sequence(folder: Path, prefix: str) -> int:
     return highest + 1
 
 
+def canonical_image_suffix(suffix: str) -> str:
+    """`.jpeg` / `.JPG` → `.jpg`; PNG stays `.png`."""
+    ext = suffix if str(suffix).startswith(".") else f".{suffix}"
+    ext = ext.lower()
+    if ext in JPEG_EXTS:
+        return ".jpg"
+    return ext
+
+
+def photo_stem_key(name: str) -> str:
+    return Path(name).stem.casefold()
+
+
+def infer_numbered_prefix(names: Sequence[str]) -> Optional[str]:
+    """Shared `{prefix}-001` stem among numbered files; None if mixed or none."""
+    found: List[str] = []
+    for name in names:
+        match = _NUMBERED_STEM.match(Path(name).stem)
+        if match:
+            found.append(match.group(1))
+    if not found:
+        return None
+    uniq = {item for item in found}
+    if len(uniq) != 1:
+        return None
+    return next(iter(uniq))
+
+
+def stem_occupied(
+    folder: Path, stem: str, *, ignore: Optional[Path] = None
+) -> bool:
+    """True when another image in *folder* already uses this stem (any suffix)."""
+    key = (stem or "").casefold()
+    if not key or not Path(folder).is_dir():
+        return False
+    ignore_res = None
+    if ignore is not None:
+        try:
+            if ignore.exists():
+                ignore_res = ignore.resolve()
+        except OSError:
+            ignore_res = None
+    for item in Path(folder).iterdir():
+        if not is_image_file(item):
+            continue
+        if ignore_res is not None:
+            try:
+                if item.resolve() == ignore_res:
+                    continue
+            except OSError:
+                pass
+        if item.stem.casefold() == key:
+            return True
+    return False
+
+
 def numbered_name(prefix: str, number: int, suffix: str) -> str:
-    ext = suffix if suffix.startswith(".") else f".{suffix}"
-    return f"{prefix}-{number:03d}{ext.lower()}"
+    ext = canonical_image_suffix(suffix)
+    return f"{prefix}-{number:03d}{ext}"
 
 
 def unique_dest_name(folder: Path, filename: str) -> Path:
-    """Pick folder/filename, or folder/stem_N.ext if that name is taken."""
+    """Pick folder/filename, or folder/stem_N.ext if that name or stem is taken."""
     dest_dir = Path(folder)
     name = Path(filename).name
     if not name or name in {".", ".."} or _BAD_NAME.search(name):
         raise PhotoError("文件名不合法")
     dest = dest_dir / name
-    if not dest.exists():
-        return dest
     stem = Path(name).stem
     suffix = Path(name).suffix
+    if not dest.exists() and not stem_occupied(dest_dir, stem):
+        return dest
     n = 1
     while True:
         candidate = dest_dir / f"{stem}_{n}{suffix}"
-        if not candidate.exists():
+        if not candidate.exists() and not stem_occupied(dest_dir, candidate.stem):
             return candidate
         n += 1
 
@@ -349,7 +407,7 @@ def copy_into_album(folder: Path, sources: Sequence[Path], prefix: str) -> List[
     for src in sources:
         src = Path(src)
         dest = dest_dir / numbered_name(prefix, seq, src.suffix)
-        while dest.exists():
+        while dest.exists() or stem_occupied(dest_dir, dest.stem):
             seq += 1
             dest = dest_dir / numbered_name(prefix, seq, src.suffix)
         shutil.copy2(src, dest)
@@ -371,27 +429,41 @@ def copy_into_album_keep_names(folder: Path, sources: Sequence[Path]) -> List[Pa
     return written
 
 
-def rename_photo(path: Path, new_name: str) -> Path:
-    """Rename one image in place. Keeps original suffix if new_name has none."""
-    src = Path(path)
-    if not src.is_file():
+def planned_photo_name(src_name: str, new_name: str) -> str:
+    """Validate a dest filename. JPEG suffixes become `.jpg`; missing suffix keeps src's."""
+    current = Path(src_name).name
+    if not current:
         raise PhotoError("找不到照片")
     text = (new_name or "").strip()
     if not text or text in {".", ".."} or _BAD_NAME.search(text) or "/" in text or "\\" in text:
         raise PhotoError("文件名不合法")
     candidate = Path(text).name
+    src_ext = canonical_image_suffix(Path(current).suffix)
     if not Path(candidate).suffix:
-        candidate = f"{candidate}{src.suffix.lower()}"
+        candidate = f"{candidate}{src_ext}"
     elif Path(candidate).suffix.lower() not in IMAGE_EXTS:
         raise PhotoError("只支持 jpg / jpeg / png")
     else:
         stem = Path(candidate).stem
-        ext = Path(candidate).suffix.lower()
+        ext = canonical_image_suffix(Path(candidate).suffix)
         candidate = f"{stem}{ext}"
+    return candidate
+
+
+def rename_photo(path: Path, new_name: str) -> Path:
+    """Rename one image in place. Identity is the stem; `.jpeg` becomes `.jpg`."""
+    src = Path(path)
+    if not src.is_file():
+        raise PhotoError("找不到照片")
+    candidate = planned_photo_name(src.name, new_name)
     dest = src.with_name(candidate)
-    if dest.resolve() == src.resolve():
+    try:
+        same = dest.resolve() == src.resolve()
+    except OSError:
+        same = dest == src
+    if same:
         return src
-    if dest.exists():
+    if dest.exists() or stem_occupied(src.parent, Path(candidate).stem, ignore=src):
         raise PhotoError(f"已存在同名文件：{candidate}")
     src.rename(dest)
     return dest
@@ -441,20 +513,51 @@ def photo_sort_key(path: Path) -> Tuple[float, str]:
     return (stamp, path.name.casefold())
 
 
+def _rename_path(src: Path, dest: Path) -> None:
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        src.rename(dest)
+    except OSError as exc:
+        raise PhotoError("无法重命名照片，请检查公盘是否可写") from exc
+
+
+def renumber_photos(folder: Path, prefix: str, photos: Sequence[Path]) -> List[Path]:
+    """Rename *photos* to prefix-001… in the given order (not EXIF). JPEG → `.jpg`."""
+    dest_dir = Path(folder)
+    if not dest_dir.is_dir():
+        raise PhotoError("找不到照片文件夹")
+    ordered = [Path(p) for p in photos if is_image_file(Path(p))]
+    temps: List[Path] = []
+    applied: List[Tuple[Path, Path]] = []
+    try:
+        for index, src in enumerate(ordered):
+            temp = dest_dir / (
+                f".__renaming_{uuid.uuid4().hex}_{index}"
+                f"{canonical_image_suffix(src.suffix)}"
+            )
+            _rename_path(src, temp)
+            applied.append((temp, src))
+            temps.append(temp)
+    except PhotoError:
+        for temp, orig in reversed(applied):
+            try:
+                if temp.exists() and not orig.exists():
+                    temp.rename(orig)
+            except OSError:
+                pass
+        raise
+    written: List[Path] = []
+    for index, temp in enumerate(temps, start=1):
+        dest = dest_dir / numbered_name(prefix, index, temp.suffix)
+        _rename_path(temp, dest)
+        written.append(dest)
+    return written
+
+
 def rename_all_in_album(folder: Path, prefix: str) -> List[Path]:
     dest_dir = Path(folder)
     if not dest_dir.is_dir():
         raise PhotoError("找不到照片文件夹")
     photos = [p for p in dest_dir.iterdir() if is_image_file(p)]
     photos.sort(key=photo_sort_key)
-    temps = []
-    for index, src in enumerate(photos):
-        temp = dest_dir / f".__renaming_{uuid.uuid4().hex}_{index}{src.suffix.lower()}"
-        src.rename(temp)
-        temps.append(temp)
-    written: List[Path] = []
-    for index, temp in enumerate(temps, start=1):
-        dest = dest_dir / numbered_name(prefix, index, temp.suffix)
-        temp.rename(dest)
-        written.append(dest)
-    return written
+    return renumber_photos(dest_dir, prefix, photos)

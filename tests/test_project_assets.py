@@ -15,6 +15,9 @@ from src.io.project_assets import (
     move_photo_to_spare,
     original_view_path,
     preview_path_for_photo,
+    rename_all_merged_in_album,
+    rename_merged_photo,
+    renumber_merged_photos,
     resolve_data_table_path,
     resolve_photo_path,
     restore_photo_from_spare,
@@ -22,6 +25,7 @@ from src.io.project_assets import (
 )
 from src.io.test_photos import (
     SPARE_ALBUM_NAME,
+    PhotoError,
     iter_export_photos,
     list_albums,
     test_dir_key as leg_test_dir_key,
@@ -40,6 +44,18 @@ def _album(root: Path, album: str = "试验前") -> Path:
 def _png(path: Path, color: str = "red") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (32, 32), color).save(path, "PNG")
+    return path
+
+
+def _jpeg(path: Path, color: str = "red", shot_at: str | None = None) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img = Image.new("RGB", (32, 32), color)
+    if shot_at:
+        exif = img.getexif()
+        exif[306] = shot_at
+        img.save(path, "JPEG", exif=exif)
+    else:
+        img.save(path, "JPEG")
     return path
 
 
@@ -241,3 +257,120 @@ def test_list_merged_attachment_refs_unions_local_and_remote(tmp_path: Path):
     assert names == {"cloud.xlsx", "local.xlsx", "both.xlsx"}
     cloud_ref = next(r for r in refs if Path(r.relative_path).name == "cloud.xlsx")
     assert resolve_data_table_path(local, remote, cloud_ref.relative_path) == cloud
+
+
+def test_rename_merged_photo_cloud_only_and_both_roots(tmp_path: Path):
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    cloud = _png(_album(remote) / "cloud.png", "blue")
+    cloud_rel = cloud.relative_to(remote).as_posix()
+    new_rel = rename_merged_photo(local, remote, cloud_rel, "外观")
+    assert Path(new_rel).name == "外观.png"
+    assert not (_album(remote) / "cloud.png").exists()
+    assert (_album(remote) / "外观.png").is_file()
+    assert not (_album(local) / "外观.png").exists()
+    merged = list_merged_photos(local, remote, LEG, TEST, "试验前")
+    assert len(merged) == 1
+    assert merged[0].is_cloud_only is True
+    assert Path(merged[0].relative_path).name == "外观.png"
+
+    both = _png(_album(local) / "both.png", "orange")
+    _png(_album(remote) / "both.png", "yellow")
+    both_rel = both.relative_to(local).as_posix()
+    renamed = rename_merged_photo(local, remote, both_rel, "样品")
+    assert Path(renamed).name == "样品.png"
+    assert (_album(local) / "样品.png").is_file()
+    assert (_album(remote) / "样品.png").is_file()
+    assert not (_album(local) / "both.png").exists()
+    assert not (_album(remote) / "both.png").exists()
+
+
+def test_rename_merged_photo_stem_conflict_across_roots(tmp_path: Path):
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    _png(_album(remote) / "试验前-001.png", "blue")
+    src = _jpeg(_album(local) / "cam.jpeg", "green")
+    rel = src.relative_to(local).as_posix()
+    try:
+        rename_merged_photo(local, remote, rel, "试验前-001")
+        raise AssertionError("expected stem conflict")
+    except PhotoError:
+        pass
+    new_rel = rename_merged_photo(local, remote, rel, "样品")
+    assert Path(new_rel).name == "样品.jpg"
+
+
+def test_rename_all_merged_includes_cloud_exif_order(tmp_path: Path):
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    _jpeg(_album(remote) / "cloud.jpeg", "blue", shot_at="2026:01:01 10:00:00")
+    _jpeg(_album(local) / "local.jpg", "red", shot_at="2026:02:01 10:00:00")
+    names = rename_all_merged_in_album(local, remote, LEG, TEST, "试验前", "试验前")
+    assert [Path(n).name for n in names] == ["试验前-001.jpg", "试验前-002.jpg"]
+    assert (_album(remote) / "试验前-001.jpg").is_file()
+    assert not (_album(local) / "试验前-001.jpg").exists()
+    assert (_album(local) / "试验前-002.jpg").is_file()
+    merged = list_merged_photos(local, remote, LEG, TEST, "试验前")
+    assert [Path(p.relative_path).name for p in merged] == [
+        "试验前-001.jpg",
+        "试验前-002.jpg",
+    ]
+    assert merged[0].is_cloud_only is True
+    assert merged[1].is_cloud_only is False
+
+
+def test_renumber_merged_uses_given_order_not_exif(tmp_path: Path):
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    later = _jpeg(_album(local) / "later.jpg", "red", shot_at="2026:02:01 10:00:00")
+    earlier = _jpeg(
+        _album(remote) / "earlier.jpg", "green", shot_at="2026:01:01 10:00:00"
+    )
+    later_rel = later.relative_to(local).as_posix()
+    earlier_rel = earlier.relative_to(remote).as_posix()
+    names = renumber_merged_photos(
+        local,
+        remote,
+        LEG,
+        TEST,
+        "试验前",
+        [later_rel, earlier_rel],
+        "试验前",
+    )
+    assert [Path(n).name for n in names] == ["试验前-001.jpg", "试验前-002.jpg"]
+    merged = list_merged_photos(local, remote, LEG, TEST, "试验前")
+    assert merged[0].is_cloud_only is False
+    assert merged[1].is_cloud_only is True
+    with Image.open(_album(local) / "试验前-001.jpg") as img:
+        assert img.getpixel((0, 0))[0] >= 200
+
+
+def test_renumber_drops_stale_thumbs_for_reused_names(tmp_path: Path):
+    local = tmp_path / "local"
+    first = _png(_album(local) / "试验前-001.png", "red")
+    second = _png(_album(local) / "试验前-002.png", "blue")
+    first_rel = first.relative_to(local).as_posix()
+    second_rel = second.relative_to(local).as_posix()
+    thumb_a = thumbnail_for_photo(local, first_rel, first, size=48)
+    thumb_b = thumbnail_for_photo(local, second_rel, second, size=48)
+    with Image.open(thumb_a) as img:
+        assert img.getpixel((0, 0))[0] >= 200
+    with Image.open(thumb_b) as img:
+        assert img.getpixel((0, 0))[2] >= 200
+
+    renumber_merged_photos(
+        local, None, LEG, TEST, "试验前", [second_rel, first_rel], "试验前"
+    )
+    one = _album(local) / "试验前-001.png"
+    two = _album(local) / "试验前-002.png"
+    with Image.open(one) as img:
+        assert img.getpixel((0, 0))[2] >= 200
+    with Image.open(two) as img:
+        assert img.getpixel((0, 0))[0] >= 200
+    new_a = thumbnail_for_photo(local, first_rel, one, size=48)
+    new_b = thumbnail_for_photo(local, second_rel, two, size=48)
+    with Image.open(new_a) as img:
+        assert img.getpixel((0, 0))[2] >= 200
+    with Image.open(new_b) as img:
+        assert img.getpixel((0, 0))[0] >= 200
+
