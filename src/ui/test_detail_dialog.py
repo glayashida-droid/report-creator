@@ -34,11 +34,13 @@ from src.io.data_tables import (
     create_blank_workbook,
     delete_attachment,
     find_decimal_inconsistencies,
-    find_out_of_range,
+    find_limit_row_index,
+    find_out_of_range_by_limits,
+    has_limit_row,
     import_sample_ids,
     list_data_table_templates,
     open_attachment,
-    parse_numeric_display,
+    prepare_display_snapshot,
     read_preview_snapshot,
     upload_existing_xlsx,
 )
@@ -508,9 +510,13 @@ class TestDetailDialog(QDialog):
             DataTableRef(title=r.title, relative_path=r.relative_path)
             for r in (node_data.data_tables or [])
         ]
+        # Each detail open: report checkbox / export flag resets to off (不落盘).
+        for r in node_data.data_tables or []:
+            r.include_limit_row_in_report = False
         self._data_table_drawers = []
         self._data_table_preview_cache = {}
         self._data_table_preview_tables = {}
+        self._data_table_limit_export_checks: dict[str, QCheckBox] = {}
 
         self.proj_start_date = None
         self.proj_end_date = None
@@ -2308,7 +2314,13 @@ class TestDetailDialog(QDialog):
         test = self.node_data.test_name
         if (root is None and remote is None) or not leg or not is_usable_test_name(test):
             return False
+        prev_flags = {
+            r.relative_path: bool(getattr(r, "include_limit_row_in_report", False))
+            for r in self._data_tables
+        }
         self._data_tables = list_merged_attachment_refs(root, remote, leg, test)
+        for r in self._data_tables:
+            r.include_limit_row_in_report = prev_flags.get(r.relative_path, False)
         return True
 
     def _sync_data_table_button(self):
@@ -2330,6 +2342,7 @@ class TestDetailDialog(QDialog):
                 widget.deleteLater()
         self._data_table_drawers = []
         self._data_table_preview_tables = {}
+        self._data_table_limit_export_checks = {}
 
     def _load_preview_for_ref(self, ref: DataTableRef, force: bool = False) -> PreviewSnapshot:
         key = ref.relative_path
@@ -2348,24 +2361,28 @@ class TestDetailDialog(QDialog):
         return snap
 
     def _fill_preview_table(self, table: QTableWidget, snap: PreviewSnapshot):
+        display = prepare_display_snapshot(snap, include_limit_row=True)
         table.clearSpans()
         table.clear()
-        rows = snap.values or []
+        rows = display.values or []
         cols = max((len(r) for r in rows), default=0)
         table.setRowCount(len(rows))
         table.setColumnCount(cols)
         table.setHorizontalHeaderLabels([str(i + 1) for i in range(cols)])
         table.verticalHeader().setVisible(True)
         table._preview_snap = snap
+        table._display_snap = display
         for r, row in enumerate(rows):
             for c in range(cols):
                 text = row[c] if c < len(row) else ""
                 item = QTableWidgetItem(text)
                 item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                if has_limit_row(snap) and find_limit_row_index(snap) == r and c > 0:
+                    item.setTextAlignment(Qt.AlignCenter)
                 table.setItem(r, c, item)
-        origin_r = snap.origin_row or 1
-        origin_c = snap.origin_col or 1
-        for merge in snap.merges or []:
+        origin_r = display.origin_row or 1
+        origin_c = display.origin_col or 1
+        for merge in display.merges or []:
             try:
                 min_c, min_r, max_c, max_r = range_boundaries(merge)
             except Exception:
@@ -2390,7 +2407,7 @@ class TestDetailDialog(QDialog):
             if table.columnWidth(c) < 80:
                 table.setColumnWidth(c, 80)
         self._apply_preview_validation_colors(table, snap)
-        self._install_data_table_col_validate_buttons(table)
+        self._sync_data_table_validate_enabled(table)
 
     def _apply_preview_validation_colors(
         self,
@@ -2421,94 +2438,31 @@ class TestDetailDialog(QDialog):
             item.setForeground(red)
             item.setToolTip("；".join(reasons))
 
-    def _install_data_table_col_validate_buttons(self, table: QTableWidget):
-        old = getattr(table, "_col_validate_buttons", None) or []
-        for _c, btn in old:
-            btn.setParent(None)
-            btn.deleteLater()
-        header = table.horizontalHeader()
-        buttons = []
-        # Skip sample column (index 0); only data columns get 校验.
-        for c in range(1, table.columnCount()):
-            btn = QPushButton("校验", header.viewport())
-            btn.setObjectName("dataTableColValidate")
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setFocusPolicy(Qt.NoFocus)
-            btn.setToolTip(f"校验第 {c + 1} 列数据上下限")
-            btn.clicked.connect(
-                lambda _=False, col=c, t=table: self._validate_data_table_range(
-                    t, col=col
-                )
-            )
-            buttons.append((c, btn))
-        table._col_validate_buttons = buttons
+    def _sync_data_table_validate_enabled(self, table: QTableWidget):
+        btn = getattr(table, "_validate_btn", None)
+        snap = getattr(table, "_preview_snap", None)
+        enabled = bool(snap is not None and has_limit_row(snap))
+        if btn is not None:
+            btn.setEnabled(enabled)
+            if enabled:
+                btn.setToolTip("按表内限值行校验数据列是否超限")
+            else:
+                btn.setToolTip("当前表无限值行，无法数据校验")
+        chk = getattr(table, "_limit_export_chk", None)
+        if chk is not None:
+            chk.setVisible(enabled)
+            if not enabled:
+                chk.setChecked(False)
 
-        def sync(*_args, t=table):
-            self._sync_data_table_col_validate_buttons(t)
-
-        header.sectionResized.connect(sync)
-        header.geometriesChanged.connect(sync)
-        table.horizontalScrollBar().valueChanged.connect(sync)
-        QTimer.singleShot(0, sync)
-
-    def _sync_data_table_col_validate_buttons(self, table: QTableWidget):
-        header = table.horizontalHeader()
-        buttons = getattr(table, "_col_validate_buttons", None) or []
-        for c, btn in buttons:
-            if c >= table.columnCount():
-                btn.hide()
-                continue
-            x = header.sectionViewportPosition(c)
-            w = header.sectionSize(c)
-            h = header.height()
-            bw = 36
-            bh = 18
-            # Sit just after the column number; clamp so the border stays inside the section.
-            bx = x + 18
-            if bx + bw > x + w - 2:
-                bx = max(x + 2, x + w - bw - 2)
-            btn.setGeometry(bx, max((h - bh) // 2, 2), bw, bh)
-            btn.setVisible(w >= 48)
-            btn.raise_()
-
-    def _prompt_data_range_limits(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("数据范围校验")
-        layout = QVBoxLayout(dlg)
-        layout.addWidget(QLabel("请输入数据的有效范围（上下限）："))
-        row = QHBoxLayout()
-        lo_edit = QLineEdit()
-        lo_edit.setPlaceholderText("下限")
-        hi_edit = QLineEdit()
-        hi_edit.setPlaceholderText("上限")
-        row.addWidget(QLabel("下限"))
-        row.addWidget(lo_edit)
-        row.addWidget(QLabel("上限"))
-        row.addWidget(hi_edit)
-        layout.addLayout(row)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(dlg.accept)
-        buttons.rejected.connect(dlg.reject)
-        layout.addWidget(buttons)
-        if dlg.exec() != QDialog.Accepted:
-            return None
-        lo = parse_numeric_display(lo_edit.text())
-        hi = parse_numeric_display(hi_edit.text())
-        if lo is None or hi is None:
-            QMessageBox.warning(self, "提示", "请输入有效的数字上下限")
-            return None
-        return lo, hi
-
-    def _validate_data_table_range(self, table: QTableWidget, *, col=None):
-        limits = self._prompt_data_range_limits()
-        if limits is None:
-            return
-        lo, hi = limits
+    def _validate_data_table_range(self, table: QTableWidget):
         snap = getattr(table, "_preview_snap", None)
         if snap is None:
             QMessageBox.warning(self, "提示", "暂无预览数据")
             return
-        flagged = find_out_of_range(snap, lo, hi, col=col)
+        if not has_limit_row(snap):
+            QMessageBox.warning(self, "提示", "当前表无限值行，无法数据校验")
+            return
+        flagged = find_out_of_range_by_limits(snap)
         self._apply_preview_validation_colors(table, snap, range_cells=flagged)
         if not flagged:
             SaveSuccessDialog(self, seconds=3, message="✌️ 数据校验通过").exec()
@@ -2562,10 +2516,14 @@ class TestDetailDialog(QDialog):
                 lambda _=False, r=ref: self._refresh_data_table_preview(r)
             )
             bar.addWidget(btn_refresh)
-            btn_validate = QPushButton("整表数据校验")
+            btn_validate = QPushButton("数据校验")
             btn_validate.setObjectName("accentButton")
-            btn_validate.setToolTip("输入上下限，校验本表全部数据列是否超限")
+            btn_validate.setToolTip("按表内限值行校验数据列是否超限")
             bar.addWidget(btn_validate)
+            chk_limit_export = QCheckBox("报告中显示限值行")
+            chk_limit_export.setChecked(False)
+            chk_limit_export.setToolTip("勾选后本次导出 Word 时包含限值行（默认不包含，不落盘）")
+            bar.addWidget(chk_limit_export)
             btn_delete = QPushButton("删除")
             btn_delete.setToolTip("从列表移除并删除本地附件文件")
             btn_delete.clicked.connect(
@@ -2577,6 +2535,8 @@ class TestDetailDialog(QDialog):
             preview = ContainedTableWidget(0, 0)
             preview.setObjectName("dataTablePreview")
             preview._data_table_rel = ref.relative_path
+            preview._validate_btn = btn_validate
+            preview._limit_export_chk = chk_limit_export
             preview.setEditTriggers(QAbstractItemView.NoEditTriggers)
             preview.setSelectionMode(QAbstractItemView.NoSelection)
             preview.setFocusPolicy(Qt.NoFocus)
@@ -2586,8 +2546,16 @@ class TestDetailDialog(QDialog):
             snap = self._load_preview_for_ref(ref, force=False)
             self._fill_preview_table(preview, snap)
             btn_validate.clicked.connect(
-                lambda _=False, t=preview: self._validate_data_table_range(t, col=None)
+                lambda _=False, t=preview: self._validate_data_table_range(t)
             )
+
+            def _on_limit_export_toggled(checked: bool, path=ref.relative_path):
+                for r in self._data_tables:
+                    if r.relative_path == path:
+                        r.include_limit_row_in_report = bool(checked)
+
+            chk_limit_export.toggled.connect(_on_limit_export_toggled)
+            self._data_table_limit_export_checks[ref.relative_path] = chk_limit_export
             drawer.body_layout.addWidget(preview)
             drawer.header.clicked.connect(
                 lambda _=False, d=drawer, bank=self._data_table_drawers: self._accordion(d, bank)

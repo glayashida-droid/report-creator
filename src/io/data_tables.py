@@ -27,6 +27,7 @@ from src.io.test_photos import (
 from src.models.project_state import DataTableRef, TestNode
 
 ATTACHMENT_DIR = "数据表附件"
+LIMIT_ROW_LABEL = "限值"
 _BAD_NAME = re.compile(r'[\\/:*?"<>|]')
 
 # macOS .app bundle names / Windows executable stems, preferred order
@@ -227,8 +228,23 @@ def _sample_id_col_merge_bottom(ws) -> dict[int, int]:
     return out
 
 
+def _limit_row_sheet_index(ws) -> int | None:
+    """1-based sheet row whose column A equals「限值」."""
+    bbox = _used_bbox(ws)
+    if bbox is None:
+        return None
+    min_r, _min_c, max_r, _max_c = bbox
+    for r in range(min_r, max_r + 1):
+        if str(ws.cell(row=r, column=1).value or "").strip() == LIMIT_ROW_LABEL:
+            return r
+    return None
+
+
 def _sample_id_start_row(ws) -> int:
-    """First row below existing sheet content; empty sheet starts at row 2."""
+    """First row for sample ids: below limit row if present, else below content/header."""
+    limit_r = _limit_row_sheet_index(ws)
+    if limit_r is not None:
+        return limit_r + 1
     bbox = _used_bbox(ws)
     if bbox is None:
         return 2
@@ -267,6 +283,10 @@ def _should_insert_sample_id_column(ws, start_row: int) -> bool:
     header_end_row = max(1, start_row - 1)
     if _col1_has_sample_id_header(ws, header_end_row):
         return False
+    limit_r = _limit_row_sheet_index(ws)
+    if limit_r is not None and limit_r < start_row:
+        # Col A already has 限值 (and possibly empty header cells) — do not insert.
+        return False
     return _col1_has_content(ws)
 
 
@@ -283,8 +303,15 @@ def import_sample_ids(path: Path, sample_ids: Sequence[str]) -> None:
         if _should_insert_sample_id_column(ws, start_row):
             ws.insert_cols(1)
             start_row = _sample_id_start_row(ws)
-        header_end_row = max(1, start_row - 1)
+        limit_r = _limit_row_sheet_index(ws)
+        if limit_r is not None:
+            header_end_row = max(1, limit_r - 1)
+        else:
+            header_end_row = max(1, start_row - 1)
         _write_sample_id_column_header(ws, header_end_row)
+        # Keep 限值 label if present.
+        if limit_r is not None:
+            ws.cell(row=limit_r, column=1, value=LIMIT_ROW_LABEL)
         for i, sid in enumerate(ids):
             ws.cell(row=start_row + i, column=1, value=sid)
         wb.save(xlsx)
@@ -519,12 +546,255 @@ def parse_numeric_display(text: str) -> float | None:
         return None
 
 
+# One-sided limit prefixes, longest first.
+_LIMIT_ONE_SIDED = (
+    ("大于等于", "ge"),
+    ("小于等于", "le"),
+    ("大于", "gt"),
+    ("小于", "lt"),
+    (">=", "ge"),
+    ("<=", "le"),
+    ("≥", "ge"),
+    ("≤", "le"),
+    (">", "gt"),
+    ("<", "lt"),
+)
+
+
+@dataclass(frozen=True)
+class LimitRule:
+    """Numeric bound for one column (or whole table). Missing side = unbounded."""
+
+    lo: float | None = None
+    hi: float | None = None
+    lo_exclusive: bool = False
+    hi_exclusive: bool = False
+
+
+def find_limit_row_index(snap: PreviewSnapshot, *, sample_col: int = 0) -> int | None:
+    """0-based grid row whose sample column text equals「限值」."""
+    values = snap.values or []
+    for r, row in enumerate(values):
+        text = (row[sample_col] if sample_col < len(row) else "").strip()
+        if text == LIMIT_ROW_LABEL:
+            return r
+    return None
+
+
+def has_limit_row(snap: PreviewSnapshot, *, sample_col: int = 0) -> bool:
+    return find_limit_row_index(snap, sample_col=sample_col) is not None
+
+
+def parse_limit_expression(text: str) -> LimitRule | None:
+    """Parse a limit cell; None if empty or not a supported expression."""
+    s = (text or "").strip()
+    if not s:
+        return None
+    if "～" in s:
+        left, _, right = s.partition("～")
+        lo = parse_numeric_display(left.strip())
+        hi = parse_numeric_display(right.strip())
+        if lo is None or hi is None:
+            return None
+        if lo > hi:
+            lo, hi = hi, lo
+        return LimitRule(lo=lo, hi=hi)
+    for prefix, kind in _LIMIT_ONE_SIDED:
+        if s.startswith(prefix):
+            num = parse_numeric_display(s[len(prefix) :].strip())
+            if num is None:
+                return None
+            if kind == "gt":
+                return LimitRule(lo=num, lo_exclusive=True)
+            if kind == "lt":
+                return LimitRule(hi=num, hi_exclusive=True)
+            if kind == "ge":
+                return LimitRule(lo=num)
+            if kind == "le":
+                return LimitRule(hi=num)
+    return None
+
+
+def value_violates_limit(val: float, rule: LimitRule) -> bool:
+    if rule.lo is not None:
+        if rule.lo_exclusive:
+            if not (val > rule.lo):
+                return True
+        elif val < rule.lo:
+            return True
+    if rule.hi is not None:
+        if rule.hi_exclusive:
+            if not (val < rule.hi):
+                return True
+        elif val > rule.hi:
+            return True
+    return False
+
+
+def _column_limit_rules(
+    snap: PreviewSnapshot, *, sample_col: int = 0
+) -> dict[int, LimitRule] | None:
+    """Map data-column index → rule. None if no limit row; {} if row but no exprs."""
+    limit_r = find_limit_row_index(snap, sample_col=sample_col)
+    if limit_r is None:
+        return None
+    values = snap.values or []
+    row = values[limit_r] if limit_r < len(values) else []
+    ncols = max((len(r) for r in values), default=0)
+    parsed: list[tuple[int, LimitRule]] = []
+    for c in range(ncols):
+        if c == sample_col:
+            continue
+        text = row[c] if c < len(row) else ""
+        rule = parse_limit_expression(text)
+        if rule is not None:
+            parsed.append((c, rule))
+    if len(parsed) == 1:
+        _, rule = parsed[0]
+        return {c: rule for c in range(ncols) if c != sample_col}
+    return {c: rule for c, rule in parsed}
+
+
+def find_out_of_range_by_limits(
+    snap: PreviewSnapshot, *, sample_col: int = 0
+) -> List[Tuple[int, int]]:
+    """Cells outside limit-row rules. Empty if no limit row or no parseable exprs."""
+    rules = _column_limit_rules(snap, sample_col=sample_col)
+    if not rules:
+        return []
+    values = snap.values or []
+    header_rows, nrows, ncols = _data_region(snap)
+    limit_r = find_limit_row_index(snap, sample_col=sample_col)
+    data_start = header_rows
+    if limit_r is not None:
+        data_start = max(data_start, limit_r + 1)
+    flagged: List[Tuple[int, int]] = []
+    for c, rule in rules.items():
+        if c < 0 or c >= ncols or c == sample_col:
+            continue
+        for r in range(data_start, nrows):
+            if limit_r is not None and r == limit_r:
+                continue
+            row = values[r] if r < len(values) else []
+            text = row[c] if c < len(row) else ""
+            val = parse_numeric_display(text)
+            if val is None:
+                continue
+            if value_violates_limit(val, rule):
+                flagged.append((r, c))
+    return flagged
+
+
+def _sheet_a1_range(
+    r0: int, c0: int, r1: int, c1: int, *, origin_row: int, origin_col: int
+) -> str:
+    from openpyxl.utils import get_column_letter
+
+    min_r = origin_row + r0
+    min_c = origin_col + c0
+    max_r = origin_row + r1
+    max_c = origin_col + c1
+    return (
+        f"{get_column_letter(min_c)}{min_r}:{get_column_letter(max_c)}{max_r}"
+    )
+
+
+def prepare_display_snapshot(
+    snap: PreviewSnapshot, *, include_limit_row: bool = True, sample_col: int = 0
+) -> PreviewSnapshot:
+    """Copy snap for UI/Word: optionally drop limit row; single-expr limit spans data cols.
+
+    Does not mutate the source snapshot or the xlsx on disk.
+    """
+    values = [list(row) for row in (snap.values or [])]
+    merges = list(snap.merges or [])
+    origin_r = snap.origin_row or 1
+    origin_c = snap.origin_col or 1
+    limit_r = find_limit_row_index(
+        PreviewSnapshot(
+            sheet_name=snap.sheet_name,
+            values=values,
+            merges=merges,
+            origin_row=origin_r,
+            origin_col=origin_c,
+        ),
+        sample_col=sample_col,
+    )
+
+    if limit_r is not None:
+        row = values[limit_r]
+        ncols = max((len(r) for r in values), default=0)
+        while len(row) < ncols:
+            row.append("")
+        parsed_cols = [
+            c
+            for c in range(ncols)
+            if c != sample_col and parse_limit_expression(row[c] if c < len(row) else "")
+        ]
+        if len(parsed_cols) == 1:
+            src = parsed_cols[0]
+            expr = row[src]
+            first_data = sample_col + 1
+            if first_data < ncols:
+                for c in range(ncols):
+                    if c == sample_col:
+                        continue
+                    row[c] = expr if c == first_data else ""
+                span = _sheet_a1_range(
+                    limit_r,
+                    first_data,
+                    limit_r,
+                    ncols - 1,
+                    origin_row=origin_r,
+                    origin_col=origin_c,
+                )
+                merges = [m for m in merges if m != span] + [span]
+
+        if not include_limit_row:
+            values = values[:limit_r] + values[limit_r + 1 :]
+            new_merges: List[str] = []
+            for merge in merges:
+                try:
+                    min_c, min_r, max_c, max_r = range_boundaries(merge)
+                except Exception:
+                    continue
+                r0 = min_r - origin_r
+                r1 = max_r - origin_r
+                if r0 <= limit_r <= r1:
+                    continue
+                if r0 > limit_r:
+                    r0 -= 1
+                    r1 -= 1
+                    min_r = origin_r + r0
+                    max_r = origin_r + r1
+                    from openpyxl.utils import get_column_letter
+
+                    merge = (
+                        f"{get_column_letter(min_c)}{min_r}:"
+                        f"{get_column_letter(max_c)}{max_r}"
+                    )
+                new_merges.append(merge)
+            merges = new_merges
+
+    return PreviewSnapshot(
+        sheet_name=snap.sheet_name,
+        values=values,
+        merges=merges,
+        origin_row=origin_r,
+        origin_col=origin_c,
+    )
+
+
 def _data_region(snap: PreviewSnapshot) -> tuple[int, int, int]:
     """Return (header_rows, nrows, ncols) for the preview grid."""
     values = snap.values or []
     nrows = len(values)
     ncols = max((len(r) for r in values), default=0)
     header_rows = infer_header_row_count(snap) if values else 0
+    limit_r = find_limit_row_index(snap)
+    if limit_r is not None and limit_r < header_rows:
+        # Limit row must not count as repeating Word header.
+        header_rows = limit_r
     return header_rows, nrows, ncols
 
 

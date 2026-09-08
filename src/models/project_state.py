@@ -18,6 +18,8 @@ class DataTableRef(BaseModel):
 
     title: str
     relative_path: str
+    # Session-only: whether Word export includes the 限值 row. Never written to JSON.
+    include_limit_row_in_report: bool = Field(default=False, exclude=True)
 
 
 class CustomOverviewField(BaseModel):

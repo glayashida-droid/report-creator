@@ -19,6 +19,7 @@ from openpyxl.utils.cell import range_boundaries
 
 from src.io.data_tables import (
     infer_header_row_count,
+    prepare_display_snapshot,
     read_preview_snapshot,
 )
 from src.io.project_assets import (
@@ -1465,6 +1466,16 @@ class WordGenerator:
                 continue
             if not snap.values:
                 continue
+            include_limit = False
+            for node_ref in getattr(node, "data_tables", None) or []:
+                if node_ref.relative_path == ref.relative_path:
+                    include_limit = bool(
+                        getattr(node_ref, "include_limit_row_in_report", False)
+                    )
+                    break
+            snap = prepare_display_snapshot(snap, include_limit_row=include_limit)
+            if not snap.values:
+                continue
             title = Path(ref.title or path.stem).stem.strip()
             if title:
                 self._add_para_before(
@@ -1483,7 +1494,8 @@ class WordGenerator:
                     if (r_i, c_i) in slaves:
                         continue
                     val = row[c_i] if c_i < len(row) else ""
-                    self._set_cell_text(table.rows[r_i].cells[c_i], val)
+                    cell = table.rows[r_i].cells[c_i]
+                    self._set_cell_text(cell, val)
             n_header = infer_header_row_count(snap)
             for i in range(min(n_header, rows)):
                 self._set_row_as_tbl_header(table.rows[i])

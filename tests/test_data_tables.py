@@ -12,18 +12,24 @@ from src.io.data_tables import (
     decimal_places,
     delete_attachment,
     find_decimal_inconsistencies,
+    find_limit_row_index,
     find_out_of_range,
+    find_out_of_range_by_limits,
+    has_limit_row,
     import_sample_ids,
     infer_header_row_count,
     list_attachment_refs,
     list_data_table_templates,
     open_attachment,
+    parse_limit_expression,
     parse_numeric_display,
+    prepare_display_snapshot,
     read_preview_snapshot,
     resolve_open_argv,
     retarget_node_data_tables,
     rewrite_test_dir_in_relative_path,
     upload_existing_xlsx,
+    value_violates_limit,
 )
 from src.io.test_photos import test_dir_key as leg_test_dir_key
 from src.models.project_state import DataTableRef, ProjectState, TestLeg, TestNode
@@ -589,6 +595,163 @@ def test_find_out_of_range_whole_table_and_column():
     assert find_out_of_range(snap, 0.0, 3.0, col=0) == []
 
 
+def test_find_limit_row_index_and_has_limit_row():
+    snap = PreviewSnapshot(
+        sheet_name="S",
+        values=[
+            ["样品编号", "桥路"],
+            ["限值", "0～3"],
+            ["A01", "1.0"],
+        ],
+        merges=[],
+    )
+    assert find_limit_row_index(snap) == 1
+    assert has_limit_row(snap) is True
+    empty = PreviewSnapshot(sheet_name="S", values=[["样品编号", "桥路"], ["A01", "1"]], merges=[])
+    assert find_limit_row_index(empty) is None
+    assert has_limit_row(empty) is False
+
+
+def test_parse_limit_expression_range_and_one_sided():
+    rule = parse_limit_expression("0～3")
+    assert rule is not None
+    assert value_violates_limit(0.0, rule) is False
+    assert value_violates_limit(3.0, rule) is False
+    assert value_violates_limit(-0.1, rule) is True
+    assert value_violates_limit(3.1, rule) is True
+
+    neg = parse_limit_expression("-5～0")
+    assert neg is not None
+    assert value_violates_limit(-5.0, neg) is False
+    assert value_violates_limit(-6.0, neg) is True
+
+    assert value_violates_limit(5.0, parse_limit_expression("大于5")) is True
+    assert value_violates_limit(5.1, parse_limit_expression(">5")) is False
+    assert value_violates_limit(5.0, parse_limit_expression("小于5")) is True
+    assert value_violates_limit(4.9, parse_limit_expression("<5")) is False
+    assert value_violates_limit(5.0, parse_limit_expression("大于等于5")) is False
+    assert value_violates_limit(4.9, parse_limit_expression("≥5")) is True
+    assert value_violates_limit(5.0, parse_limit_expression("小于等于5")) is False
+    assert value_violates_limit(5.1, parse_limit_expression("<=5")) is True
+
+    assert parse_limit_expression("") is None
+    assert parse_limit_expression("abc") is None
+    assert parse_limit_expression("0-3") is None
+
+
+def test_find_out_of_range_by_limits_per_column_and_skips():
+    snap = PreviewSnapshot(
+        sheet_name="S",
+        values=[
+            ["样品编号", "桥路", "短路", "备注"],
+            ["限值", "0～3", "0～100", ""],
+            ["A01", "1.2", "9.0", "ok"],
+            ["A02", "5.0", "2.5", "x"],
+            ["A03", "2.0", "1.0", ""],
+        ],
+        merges=[],
+    )
+    # Two exprs → per-column; 备注 empty → skip; only 桥路 5.0 out
+    flagged = find_out_of_range_by_limits(snap)
+    assert set(flagged) == {(3, 1)}
+    assert (1, 1) not in flagged  # limit row itself
+    assert (2, 2) not in flagged  # 9.0 within 0～100
+
+
+def test_find_out_of_range_by_limits_single_cell_applies_whole_table():
+    snap = PreviewSnapshot(
+        sheet_name="S",
+        values=[
+            ["样品编号", "桥路", "短路"],
+            ["限值", "", "0～3"],
+            ["A01", "1.2", "9.0"],
+            ["A02", "5.0", "2.5"],
+        ],
+        merges=[],
+    )
+    assert set(find_out_of_range_by_limits(snap)) == {(2, 2), (3, 1)}
+
+
+def test_find_out_of_range_by_limits_no_limit_row_returns_empty():
+    snap = PreviewSnapshot(
+        sheet_name="S",
+        values=[["样品编号", "值"], ["A01", "9"]],
+        merges=[],
+    )
+    assert find_out_of_range_by_limits(snap) == []
+
+
+def test_find_out_of_range_by_limits_limit_row_but_no_exprs_passes():
+    snap = PreviewSnapshot(
+        sheet_name="S",
+        values=[["样品编号", "值"], ["限值", ""], ["A01", "9"]],
+        merges=[],
+    )
+    assert has_limit_row(snap)
+    assert find_out_of_range_by_limits(snap) == []
+
+
+def test_import_sample_ids_preserves_limit_row():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "with_limit.xlsx"
+        wb = Workbook()
+        ws = wb.active
+        ws["B1"] = "-40°C"
+        ws["B2"] = "9V"
+        ws["A3"] = "限值"
+        ws["B3"] = "0～10"
+        wb.save(path)
+        wb.close()
+        import_sample_ids(path, ["A01", "A02"])
+        wb = load_workbook(path)
+        ws = wb.active
+        assert "样品编号" in str(ws["A1"].value or "")
+        assert ws["A3"].value == "限值"
+        assert ws["B3"].value == "0～10"
+        assert ws["A4"].value == "A01"
+        assert ws["A5"].value == "A02"
+        wb.close()
+
+
+def test_prepare_display_snapshot_drops_limit_row_when_excluded():
+    snap = PreviewSnapshot(
+        sheet_name="S",
+        values=[
+            ["样品编号", "桥路"],
+            ["限值", "0～3"],
+            ["A01", "1.0"],
+        ],
+        merges=[],
+        origin_row=1,
+        origin_col=1,
+    )
+    out = prepare_display_snapshot(snap, include_limit_row=False)
+    assert len(out.values) == 2
+    assert out.values[0][0] == "样品编号"
+    assert out.values[1][0] == "A01"
+    assert "限值" not in {r[0] for r in out.values}
+
+
+def test_prepare_display_snapshot_single_limit_spans_data_cols():
+    snap = PreviewSnapshot(
+        sheet_name="S",
+        values=[
+            ["样品编号", "桥路", "短路"],
+            ["限值", "", "0～3"],
+            ["A01", "1.0", "2.0"],
+        ],
+        merges=[],
+        origin_row=1,
+        origin_col=1,
+    )
+    out = prepare_display_snapshot(snap, include_limit_row=True)
+    assert out.values[1][0] == "限值"
+    assert out.values[1][1] == "0～3"
+    assert out.values[1][2] == ""
+    # B2:C2 in sheet coords (origin 1,1) → grid row1 cols 1-2
+    assert any("B2:C2" == m or m.startswith("B2:") for m in out.merges)
+
+
 if __name__ == "__main__":
     test_create_blank_workbook_writes_xlsx_and_returns_ref()
     test_create_blank_rejects_unusable_test_name()
@@ -606,6 +769,13 @@ if __name__ == "__main__":
     test_import_sample_ids_inserts_col_when_col1_has_content()
     test_import_sample_ids_starts_below_multi_row_header()
     test_import_sample_ids_missing_file_raises()
+    test_find_limit_row_index_and_has_limit_row()
+    test_parse_limit_expression_range_and_one_sided()
+    test_find_out_of_range_by_limits_per_column_and_skips()
+    test_find_out_of_range_by_limits_single_cell_applies_whole_table()
+    test_import_sample_ids_preserves_limit_row()
+    test_prepare_display_snapshot_drops_limit_row_when_excluded()
+    test_prepare_display_snapshot_single_limit_spans_data_cols()
     test_resolve_open_argv_prefers_excel_then_wps_then_default()
     test_open_attachment_uses_injected_runner_and_raises_on_failure()
     test_list_templates_empty_or_missing_is_safe()
