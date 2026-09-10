@@ -489,6 +489,137 @@ def test_photos_panel_shows_spare_album_last(tmp_path):
     assert thumbs.dragEnabled() is False
 
 
+def test_open_spare_folder_prefers_remote(tmp_path):
+    import sys
+    from unittest.mock import patch
+
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from src.io.project_assets import spare_dir
+    from src.models.project_state import ProjectState, TestLeg, TestNode
+    from src.ui.test_photos_panel import TestPhotosPanel
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    local.mkdir()
+    remote.mkdir()
+    state = ProjectState(
+        project_id="P1",
+        source_path=str(remote),
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[TestNode(test_name="高温试验")],
+            )
+        ],
+    )
+    panel = TestPhotosPanel(
+        local,
+        "Leg 1",
+        "高温试验",
+        "P1",
+        project_state=state,
+        node_data=state.legs[0].nodes[0],
+    )
+    with patch("src.ui.test_photos_panel.open_folder_in_file_manager") as mock_open:
+        with patch.object(QMessageBox, "information") as mock_info:
+            panel._open_spare_folder()
+    mock_open.assert_called_once_with(spare_dir(remote, "Leg 1", "高温试验"))
+    mock_info.assert_not_called()
+
+
+def test_open_spare_folder_falls_back_to_local_with_prompt(tmp_path):
+    import sys
+    from unittest.mock import patch
+
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from src.io.project_assets import spare_dir
+    from src.models.project_state import ProjectState, TestLeg, TestNode
+    from src.ui.test_photos_panel import TestPhotosPanel
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    local = tmp_path / "local"
+    local.mkdir()
+    offline = tmp_path / "offline-remote"
+    state = ProjectState(
+        project_id="P1",
+        source_path=str(offline),
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[TestNode(test_name="高温试验")],
+            )
+        ],
+    )
+    panel = TestPhotosPanel(
+        local,
+        "Leg 1",
+        "高温试验",
+        "P1",
+        project_state=state,
+        node_data=state.legs[0].nodes[0],
+    )
+    with patch("src.ui.test_photos_panel.open_folder_in_file_manager") as mock_open:
+        with patch.object(QMessageBox, "information") as mock_info:
+            panel._open_spare_folder()
+    mock_info.assert_called_once()
+    assert "公盘不可达" in mock_info.call_args.args[2]
+    mock_open.assert_called_once_with(spare_dir(local, "Leg 1", "高温试验"))
+
+
+def test_photo_thumb_delete_hover_uses_arrow_cursor(tmp_path):
+    import sys
+
+    from PySide6.QtCore import QPoint, QRect, Qt
+    from PySide6.QtWidgets import QApplication
+
+    from src.io.test_photos import create_album
+    from src.ui.test_photos_panel import (
+        PHOTO_CLOUD_ROLE,
+        _cloud_pixmap,
+        _delete_btn_rect,
+        _download_btn_rect,
+        PhotoAlbumRow,
+    )
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    album = create_album(tmp_path, "Leg 1", "高温试验", "试验前")
+    _png(album / "试验前-001.png")
+    row = PhotoAlbumRow(tmp_path, "Leg 1", "高温试验", "试验前", "P1")
+    gallery = row.gallery
+    assert gallery.hasMouseTracking()
+    assert gallery.viewport().hasMouseTracking()
+    assert gallery.cursor().shape() == Qt.OpenHandCursor
+    assert row.btn_delete.cursor().shape() == Qt.ArrowCursor
+
+    item = gallery.item(0)
+    rect = QRect(0, 0, 90, 100)
+    delete_pos = _delete_btn_rect(rect).center()
+    assert gallery._hotspot_kind(delete_pos, item, rect) == "delete"
+    item.setData(PHOTO_CLOUD_ROLE, False)
+    assert gallery._hotspot_kind(rect.center(), item, rect) is None
+    item.setData(PHOTO_CLOUD_ROLE, True)
+    assert gallery._hotspot_kind(_download_btn_rect(rect).center(), item, rect) == "download"
+    gallery._dragging = True
+    assert gallery._cursor_for_pos(QPoint(0, 0)) == Qt.ClosedHandCursor
+    gallery._dragging = False
+
+    cloud = _cloud_pixmap()
+    assert cloud.devicePixelRatio() == 2
+    assert cloud.deviceIndependentSize().width() == 18
+    assert cloud.deviceIndependentSize().height() == 18
+
+
 def test_insert_index_for_thumbs_reading_order():
     from PySide6.QtCore import QPoint, QRect
 

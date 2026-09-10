@@ -539,6 +539,10 @@ def test_detail_dialog_to_combo_uses_full_names():
     assert dlg.btn_print_raw.text() == "打印"
     assert dlg.btn_print_raw.toolTip() == "打印原始记录"
     assert abs(dlg.btn_print_raw.y() - dlg.date_start.y()) <= 8
+    env_h = dlg.txt_env_condition.height()
+    assert dlg.date_start.height() == env_h
+    assert dlg.date_end.height() == env_h
+    assert dlg.btn_print_raw.height() == env_h
     dlg.close()
 
 

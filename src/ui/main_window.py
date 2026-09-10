@@ -25,6 +25,7 @@ from src.application_ingest import apply_application_data
 from src.io.to_numbers import apply_autoliv_to_numbers
 from application_parser import parse_application, prepare_excel_bytes
 from src.parsers.pdf_parser import QuotationParser
+from src.io.project_board import resolve_project_folder_to_open
 from src.io.project_mirror import incremental_copy, list_saved_projects, local_project_dir
 from src.io.project_sync import (
     RemoteJsonError,
@@ -241,7 +242,7 @@ class NightlySyncWorker(QThread):
             self.failed.emit(str(exc))
 
 
-APP_VERSION = "1.3.6"
+APP_VERSION = "1.3.7"
 # Calendar popup floor. Dates before this are treated as "no end date"
 # because QDateEdit may clamp the blank sentinel to 1752-09-14.
 _EARLIEST_REAL_YEAR = 1990
@@ -273,6 +274,7 @@ def _templates_are_network(result: ProbeResult, cfg: NetworkSourcesConfig) -> bo
             (result.report_templates_source, cfg.report_templates.directory),
             (result.leg_templates_source, cfg.leg_templates.directory),
             (result.data_tables_source, cfg.data_tables.directory),
+            (result.original_data_sheet_source, cfg.original_data_sheet.directory),
         )
     )
 
@@ -336,6 +338,12 @@ def _templates_tooltip(result: ProbeResult, config: NetworkSourcesConfig) -> str
             result.data_tables_path,
             result.data_tables_source,
             config.data_tables.directory,
+        ),
+        (
+            "原始记录模板",
+            result.original_data_sheet_path,
+            result.original_data_sheet_source,
+            config.original_data_sheet.directory,
         ),
     )
     lines = []
@@ -2470,18 +2478,6 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             QMessageBox.critical(self, "导出失败", f"生成报告时发生错误:\n{str(e)}")
-
-
-def resolve_project_folder_to_open(
-    remote: Optional[Path],
-    local: Optional[Path],
-) -> tuple[Optional[Path], str]:
-    """Prefer a reachable 公盘 folder; fall back to the local mirror."""
-    if remote is not None and remote.is_dir():
-        return remote, "remote"
-    if local is not None and local.is_dir():
-        return local, "local"
-    return None, "none"
 
 
 def _open_in_file_manager(path: Path, *, reveal: bool = False) -> None:

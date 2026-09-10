@@ -1,13 +1,10 @@
 """试验照片 drawer: album rows, drag-in copy, thumbnails."""
 
 from pathlib import Path
-import os
-import subprocess
-import sys
 import tempfile
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, QByteArray, QMimeData, QPoint, QRect, QRectF, QSize, QTimer, Signal
+from PySide6.QtCore import QEvent, Qt, QByteArray, QMimeData, QPoint, QRect, QRectF, QSize, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QDrag,
@@ -16,6 +13,7 @@ from PySide6.QtGui import (
     QDragMoveEvent,
     QDropEvent,
     QIcon,
+    QImage,
     QPainter,
     QPainterPath,
     QPen,
@@ -36,19 +34,22 @@ from src.ui.window_focus import force_window_foreground
 from src.io.project_assets import (
     MergedPhoto,
     download_photo_to_album,
+    invalidate_thumbs_for_files,
     list_merged_albums,
     list_merged_photos,
     list_merged_spare_photos,
     move_photo_to_spare,
     original_view_path,
     preview_path_for_photo,
+    reconcile_divergent_album_names,
     rename_all_merged_in_album,
     rename_merged_photo,
     renumber_merged_photos,
     resolve_photo_path,
-    spare_dir,
+    resolve_spare_folder_to_open,
     thumbnail_for_photo,
 )
+from src.io.project_board import open_folder_in_file_manager
 from src.io.test_photos import (
     PhotoError,
     SPARE_ALBUM_NAME,
@@ -150,6 +151,14 @@ def _cloud_pixmap():
     return _CLOUD_PIX
 
 
+def _pixmap_from_disk(path: Path) -> QPixmap:
+    """Load via QImage so Qt's filename pixmap cache cannot serve a stale file."""
+    image = QImage(str(path))
+    if image.isNull():
+        return QPixmap()
+    return QPixmap.fromImage(image)
+
+
 def _delete_btn_rect(item_rect: QRect) -> QRect:
     return QRect(item_rect.right() - 20, item_rect.top() + 2, 18, 18)
 
@@ -173,7 +182,7 @@ class PhotoThumbDelegate(QStyledItemDelegate):
         if cloud:
             badge = _cloud_pixmap()
             box = _cloud_btn_rect(rect)
-            painter.drawPixmap(box.topLeft(), badge.scaled(box.size()))
+            painter.drawPixmap(box.topLeft(), badge)
             if not spare:
                 painter.setPen(QPen(QColor(CYAN), 1))
                 painter.setBrush(QColor(BG_PANEL))
@@ -231,8 +240,10 @@ class PhotoThumbList(ContainedListWidget):
         self.setFrameShape(QFrame.NoFrame)
         self.setFixedHeight(GALLERY_H)
         self.setItemDelegate(PhotoThumbDelegate(self))
-        if not self._in_spare:
-            self.setCursor(Qt.OpenHandCursor)
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
+        self.viewport().installEventFilter(self)
+        self._set_list_cursor(self._rest_cursor())
         self._click_timer = QTimer(self)
         self._click_timer.setSingleShot(True)
         self._click_timer.setInterval(280)
@@ -260,7 +271,7 @@ class PhotoThumbList(ContainedListWidget):
             )
         except Exception:
             pass
-        loaded = QPixmap(str(display))
+        loaded = _pixmap_from_disk(display)
         if not loaded.isNull():
             pix = loaded.scaled(THUMB, THUMB, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         item = QListWidgetItem(QIcon(pix), Path(photo.read_path).name)
@@ -355,7 +366,7 @@ class PhotoThumbList(ContainedListWidget):
             self._visual_order = self.ordered_rels()
         if self._order_at_press is None:
             self._order_at_press = list(self._visual_order)
-        self.setCursor(Qt.ClosedHandCursor)
+        self._set_list_cursor(Qt.ClosedHandCursor)
 
     def _end_reorder(self) -> None:
         order = list(self._visual_order or [])
@@ -366,11 +377,45 @@ class PhotoThumbList(ContainedListWidget):
         self._visual_order = None
         self._order_at_press = None
         try:
-            self.setCursor(Qt.OpenHandCursor if not self._in_spare else Qt.ArrowCursor)
+            self._set_list_cursor(self._rest_cursor())
         except RuntimeError:
             pass
         if origin is not None and order and order != origin:
             self._row._write_photo_order(order)
+
+    def _rest_cursor(self):
+        return Qt.OpenHandCursor if not self._in_spare else Qt.ArrowCursor
+
+    def _set_list_cursor(self, cursor):
+        self.setCursor(cursor)
+        self.viewport().setCursor(cursor)
+
+    def _hotspot_kind(self, pos: QPoint, item, item_rect: QRect) -> Optional[str]:
+        if item is None or self._in_spare:
+            return None
+        if _delete_btn_rect(item_rect).contains(pos):
+            return "delete"
+        if item.data(PHOTO_CLOUD_ROLE) and _download_btn_rect(item_rect).contains(pos):
+            return "download"
+        return None
+
+    def _hotspot_at(self, pos: QPoint) -> Optional[str]:
+        item = self.itemAt(pos)
+        if item is None:
+            return None
+        return self._hotspot_kind(pos, item, self.visualItemRect(item))
+
+    def _cursor_for_pos(self, pos: QPoint):
+        if self._dragging:
+            return Qt.ClosedHandCursor
+        if self._hotspot_at(pos):
+            return Qt.ArrowCursor
+        return self._rest_cursor()
+
+    def _apply_hover_cursor(self, pos: QPoint) -> None:
+        if self._dragging:
+            return
+        self._set_list_cursor(self._cursor_for_pos(pos))
 
     def mousePressEvent(self, event):
         self._press_hit = None
@@ -421,7 +466,17 @@ class PhotoThumbList(ContainedListWidget):
                 self._nudge_order(view_pos)
             event.accept()
             return
+        self._apply_hover_cursor(self._viewport_pos(event))
         super().mouseMoveEvent(event)
+
+    def eventFilter(self, obj, event):
+        if obj is self.viewport() and not self._in_spare:
+            kind = event.type()
+            if kind == QEvent.Type.MouseMove and not self._dragging:
+                self._apply_hover_cursor(event.position().toPoint())
+            elif kind == QEvent.Type.Leave and not self._dragging:
+                self._set_list_cursor(self._rest_cursor())
+        return super().eventFilter(obj, event)
 
     def mouseReleaseEvent(self, event):
         if event.button() != Qt.LeftButton:
@@ -603,7 +658,10 @@ class FolderChip(QWidget):
         self.setFixedSize(92, 64)
         if self._locked:
             self.setCursor(Qt.ArrowCursor)
-            self.setToolTip("系统保留；双击在访达中打开。把照片拖回正式相册即可还原")
+            self.setToolTip(
+                "系统保留；双击优先打开公盘，不可达则开本地。"
+                "把照片拖回正式相册即可还原"
+            )
         else:
             self.setCursor(Qt.OpenHandCursor)
             self.setToolTip("拖动调整顺序；双击改名")
@@ -841,7 +899,7 @@ class PhotoAlbumRow(QFrame):
         self.btn_delete = QPushButton("✕", folder_wrap)
         self.btn_delete.setObjectName("photoThumbDelete")
         self.btn_delete.setFixedSize(18, 18)
-        self.btn_delete.setCursor(Qt.PointingHandCursor)
+        self.btn_delete.setCursor(Qt.ArrowCursor)
         self.btn_delete.setToolTip("删除文件夹")
         self.btn_delete.move(82, 0)
         self.btn_delete.clicked.connect(self._delete_folder)
@@ -865,7 +923,8 @@ class PhotoAlbumRow(QFrame):
         self.btn_rename_all.setFixedWidth(102)
         if self._is_spare:
             self.btn_rename_all.setToolTip(
-                f"在访达中打开「{SPARE_ALBUM_NAME}」；把照片拖回正式相册即可还原"
+                f"优先在访达中打开公盘「{SPARE_ALBUM_NAME}」；不可达则打开本地镜像。"
+                "把照片拖回正式相册即可还原"
             )
             self.btn_rename_all.clicked.connect(self._open_in_finder)
         else:
@@ -891,6 +950,13 @@ class PhotoAlbumRow(QFrame):
     def reload(self):
         self.gallery.clear()
         if self._is_spare:
+            reconcile_divergent_album_names(
+                self.project_root,
+                self.remote_root,
+                self.leg_name,
+                self.test_name,
+                SPARE_ALBUM_NAME,
+            )
             photos = list_merged_spare_photos(
                 self.project_root,
                 self.remote_root,
@@ -898,6 +964,13 @@ class PhotoAlbumRow(QFrame):
                 self.test_name,
             )
         else:
+            reconcile_divergent_album_names(
+                self.project_root,
+                self.remote_root,
+                self.leg_name,
+                self.test_name,
+                self.album_name,
+            )
             photos = list_merged_photos(
                 self.project_root,
                 self.remote_root,
@@ -945,22 +1018,30 @@ class PhotoAlbumRow(QFrame):
         if choice is None:
             return
         if choice is KEEP_ORIGINAL:
-            copy_into_album_keep_names(self.folder(), images)
+            written = copy_into_album_keep_names(self.folder(), images)
         else:
-            copy_into_album(self.folder(), images, choice)
+            written = copy_into_album(self.folder(), images, choice)
+        invalidate_thumbs_for_files(self.project_root, written)
         self.reload()
         self.changed.emit(False)
 
     def _open_in_finder(self):
-        folder = self.folder()
-        folder.mkdir(parents=True, exist_ok=True)
-        target = str(folder)
-        if sys.platform == "darwin":
-            subprocess.run(["open", target], check=False)
-        elif sys.platform == "win32":
-            os.startfile(target)
-        else:
-            subprocess.run(["xdg-open", target], check=False)
+        path, kind = resolve_spare_folder_to_open(
+            self.project_root,
+            self.remote_root,
+            self.leg_name,
+            self.test_name,
+        )
+        if path is None:
+            QMessageBox.warning(
+                self,
+                "提示",
+                f"没有可打开的「{SPARE_ALBUM_NAME}」文件夹（公盘不可达，本地镜像尚未就绪）",
+            )
+            return
+        if kind == "local" and self.remote_root is not None:
+            QMessageBox.information(self, "提示", "公盘不可达，将打开本地镜像")
+        open_folder_in_file_manager(path)
 
     def _rename_all(self):
         if self._is_spare:
@@ -1050,7 +1131,7 @@ class PhotoAlbumRow(QFrame):
     def _show_image_popup(self, path: Path):
         from src.ui.test_detail_dialog import StdImagePopup
 
-        pix = QPixmap(str(path))
+        pix = _pixmap_from_disk(path)
         if pix.isNull():
             return
         host = self.window()
@@ -1262,7 +1343,8 @@ class TestPhotosPanel(QWidget):
         self.btn_custom = QPushButton("自定义新建")
         self.btn_open_spare = QPushButton(f"打开{SPARE_ALBUM_NAME}")
         self.btn_open_spare.setToolTip(
-            f"在访达中打开「{SPARE_ALBUM_NAME}」；把照片拖回正式相册即可还原"
+            f"优先在访达中打开公盘「{SPARE_ALBUM_NAME}」；不可达则打开本地镜像。"
+            "把照片拖回正式相册即可还原"
         )
         self.btn_template.clicked.connect(self._add_template)
         self.btn_custom.clicked.connect(self._add_custom)
@@ -1426,6 +1508,13 @@ class TestPhotosPanel(QWidget):
         )
         photos = 0
         for name in albums:
+            reconcile_divergent_album_names(
+                self.project_root,
+                self.remote_root,
+                self.leg_name,
+                self.test_name,
+                name,
+            )
             photos += len(
                 list_merged_photos(
                     self.project_root, self.remote_root, self.leg_name, self.test_name, name
@@ -1562,15 +1651,22 @@ class TestPhotosPanel(QWidget):
     def _open_spare_folder(self):
         if not self._ready():
             return
-        folder = spare_dir(self.project_root, self.leg_name, self.test_name)
-        folder.mkdir(parents=True, exist_ok=True)
-        target = str(folder)
-        if sys.platform == "darwin":
-            subprocess.run(["open", target], check=False)
-        elif sys.platform == "win32":
-            os.startfile(target)
-        else:
-            subprocess.run(["xdg-open", target], check=False)
+        path, kind = resolve_spare_folder_to_open(
+            self.project_root,
+            self.remote_root,
+            self.leg_name,
+            self.test_name,
+        )
+        if path is None:
+            QMessageBox.warning(
+                self,
+                "提示",
+                f"没有可打开的「{SPARE_ALBUM_NAME}」文件夹（公盘不可达，本地镜像尚未就绪）",
+            )
+            return
+        if kind == "local" and self.remote_root is not None:
+            QMessageBox.information(self, "提示", "公盘不可达，将打开本地镜像")
+        open_folder_in_file_manager(path)
 
     def _add_template(self):
         if not self._ready():

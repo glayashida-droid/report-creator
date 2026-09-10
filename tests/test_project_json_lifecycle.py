@@ -101,6 +101,43 @@ def test_is_remote_json_newer_when_remote_mtime_ahead(tmp_path: Path):
     assert is_remote_json_newer(local, remote) is True
 
 
+def test_is_remote_json_newer_false_when_same_content_despite_mtime(
+    tmp_path: Path,
+):
+    """NAS clock skew must not prompt when local cache already matches remote."""
+    remote = tmp_path / "remote"
+    local = tmp_path / "local"
+    remote.mkdir()
+    local.mkdir()
+    payload = '{"sample_name":"同一份","legs":[]}'
+    local_json = local / "project_state.json"
+    remote_json = remote / "project_state.json"
+    local_json.write_text(payload, encoding="utf-8")
+    remote_json.write_text(payload, encoding="utf-8")
+    # Simulate 公盘 mtime several minutes ahead of local (clock skew).
+    os.utime(local_json, (time.time() - 300, time.time() - 300))
+    os.utime(remote_json, (time.time(), time.time()))
+
+    assert is_remote_json_newer(local, remote) is False
+
+
+def test_is_remote_json_newer_true_when_colleague_changed_content(
+    tmp_path: Path,
+):
+    remote = tmp_path / "remote"
+    local = tmp_path / "local"
+    remote.mkdir()
+    local.mkdir()
+    local_json = local / "project_state.json"
+    remote_json = remote / "project_state.json"
+    local_json.write_text('{"sample_name":"A保存的"}', encoding="utf-8")
+    remote_json.write_text('{"sample_name":"B改过的"}', encoding="utf-8")
+    os.utime(local_json, (time.time() - 300, time.time() - 300))
+    os.utime(remote_json, (time.time(), time.time()))
+
+    assert is_remote_json_newer(local, remote) is True
+
+
 def test_is_remote_json_newer_false_when_local_ahead(tmp_path: Path):
     remote = tmp_path / "remote"
     local = tmp_path / "local"

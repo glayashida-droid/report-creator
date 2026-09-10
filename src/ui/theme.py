@@ -181,6 +181,18 @@ QGroupBox#overviewGroup QAbstractSpinBox {{
     border-radius: 6px;
 }}
 
+QGroupBox#detailGroup QDateEdit,
+QGroupBox#detailGroup QAbstractSpinBox,
+QGroupBox#detailGroup QComboBox {{
+    padding: 4px 10px;
+    min-height: 0px;
+}}
+
+QGroupBox#detailGroup QPushButton {{
+    padding: 2px 14px;
+    min-height: 0px;
+}}
+
 QFrame#drawerSection {{
     background-color: {BG_PANEL};
     border: 1px solid {CYAN_DIM};
@@ -383,6 +395,34 @@ QCheckBox#keyParamCheck::indicator {{
 QCheckBox#keyParamCheck::indicator:checked {{
     background-color: {MAGENTA};
     border: 1px solid {MAGENTA};
+}}
+
+QCheckBox#dataTableLimitExportCheck {{
+    background: transparent;
+    color: {CYAN};
+    spacing: 6px;
+    font-weight: 600;
+}}
+
+QCheckBox#dataTableLimitExportCheck::indicator {{
+    width: 16px;
+    height: 16px;
+    border: 2px solid {CYAN};
+    border-radius: 3px;
+    background-color: {BG_INPUT};
+}}
+
+QCheckBox#dataTableLimitExportCheck::indicator:hover {{
+    border: 2px solid {MAGENTA};
+}}
+
+QCheckBox#dataTableLimitExportCheck::indicator:checked {{
+    background-color: {CYAN};
+    border: 2px solid {CYAN};
+}}
+
+QCheckBox#dataTableLimitExportCheck:checked {{
+    color: {MAGENTA};
 }}
 
 QWidget#drawerBody {{

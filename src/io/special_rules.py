@@ -179,6 +179,18 @@ def _row_matches_client(row: SpecialRuleRow, client_values: Sequence[str]) -> bo
     return False
 
 
+def _label_is_oem_title(text: str) -> bool:
+    """Exact 主机厂, or English counterpart OEM (case-insensitive)."""
+    t = (text or "").strip()
+    if t == "主机厂":
+        return True
+    return t.lower() == "oem"
+
+
+def _custom_row_is_oem(row) -> bool:
+    return _label_is_oem_title(row.label_cn) or _label_is_oem_title(row.label_en)
+
+
 def _oem_values_from_state(state: ProjectState) -> List[str]:
     fields = state.application_fields or {}
     fields_en = state.application_fields_en or {}
@@ -186,7 +198,19 @@ def _oem_values_from_state(state: ProjectState) -> List[str]:
         fields.get("主机厂", ""),
         fields_en.get("主机厂", ""),
     ]
-    return [v for v in vals if (v or "").strip()]
+    for row in state.custom_overview_fields or []:
+        if not _custom_row_is_oem(row):
+            continue
+        vals.append(row.value_cn or "")
+        vals.append(row.value_en or "")
+    seen = set()
+    out: List[str] = []
+    for v in vals:
+        v = (v or "").strip()
+        if v and v not in seen:
+            seen.add(v)
+            out.append(v)
+    return out
 
 
 def _client_values_from_state(state: ProjectState) -> List[str]:

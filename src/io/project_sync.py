@@ -68,8 +68,23 @@ def load_json_from_remote(remote_root: PathLike) -> Optional[ProjectState]:
         return None
 
 
+def _json_files_equivalent(path_a: Path, path_b: Path) -> bool:
+    """True when both paths are readable JSON with equal parsed values."""
+    try:
+        data_a = json.loads(path_a.read_text(encoding="utf-8"))
+        data_b = json.loads(path_b.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError):
+        return False
+    return data_a == data_b
+
+
 def is_remote_json_newer(local_root: PathLike, remote_root: PathLike) -> bool:
-    """True when remote project_state.json exists and is newer than the local cache."""
+    """True when remote JSON is newer than local *and* content differs.
+
+    mtime-only comparison false-positives after a successful own save when the
+    NAS clock is ahead of the Mac; content equality gates those prompts out so
+    the dialog only appears for a real colleague (or other) update.
+    """
     remote = remote_state_path(remote_root)
     if not remote.is_file():
         return False
@@ -84,7 +99,11 @@ def is_remote_json_newer(local_root: PathLike, remote_root: PathLike) -> bool:
         local_mtime = local.stat().st_mtime
     except OSError:
         return True
-    return remote_mtime > local_mtime
+    if remote_mtime <= local_mtime:
+        return False
+    if _json_files_equivalent(local, remote):
+        return False
+    return True
 
 
 def save_json_to_remote_then_local(

@@ -115,6 +115,9 @@ def test_attempt_mount_network_shares_opens_missing_volumes(tmp_path: Path):
             "data_tables": {
                 "directory": "smb://10.10.31.8/材料实验室b/车载电子/report_creator/data_tables"
             },
+            "original_data_sheet": {
+                "directory": "smb://10.10.31.8/材料实验室b/车载电子/report_creator/original_data_sheet"
+            },
         },
     )
     config = load_network_sources_config(cfg_path)
@@ -133,9 +136,11 @@ def _write_config(tmp_path: Path, **overrides) -> Path:
     leg = tmp_path / "leg_templates"
     report = tmp_path / "report_templates"
     data = tmp_path / "data_tables"
+    original = tmp_path / "original_data_sheet"
     leg.mkdir()
     report.mkdir()
     data.mkdir()
+    original.mkdir()
     for name in ("template_zh.docx", "template_en.docx", "template_ze.docx"):
         (report / name).write_bytes(b"t")
     equipment_dir = tmp_path / "equipment"
@@ -156,6 +161,7 @@ def _write_config(tmp_path: Path, **overrides) -> Path:
             "leg_templates": {"directory": str(leg)},
             "report_templates": {"directory": str(report)},
             "data_tables": {"directory": str(data)},
+            "original_data_sheet": {"directory": str(original)},
         },
         "connection_check": {
             "retry_interval_disconnected_sec": 30,
@@ -296,6 +302,7 @@ def _make_fallback_tree(root: Path) -> Path:
     for name in ("template_zh.docx", "template_en.docx", "template_ze.docx"):
         (root / "report_templates" / name).write_bytes(b"t")
     (root / "data_tables").mkdir()
+    (root / "original_data_sheet").mkdir()
     (root / "01-设备清单-20260825.xlsx").write_bytes(b"eq")
     return root
 
@@ -323,6 +330,7 @@ def test_probe_falls_back_to_local_when_configured_missing(tmp_path: Path):
             "leg_templates": {"directory": str(tmp_path / "missing_leg")},
             "report_templates": {"directory": str(tmp_path / "missing_report")},
             "data_tables": {"directory": str(tmp_path / "missing_data")},
+            "original_data_sheet": {"directory": str(tmp_path / "missing_original")},
         },
     )
     config = load_network_sources_config(cfg_path)
@@ -382,6 +390,7 @@ def test_templates_mixed_fallback_when_one_dir_missing(tmp_path: Path):
     assert result.report_templates_source == SOURCE_FALLBACK
     assert result.leg_templates_source == SOURCE_CONFIGURED
     assert result.data_tables_source == SOURCE_CONFIGURED
+    assert result.original_data_sheet_source == SOURCE_CONFIGURED
     assert result.templates_source == SOURCE_MIXED
     assert result.all_configured_connected is False
     assert str(fallback / "report_templates") == result.report_templates_path
@@ -431,6 +440,7 @@ def test_conn_tooltip_shows_kind_and_path():
         leg_templates=DirectorySource(directory="smb://host/leg"),
         report_templates=DirectorySource(directory="smb://host/report"),
         data_tables=DirectorySource(directory="smb://host/data"),
+        original_data_sheet=DirectorySource(directory="smb://host/original"),
         connection_check=ConnectionCheckConfig(),
     )
     probed = ProbeResult(
@@ -446,14 +456,18 @@ def test_conn_tooltip_shows_kind_and_path():
         leg_templates_path="/tmp/leg",
         report_templates_path="/tmp/report",
         data_tables_path="/tmp/data",
+        original_data_sheet_path="/tmp/original",
         leg_templates_source=SOURCE_FALLBACK,
         report_templates_source=SOURCE_FALLBACK,
         data_tables_source=SOURCE_FALLBACK,
+        original_data_sheet_source=SOURCE_FALLBACK,
     )
     tip = _templates_tooltip(probed, cfg)
     assert "报告模板 [本地]" in tip
     assert "/tmp/report" in tip
     assert "Leg模板 [本地]" in tip
+    assert "原始记录模板 [本地]" in tip
+    assert "/tmp/original" in tip
 
 
 def test_probe_timeout_sec_from_config(tmp_path: Path):

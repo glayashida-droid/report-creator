@@ -360,6 +360,9 @@ class PhotoInbox:
             if staged:
                 with self._lock:
                     written = copy_into_album(self.dest, staged, self.prefix)
+                    from src.io.project_assets import invalidate_thumbs_for_album_files
+
+                    invalidate_thumbs_for_album_files(self.dest, written)
                     self._saved.extend(written)
         note = ""
         if skipped:

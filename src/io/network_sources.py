@@ -65,6 +65,7 @@ class NetworkSourcesConfig:
     leg_templates: DirectorySource
     report_templates: DirectorySource
     data_tables: DirectorySource
+    original_data_sheet: DirectorySource
     connection_check: ConnectionCheckConfig
 
 
@@ -84,9 +85,11 @@ class ProbeResult:
     leg_templates_path: Optional[str] = None
     report_templates_path: Optional[str] = None
     data_tables_path: Optional[str] = None
+    original_data_sheet_path: Optional[str] = None
     leg_templates_source: str = ""
     report_templates_source: str = ""
     data_tables_source: str = ""
+    original_data_sheet_source: str = ""
 
     @property
     def all_configured_connected(self) -> bool:
@@ -116,6 +119,7 @@ def local_fallback_for(kind: str) -> Path:
         "leg_templates": root / "leg_templates",
         "report_templates": root / "report_templates",
         "data_tables": root / "data_tables",
+        "original_data_sheet": root / "original_data_sheet",
     }
     return mapping[kind]
 
@@ -158,6 +162,7 @@ def load_network_sources_config(path: Optional[Path] = None) -> NetworkSourcesCo
         leg_templates=_directory_source(network, "leg_templates"),
         report_templates=_directory_source(network, "report_templates"),
         data_tables=_directory_source(network, "data_tables"),
+        original_data_sheet=_directory_source(network, "original_data_sheet"),
         connection_check=ConnectionCheckConfig(
             retry_interval_disconnected_sec=int(
                 check.get("retry_interval_disconnected_sec") or 30
@@ -181,6 +186,7 @@ def network_config_to_payload(config: NetworkSourcesConfig) -> dict:
         "leg_templates": {"directory": config.leg_templates.directory},
         "report_templates": {"directory": config.report_templates.directory},
         "data_tables": {"directory": config.data_tables.directory},
+        "original_data_sheet": {"directory": config.original_data_sheet.directory},
         "connection_check": {
             "retry_interval_disconnected_sec": (
                 config.connection_check.retry_interval_disconnected_sec
@@ -209,6 +215,7 @@ def network_config_from_payload(payload: dict) -> NetworkSourcesConfig:
         leg_templates=_directory_source(payload, "leg_templates"),
         report_templates=_directory_source(payload, "report_templates"),
         data_tables=_directory_source(payload, "data_tables"),
+        original_data_sheet=_directory_source(payload, "original_data_sheet"),
         connection_check=ConnectionCheckConfig(
             retry_interval_disconnected_sec=int(
                 check.get("retry_interval_disconnected_sec") or 30
@@ -250,9 +257,11 @@ def probe_result_from_dict(data: dict) -> ProbeResult:
         leg_templates_path=data.get("leg_templates_path"),
         report_templates_path=data.get("report_templates_path"),
         data_tables_path=data.get("data_tables_path"),
+        original_data_sheet_path=data.get("original_data_sheet_path"),
         leg_templates_source=str(data.get("leg_templates_source") or ""),
         report_templates_source=str(data.get("report_templates_source") or ""),
         data_tables_source=str(data.get("data_tables_source") or ""),
+        original_data_sheet_source=str(data.get("original_data_sheet_source") or ""),
     )
 
 
@@ -394,6 +403,7 @@ def _collect_smb_shares(config: NetworkSourcesConfig) -> list[tuple[str, str]]:
         config.leg_templates.directory,
         config.report_templates.directory,
         config.data_tables.directory,
+        config.original_data_sheet.directory,
     )
     shares: dict[str, str] = {}
     for raw in raw_paths:
@@ -430,6 +440,7 @@ def _needs_smb_mount(config: NetworkSourcesConfig) -> bool:
         config.leg_templates.directory,
         config.report_templates.directory,
         config.data_tables.directory,
+        config.original_data_sheet.directory,
     )
     for raw in raw_paths:
         if _parse_smb_share_url(raw) is None:
@@ -522,6 +533,11 @@ def report_templates_directory(config: Optional[NetworkSourcesConfig] = None) ->
 def data_table_templates_directory(config: Optional[NetworkSourcesConfig] = None) -> Path:
     cfg = config or load_network_sources_config()
     return _resolved_directory(cfg.data_tables.directory, "data_tables")
+
+
+def original_data_sheet_directory(config: Optional[NetworkSourcesConfig] = None) -> Path:
+    cfg = config or load_network_sources_config()
+    return _resolved_directory(cfg.original_data_sheet.directory, "original_data_sheet")
 
 
 def resolve_report_template_file(
@@ -669,9 +685,12 @@ def _path_text(path: Optional[Path]) -> Optional[str]:
 
 def probe_template_sources(config: NetworkSourcesConfig) -> Tuple[bool, str]:
     errors: list[str] = []
-    (leg_dir, _leg_src), (report_dir, _report_src), (data_dir, _data_src) = (
-        resolve_template_locations(config)
-    )
+    (
+        (leg_dir, _leg_src),
+        (report_dir, _report_src),
+        (data_dir, _data_src),
+        (original_dir, _original_src),
+    ) = resolve_template_locations(config)
 
     ok, err = probe_accessible_directory(leg_dir, "Leg模板")
     if not ok:
@@ -689,6 +708,10 @@ def probe_template_sources(config: NetworkSourcesConfig) -> Tuple[bool, str]:
     if not ok:
         errors.append(err)
 
+    ok, err = probe_accessible_directory(original_dir, "原始记录模板")
+    if not ok:
+        errors.append(err)
+
     if errors:
         return False, "; ".join(errors)
     return True, ""
@@ -703,6 +726,9 @@ def resolve_template_locations(
             config.report_templates.directory, local_fallback_for("report_templates")
         ),
         _pick_usable_directory(config.data_tables.directory, local_fallback_for("data_tables")),
+        _pick_usable_directory(
+            config.original_data_sheet.directory, local_fallback_for("original_data_sheet")
+        ),
     ]
 
 
@@ -712,7 +738,12 @@ def probe_network_sources(config: Optional[NetworkSourcesConfig] = None) -> Prob
     equipment_path, equipment_source = _resolve_equipment_list(cfg.equipment_list)
     standards_path, standards_source = _resolve_standards_library(cfg.standards_library)
     locations = resolve_template_locations(cfg)
-    (leg_dir, leg_source), (report_dir, report_source), (data_dir, data_source) = locations
+    (
+        (leg_dir, leg_source),
+        (report_dir, report_source),
+        (data_dir, data_source),
+        (original_dir, original_source),
+    ) = locations
     equipment_ok, equipment_error = probe_readable_file(equipment_path)
     standards_ok, standards_error = probe_readable_file(standards_path)
     templates_ok, templates_error = probe_template_sources(cfg)
@@ -731,13 +762,17 @@ def probe_network_sources(config: Optional[NetworkSourcesConfig] = None) -> Prob
         templates_error=templates_error,
         equipment_source=equipment_source,
         standards_source=standards_source,
-        templates_source=_combine_sources(leg_source, report_source, data_source),
+        templates_source=_combine_sources(
+            leg_source, report_source, data_source, original_source
+        ),
         leg_templates_path=_path_text(leg_dir),
         report_templates_path=_path_text(report_dir),
         data_tables_path=_path_text(data_dir),
+        original_data_sheet_path=_path_text(original_dir),
         leg_templates_source=leg_source,
         report_templates_source=report_source,
         data_tables_source=data_source,
+        original_data_sheet_source=original_source,
     )
 
 

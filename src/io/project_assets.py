@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import tempfile
@@ -17,6 +18,7 @@ from src.io.test_photos import (
     IMAGE_EXTS,
     SPARE_ALBUM_NAME,
     SPARE_DIR_NAME,
+    TEST_GROUP_DIR,
     PhotoError,
     _rename_path,
     album_dir,
@@ -30,6 +32,7 @@ from src.io.test_photos import (
     planned_photo_name,
     require_leg_name,
     require_usable_test_name,
+    stem_occupied,
     test_dir,
     unique_dest_name,
     validate_album_name,
@@ -64,6 +67,26 @@ def _album_relative(leg_name: str, test_name: str, album_name: str, filename: st
 
 def spare_dir(project_root: PathLike, leg_name: str, test_name: str) -> Path:
     return test_dir(project_root, leg_name, test_name) / SPARE_ALBUM_NAME
+
+
+def resolve_spare_folder_to_open(
+    local_root: Optional[PathLike],
+    remote_root: Optional[PathLike],
+    leg_name: str,
+    test_name: str,
+) -> Tuple[Optional[Path], str]:
+    """Prefer reachable 公盘 备用/; fall back to local (creating the folder if needed)."""
+    local = _as_root(local_root)
+    remote = _as_root(remote_root)
+    if remote is not None and remote.is_dir():
+        folder = spare_dir(remote, leg_name, test_name)
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder, "remote"
+    if local is not None:
+        folder = spare_dir(local, leg_name, test_name)
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder, "local"
+    return None, "none"
 
 
 def _spare_relative_for_photo(relative_path: str) -> str:
@@ -111,6 +134,14 @@ def move_photo_to_spare(
             local_moved = dest
     if moved is None:
         raise PhotoError("找不到照片")
+    if local is not None:
+        dropped = [Path(relative_path).as_posix(), Path(spare_rel).as_posix()]
+        if local_moved is not None:
+            try:
+                dropped.append(local_moved.relative_to(local).as_posix())
+            except ValueError:
+                pass
+        invalidate_photo_thumbs(local, dropped)
     return local_moved or moved
 
 
@@ -134,7 +165,14 @@ def restore_photo_from_spare(
     src = spare_dir(root, leg, test) / name
     if not src.is_file():
         raise PhotoError(f"备用中找不到：{name}")
-    return _move_into_dir(src, album_dir(root, leg, test, album))
+    spare_rel = src.relative_to(root).as_posix()
+    dest = _move_into_dir(src, album_dir(root, leg, test, album))
+    try:
+        dest_rel = dest.relative_to(root).as_posix()
+    except ValueError:
+        dest_rel = ""
+    invalidate_photo_thumbs(root, [spare_rel, dest_rel])
+    return dest
 
 
 def _list_image_names(folder: Path) -> List[str]:
@@ -143,6 +181,108 @@ def _list_image_names(folder: Path) -> List[str]:
     names = [p.name for p in folder.iterdir() if is_image_file(p)]
     names.sort(key=lambda n: n.casefold())
     return names
+
+
+def _file_digest(path: Path) -> bytes:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.digest()
+
+
+def _same_photo_payload(left: Path, right: Path) -> bool:
+    """True when both files look like the same synced copy (size + hash)."""
+    try:
+        if left.stat().st_size != right.stat().st_size:
+            return False
+    except OSError:
+        return False
+    try:
+        return _file_digest(left) == _file_digest(right)
+    except OSError:
+        return False
+
+
+def _stem_taken_in_folders(folders: Sequence[Optional[Path]], stem: str) -> bool:
+    key = (stem or "").casefold()
+    if not key:
+        return False
+    for folder in folders:
+        if folder is not None and stem_occupied(folder, key):
+            return True
+    return False
+
+
+def _next_free_album_name(
+    local_folder: Optional[Path],
+    remote_folder: Optional[Path],
+    album_name: str,
+    suffix: str,
+) -> str:
+    """Pick ``{album}-NNN.ext`` unused on either root (fills gaps from 001)."""
+    prefix = (album_name or "").strip() or "photo"
+    ext = canonical_image_suffix(suffix)
+    folders = [local_folder, remote_folder]
+    seq = 1
+    while True:
+        candidate = numbered_name(prefix, seq, ext)
+        if not _stem_taken_in_folders(folders, Path(candidate).stem):
+            return candidate
+        seq += 1
+
+
+def reconcile_divergent_album_names(
+    local_root: Optional[PathLike],
+    remote_root: Optional[PathLike],
+    leg_name: str,
+    test_name: str,
+    album_name: str,
+) -> List[str]:
+    """Rename remote files that share a name with local but differ in content.
+
+    Same-name sync copies (identical bytes) are left alone so local-wins merge
+    stays one thumbnail. Divergent remote files get a free ``{album}-NNN`` name
+    so both appear in the merge view. Returns new remote relative paths.
+    """
+    album = (album_name or "").strip()
+    if not album:
+        return []
+    if not (leg_name or "").strip() or not is_usable_test_name(test_name):
+        return []
+    local = _as_root(local_root)
+    remote = _as_root(remote_root)
+    if local is None or remote is None:
+        return []
+    local_folder = album_dir(local, leg_name, test_name, album)
+    remote_folder = album_dir(remote, leg_name, test_name, album)
+    if not local_folder.is_dir() or not remote_folder.is_dir():
+        return []
+
+    renamed: List[str] = []
+    # Snapshot names — renaming mutates the remote folder mid-loop.
+    for name in list(_list_image_names(remote_folder)):
+        local_file = local_folder / name
+        remote_file = remote_folder / name
+        if not local_file.is_file() or not remote_file.is_file():
+            continue
+        if _same_photo_payload(local_file, remote_file):
+            continue
+        new_name = _next_free_album_name(
+            local_folder, remote_folder, album, remote_file.suffix
+        )
+        dest = remote_folder / new_name
+        if dest.exists():
+            continue
+        old_rel = _album_relative(leg_name, test_name, album, name)
+        new_rel = _album_relative(leg_name, test_name, album, new_name)
+        _rename_path(remote_file, dest)
+        invalidate_photo_thumbs(local, [old_rel, new_rel])
+        renamed.append(new_rel)
+    return renamed
 
 
 def list_merged_albums(
@@ -622,6 +762,45 @@ def invalidate_photo_thumbs(
                 path.unlink()
             except OSError:
                 pass
+
+
+def invalidate_thumbs_for_files(
+    local_root: Optional[PathLike], file_paths: Sequence[PathLike]
+) -> None:
+    """Drop `.thumbs` files for album files under *local_root*."""
+    local = _as_root(local_root)
+    if local is None:
+        return
+    rels: List[str] = []
+    try:
+        root = local.resolve()
+    except OSError:
+        return
+    for raw in file_paths:
+        path = Path(raw)
+        try:
+            rels.append(path.resolve().relative_to(root).as_posix())
+        except (ValueError, OSError):
+            continue
+    invalidate_photo_thumbs(local, rels)
+
+
+def invalidate_thumbs_for_album_files(
+    album_folder: PathLike, dest_files: Sequence[PathLike]
+) -> None:
+    """Invalidate thumbs for files copied into an album folder."""
+    try:
+        album = Path(album_folder).resolve()
+    except OSError:
+        return
+    local_root = None
+    for parent in album.parents:
+        if parent.name == TEST_GROUP_DIR:
+            local_root = parent.parent
+            break
+    if local_root is None:
+        return
+    invalidate_thumbs_for_files(local_root, dest_files)
 
 
 def thumbnail_for_photo(

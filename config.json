@@ -16,6 +16,9 @@
     },
     "data_tables": {
       "directory": "smb://10.10.31.8/材料实验室b/车载电子/report_creator/data_tables"
+    },
+    "original_data_sheet": {
+      "directory": "smb://10.10.31.8/材料实验室b/车载电子/report_creator/original_data_sheet"
     }
   },
   "connection_check": {

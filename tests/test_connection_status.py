@@ -15,13 +15,13 @@ from src.io.network_sources import (
     ProbeResult,
     StandardsLibrarySource,
 )
+from src.io.project_board import resolve_project_folder_to_open
 from src.ui.main_window import (
     ConnectionStatusCheck,
     MainWindow,
     _apply_connection_status,
     _is_network_connection,
     _templates_are_network,
-    resolve_project_folder_to_open,
 )
 from src.ui.theme import apply_cyberpunk_theme
 
@@ -43,6 +43,7 @@ def _smb_config():
         leg_templates=DirectorySource(directory="smb://host/leg"),
         report_templates=DirectorySource(directory="smb://host/report"),
         data_tables=DirectorySource(directory="smb://host/data"),
+        original_data_sheet=DirectorySource(directory="smb://host/original"),
         connection_check=ConnectionCheckConfig(),
     )
 
@@ -68,7 +69,7 @@ def test_is_network_connection_labels():
     assert _is_network_connection(SOURCE_CONFIGURED, "/tmp/local") is False
 
 
-def test_templates_are_network_requires_all_three():
+def test_templates_are_network_requires_all_four():
     cfg = _smb_config()
     mixed = _probe(
         templates_ok=True,
@@ -76,6 +77,7 @@ def test_templates_are_network_requires_all_three():
         report_templates_source=SOURCE_CONFIGURED,
         leg_templates_source=SOURCE_FALLBACK,
         data_tables_source=SOURCE_CONFIGURED,
+        original_data_sheet_source=SOURCE_CONFIGURED,
     )
     assert _templates_are_network(mixed, cfg) is False
     all_net = _probe(
@@ -84,6 +86,7 @@ def test_templates_are_network_requires_all_three():
         report_templates_source=SOURCE_CONFIGURED,
         leg_templates_source=SOURCE_CONFIGURED,
         data_tables_source=SOURCE_CONFIGURED,
+        original_data_sheet_source=SOURCE_CONFIGURED,
     )
     assert _templates_are_network(all_net, cfg) is True
 
@@ -170,6 +173,7 @@ def test_probe_highlights_network_and_keeps_local_gray():
             report_templates_source=SOURCE_CONFIGURED,
             leg_templates_source=SOURCE_CONFIGURED,
             data_tables_source=SOURCE_CONFIGURED,
+            original_data_sheet_source=SOURCE_CONFIGURED,
         )
     )
     assert win.chk_equipment_conn.isChecked()

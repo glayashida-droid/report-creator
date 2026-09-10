@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox, QFileDialog,
 )
 from src.ui.scroll_contain import ContainedTableWidget, ContainedTextEdit
-from PySide6.QtCore import Qt, QDate, Signal, QTimer, QEvent, QPoint
+from PySide6.QtCore import Qt, QDate, Signal, QTimer, QEvent, QPoint, QObject
 from PySide6.QtGui import QColor, QCursor, QPainter, QPixmap
 from openpyxl.utils import range_boundaries
 from src.models.project_state import (
@@ -27,6 +27,13 @@ from src.models.project_state import (
 from src.parsers.key_params import KeyParamReplaceError, apply_key_params, parse_key_params
 from src.parsers.db_loader import equipment_display_code, equipment_match_codes
 from src.language_copy import format_conclusion
+from src.generators.original_record import (
+    OriginalRecordData,
+    default_output_path,
+    generate_original_record,
+    resolve_original_record_folder,
+    resolve_original_record_template,
+)
 from src.io.data_tables import (
     DataTableError,
     PreviewSnapshot,
@@ -53,7 +60,7 @@ from src.io.special_rules import profile_from_state
 from src.ui.test_photos_panel import TestPhotosPanel, warn_duplicate_test_names
 from src.ui.data_table_template_dialog import DataTableTemplateDialog
 from src.ui.save_success_dialog import SaveSuccessDialog
-from src.ui.theme import default_project_qdate, polish_date_edit_calendar
+from src.ui.theme import polish_date_edit_calendar, set_calendar_selectable_range
 from src.ui.gantt_utils import (
     cascade_subsequent_nodes,
     find_leg_for_node,
@@ -69,6 +76,11 @@ _EQ_EXPIRED_ROLE = Qt.UserRole + 1
 _EQ_PREV_CYCLE_ROLE = Qt.UserRole + 2
 _EXPIRED_RED = QColor("#FF5555")
 _DATE_RE = re.compile(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})")
+_EARLIEST_REAL_YEAR = 1990
+
+
+def _is_blank_node_date(value):
+    return (not value.isValid()) or value.year() < _EARLIEST_REAL_YEAR
 
 
 def _cell_text(value):
@@ -587,16 +599,53 @@ class TestDetailDialog(QDialog):
         date_edit = QDateEdit()
         date_edit.setCalendarPopup(True)
         date_edit.setDisplayFormat("yyyy-MM-dd")
-        date_edit.setMinimumDate(QDate(1990, 1, 1))
-        date_edit.setMaximumDate(QDate(9999, 12, 31))
-        date_edit.setDate(default_project_qdate())
         date_edit.lineEdit().setReadOnly(True)
-        calendar = date_edit.calendarWidget()
-        if calendar is not None:
-            calendar.setMinimumDate(QDate(1990, 1, 1))
-            calendar.setMaximumDate(QDate(9999, 12, 31))
-        polish_date_edit_calendar(date_edit)
+        self._configure_optional_date(date_edit)
+        date_edit.installEventFilter(self)
+        line = date_edit.lineEdit()
+        if line is not None:
+            line.installEventFilter(self)
         return date_edit
+
+    @staticmethod
+    def _configure_optional_date(date_edit):
+        date_edit.setSpecialValueText(" ")
+        date_edit.setMinimumDate(QDate(1, 1, 1))
+        date_edit.setMaximumDate(QDate(9999, 12, 31))
+        date_edit.setDate(date_edit.minimumDate())
+        set_calendar_selectable_range(
+            date_edit,
+            QDate(_EARLIEST_REAL_YEAR, 1, 1),
+            QDate(9999, 12, 31),
+        )
+        polish_date_edit_calendar(date_edit, blank_opens_at_default_year=True)
+
+    def _clear_node_date(self, date_edit):
+        date_edit.setMinimumDate(QDate(1, 1, 1))
+        date_edit.setDate(date_edit.minimumDate())
+
+    def _date_or_none(self, date_edit):
+        value = date_edit.date()
+        if _is_blank_node_date(value):
+            return None
+        return value
+
+    def _sync_top_bar_heights(self):
+        if not hasattr(self, "txt_env_condition"):
+            return
+        env = self.txt_env_condition
+        env.setMinimumHeight(0)
+        env.setMaximumHeight(16777215)
+        height = env.sizeHint().height()
+        if height <= 0:
+            return
+        env.setFixedHeight(height)
+        for widget in (self.date_start, self.date_end, self.btn_print_raw, self.cmb_to):
+            widget.setFixedHeight(height)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_top_bar_heights()
 
     def _make_table(self, headers, min_height):
         table = ContainedTableWidget(0, len(headers))
@@ -683,6 +732,7 @@ class TestDetailDialog(QDialog):
         date_row = QHBoxLayout()
         date_row.setContentsMargins(12, 0, 0, 0)
         date_row.setSpacing(8)
+        date_row.setAlignment(Qt.AlignVCenter)
         self.date_start = self._make_calendar_date_edit()
         self.date_end = self._make_calendar_date_edit()
         for date_edit in (self.date_start, self.date_end):
@@ -724,6 +774,8 @@ class TestDetailDialog(QDialog):
         self._updating_dates = False
         self.date_start.dateChanged.connect(self._on_node_dates_changed)
         self.date_end.dateChanged.connect(self._on_node_dates_changed)
+        self._install_calendar_bounds_on_show()
+        self._sync_top_bar_heights()
         layout.addWidget(date_group)
 
         self.drawer_std = DrawerSection("测试标准", primary=True)
@@ -904,7 +956,7 @@ class TestDetailDialog(QDialog):
         self.drawer_photos.body_layout.addWidget(self.photos_panel)
         layout.addWidget(self.drawer_photos)
 
-        self.drawer_std.set_expanded(True)
+        self.drawer_std.set_expanded(False)
         self.drawer_eq.set_expanded(False)
         self.drawer_sample.set_expanded(False)
         self.drawer_photos.set_expanded(False)
@@ -944,8 +996,131 @@ class TestDetailDialog(QDialog):
         self.to_row_host.setVisible(visible)
 
     def _on_print_raw_record(self):
-        """Hook for original-record printing; template and export come later."""
-        return
+        """Export the current detail form into an original-record Word file."""
+        try:
+            template = resolve_original_record_template(
+                getattr(self._main_window(), "_network_config", None)
+            )
+        except FileNotFoundError as exc:
+            QMessageBox.warning(self, "无法导出", str(exc))
+            return
+
+        data = self._build_original_record_data()
+        if not is_usable_test_name(data.test_item):
+            QMessageBox.warning(self, "无法导出", "请先选择试验名称")
+            return
+        if not (data.leg_name or "").strip():
+            QMessageBox.warning(self, "无法导出", "缺少 Leg 名称")
+            return
+        folder = resolve_original_record_folder(
+            self._project_root(),
+            self._remote_root(),
+            leg_name=data.leg_name,
+            test_item=data.test_item,
+        )
+        if folder is None:
+            QMessageBox.warning(self, "无法导出", "找不到项目目录（公盘与本地均不可用）")
+            return
+        out_path = default_output_path(
+            folder,
+            application_no=data.application_no,
+            test_item=data.test_item,
+        )
+        try:
+            generate_original_record(data, out_path, template_path=template)
+        except Exception as exc:
+            QMessageBox.critical(self, "导出失败", f"生成原始记录时发生错误:\n{exc}")
+            return
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("导出成功")
+        msg.setText(f"原始记录已生成至:\n{out_path}")
+        btn_open = msg.addButton("打开文件", QMessageBox.ActionRole)
+        btn_folder = msg.addButton("打开所在文件夹", QMessageBox.ActionRole)
+        msg.addButton(QMessageBox.Ok)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked == btn_open:
+            self._open_path(out_path, reveal=False)
+        elif clicked == btn_folder:
+            self._open_path(out_path, reveal=True)
+
+    def _build_original_record_data(self) -> OriginalRecordData:
+        state = self._project_state
+        standards = self._selected_standards()
+        sample_ids = self._live_sample_ids()
+        app_no = ""
+        sample_name = ""
+        tester = ""
+        share = ""
+        if state is not None:
+            fields = getattr(state, "application_fields", None) or {}
+            app_no = (fields.get("申请单号") or getattr(state, "project_id", "") or "").strip()
+            sample_name = (getattr(state, "sample_name", None) or "").strip()
+            tester = (getattr(state, "tester_name", None) or "").strip()
+            share = (getattr(state, "source_path", None) or "").strip()
+
+        start = self._date_or_none(self.date_start)
+        end = self._date_or_none(self.date_end)
+        method = self.txt_std_method.text().strip()
+        env = self.txt_env_condition.text().strip()
+
+        return OriginalRecordData(
+            application_no=app_no,
+            test_item=(self.node_data.test_name or "").strip(),
+            test_method=method,
+            sample_name=sample_name,
+            sample_ids=sample_ids,
+            env_condition=env,
+            start_date=start.toString("yyyy-MM-dd") if start else "",
+            end_date=end.toString("yyyy-MM-dd") if end else "",
+            share_path=share,
+            equipments=self._selected_equipments(),
+            standards=standards,
+            tester_name=tester,
+            data_tables=list(self._data_tables or []),
+            project_path=str(self._project_root() or ""),
+            remote_root=str(self._remote_root() or ""),
+            leg_name=self._leg_name(),
+        )
+
+    def _live_sample_ids(self) -> list:
+        primary = self.table
+        if primary is None:
+            return []
+        ids = []
+        for row in range(primary.rowCount()):
+            id_widget = primary.cellWidget(row, 1)
+            if id_widget is None:
+                continue
+            text = id_widget.text().strip()
+            if text:
+                ids.append(text)
+        return ids
+
+    def _main_window(self):
+        p = self.parent()
+        while p is not None and not hasattr(p, "_network_config"):
+            p = p.parent()
+        return p
+
+    @staticmethod
+    def _open_path(path: Path, *, reveal: bool = False) -> None:
+        import os
+        import subprocess
+        import sys
+
+        target = str(path)
+        if sys.platform == "win32":
+            if reveal:
+                subprocess.run(["explorer", "/select,", target], check=False)
+            else:
+                os.startfile(target)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            args = ["open", "-R", target] if reveal else ["open", target]
+            subprocess.run(args, check=False)
+        else:
+            subprocess.run(["xdg-open", target], check=False)
 
     def _restore_selected_to(self):
         wanted = str(getattr(self.node_data, "selected_to", None) or "").strip()
@@ -1847,8 +2022,8 @@ class TestDetailDialog(QDialog):
     def _test_end_date(self):
         if not hasattr(self, "date_end"):
             return QDate()
-        end = self.date_end.date()
-        return end if end.isValid() else QDate()
+        end = self._date_or_none(self.date_end)
+        return end if end is not None else QDate()
 
     def _refresh_eq_expiry(self):
         if not hasattr(self, "eq_table"):
@@ -1873,6 +2048,11 @@ class TestDetailDialog(QDialog):
         self.eq_table.viewport().update()
 
     def eventFilter(self, obj, event):
+        if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Backspace, Qt.Key_Delete):
+            date_edit = self._date_edit_from_event_target(obj)
+            if date_edit is not None:
+                self._clear_node_date(date_edit)
+                return True
         viewport = self.eq_table.viewport() if hasattr(self, "eq_table") else None
         if obj is viewport:
             etype = event.type()
@@ -1881,6 +2061,14 @@ class TestDetailDialog(QDialog):
             elif etype in (QEvent.Leave, QEvent.HoverLeave, QEvent.Wheel):
                 self._hide_eq_expired_tip()
         return super().eventFilter(obj, event)
+
+    def _date_edit_from_event_target(self, obj):
+        for date_edit in (getattr(self, "date_start", None), getattr(self, "date_end", None)):
+            if date_edit is None:
+                continue
+            if obj is date_edit or obj is date_edit.lineEdit():
+                return date_edit
+        return None
 
     def _update_eq_expired_tip(self, pos):
         item = self.eq_table.itemAt(pos)
@@ -2233,21 +2421,30 @@ class TestDetailDialog(QDialog):
 
     def load_data(self):
         if self.node_data.start_date:
-            self.date_start.setDate(QDate.fromString(self.node_data.start_date, "yyyy-MM-dd"))
+            parsed = QDate.fromString(self.node_data.start_date, "yyyy-MM-dd")
+            if parsed.isValid() and not _is_blank_node_date(parsed):
+                self.date_start.setDate(parsed)
+            else:
+                self._clear_node_date(self.date_start)
         else:
-            self.date_start.setDate(default_project_qdate())
+            self._clear_node_date(self.date_start)
 
         if self.node_data.end_date:
-            self.date_end.setDate(QDate.fromString(self.node_data.end_date, "yyyy-MM-dd"))
+            parsed = QDate.fromString(self.node_data.end_date, "yyyy-MM-dd")
+            if parsed.isValid() and not _is_blank_node_date(parsed):
+                self.date_end.setDate(parsed)
+            else:
+                self._clear_node_date(self.date_end)
         else:
-            self.date_end.setDate(default_project_qdate())
+            self._clear_node_date(self.date_end)
 
         lo = self._start_lower_bound()
         _, hi = self._project_date_bounds()
-        self._apply_node_date_limits(lo, lo, hi)
+        start = self._date_or_none(self.date_start)
+        self._apply_node_date_limits(lo, start if start is not None else lo, hi)
 
         # Clamp current value if it violates the predecessor constraint
-        if self.date_start.date() < lo:
+        if start is not None and start < lo:
             self.date_start.setDate(lo)
 
         self._on_node_dates_changed()
@@ -2499,6 +2696,15 @@ class TestDetailDialog(QDialog):
             drawer._data_table_rel = ref.relative_path
             drawer.set_expanded(False)
             bar = QHBoxLayout()
+            chk_limit_export = QCheckBox("报告中显示限值行")
+            chk_limit_export.setObjectName("dataTableLimitExportCheck")
+            chk_limit_export.setChecked(
+                bool(getattr(ref, "include_limit_row_in_report", False))
+            )
+            chk_limit_export.setToolTip(
+                "勾选后本次导出报告/原始记录时包含限值行（默认不包含，不落盘）"
+            )
+            bar.addWidget(chk_limit_export)
             bar.addStretch()
             btn_import = QPushButton("导入样品编号")
             btn_import.setToolTip("从当前样品表写入本表第 1 列（有内容则左插一列），从第 2 行起")
@@ -2520,10 +2726,6 @@ class TestDetailDialog(QDialog):
             btn_validate.setObjectName("accentButton")
             btn_validate.setToolTip("按表内限值行校验数据列是否超限")
             bar.addWidget(btn_validate)
-            chk_limit_export = QCheckBox("报告中显示限值行")
-            chk_limit_export.setChecked(False)
-            chk_limit_export.setToolTip("勾选后本次导出 Word 时包含限值行（默认不包含，不落盘）")
-            bar.addWidget(chk_limit_export)
             btn_delete = QPushButton("删除")
             btn_delete.setToolTip("从列表移除并删除本地附件文件")
             btn_delete.clicked.connect(
@@ -2886,14 +3088,42 @@ class TestDetailDialog(QDialog):
         return lo, hi
 
     def _apply_node_date_limits(self, start_lo, end_lo, hi):
+        if not start_lo.isValid() or start_lo.year() < _EARLIEST_REAL_YEAR:
+            start_lo = QDate(_EARLIEST_REAL_YEAR, 1, 1)
+        if not end_lo.isValid() or end_lo.year() < _EARLIEST_REAL_YEAR:
+            end_lo = start_lo
         if hi < start_lo:
             hi = QDate(9999, 12, 31)
         if hi < end_lo:
             hi = QDate(9999, 12, 31)
-        self.date_start.setMinimumDate(start_lo)
-        self.date_start.setMaximumDate(hi)
-        self.date_end.setMinimumDate(end_lo)
-        self.date_end.setMaximumDate(hi)
+        set_calendar_selectable_range(self.date_start, start_lo, hi)
+        set_calendar_selectable_range(self.date_end, end_lo, hi)
+
+    def _install_calendar_bounds_on_show(self):
+        """Re-apply selectable range whenever a calendar popup opens."""
+
+        class _BoundsFilter(QObject):
+            def __init__(self, dialog):
+                super().__init__(dialog)
+                self._dialog = dialog
+
+            def eventFilter(self, obj, event):
+                if event.type() == QEvent.Show:
+                    self._dialog._refresh_node_date_calendar_bounds()
+                return False
+
+        filt = _BoundsFilter(self)
+        self._calendar_bounds_filter = filt
+        for date_edit in (self.date_start, self.date_end):
+            calendar = date_edit.calendarWidget()
+            if calendar is not None:
+                calendar.installEventFilter(filt)
+
+    def _refresh_node_date_calendar_bounds(self):
+        lo = self._start_lower_bound()
+        _, hi = self._project_date_bounds()
+        start = self._date_or_none(self.date_start)
+        self._apply_node_date_limits(lo, start if start is not None else lo, hi)
 
     def _start_lower_bound(self) -> QDate:
         """Earliest allowed start date: max(project start, prev node end)."""
@@ -2910,43 +3140,42 @@ class TestDetailDialog(QDialog):
         try:
             lo = self._start_lower_bound()
             _, hi = self._project_date_bounds()
-            self._apply_node_date_limits(lo, lo, hi)
-
-            start = self.date_start.date()
-            end = self.date_end.date()
+            start = self._date_or_none(self.date_start)
+            end = self._date_or_none(self.date_end)
             source = self.sender()
 
-            if start < lo:
+            if start is not None and start < lo:
                 start = lo
                 self.date_start.setDate(start)
 
-            if source is self.date_start:
-                if start > end:
+            if start is not None and end is not None:
+                if source is self.date_start:
+                    if start > end:
+                        end = start
+                        self.date_end.setDate(end)
+                elif source is self.date_end:
+                    if end < start:
+                        start = end
+                        if start < lo:
+                            start = lo
+                        self.date_start.setDate(start)
+                elif start > end:
                     end = start
                     self.date_end.setDate(end)
-            elif source is self.date_end:
-                if end < start:
-                    start = end
-                    if start < lo:
-                        start = lo
-                    self.date_start.setDate(start)
-            elif start > end:
-                end = start
-                self.date_end.setDate(end)
 
-            self._apply_node_date_limits(lo, start, hi)
+            self._apply_node_date_limits(lo, start if start is not None else lo, hi)
         finally:
             self._updating_dates = False
         self._refresh_eq_expiry()
 
     def _apply_schedule_dates(self) -> bool:
-        start = self.date_start.date()
-        end = self.date_end.date()
-        if start > end:
+        start = self._date_or_none(self.date_start)
+        end = self._date_or_none(self.date_end)
+        if start is not None and end is not None and start > end:
             QMessageBox.warning(self, "错误", "开始日期不能晚于结束日期！")
             return False
-        self.node_data.start_date = start.toString("yyyy-MM-dd")
-        self.node_data.end_date = end.toString("yyyy-MM-dd")
+        self.node_data.start_date = start.toString("yyyy-MM-dd") if start else None
+        self.node_data.end_date = end.toString("yyyy-MM-dd") if end else None
         env = self.txt_env_condition.text().strip()
         self.node_data.env_condition = env or None
         method = self.txt_std_method.text().strip()

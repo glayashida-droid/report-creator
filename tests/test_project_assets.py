@@ -8,6 +8,8 @@ from PIL import Image
 
 from src.io.project_assets import (
     download_photo_to_album,
+    invalidate_thumbs_for_album_files,
+    invalidate_thumbs_for_files,
     list_merged_albums,
     list_merged_attachment_refs,
     list_merged_photos,
@@ -15,12 +17,16 @@ from src.io.project_assets import (
     move_photo_to_spare,
     original_view_path,
     preview_path_for_photo,
+    reconcile_divergent_album_names,
     rename_all_merged_in_album,
     rename_merged_photo,
     renumber_merged_photos,
     resolve_data_table_path,
     resolve_photo_path,
+    resolve_spare_folder_to_open,
     restore_photo_from_spare,
+    spare_dir,
+    thumbnail_cache_path,
     thumbnail_for_photo,
 )
 from src.io.test_photos import (
@@ -64,7 +70,8 @@ def test_merged_photos_cloud_only_local_only_and_local_wins(tmp_path: Path):
     remote = tmp_path / "remote"
     _png(_album(remote) / "cloud.png", "blue")
     _png(_album(local) / "local.png", "green")
-    _png(_album(remote) / "both.png", "yellow")
+    # Identical bytes on both roots → true sync copy; local wins, one entry.
+    _png(_album(remote) / "both.png", "orange")
     _png(_album(local) / "both.png", "orange")
 
     merged = list_merged_photos(local, remote, LEG, TEST, "试验前")
@@ -84,6 +91,53 @@ def test_merged_photos_cloud_only_local_only_and_local_wins(tmp_path: Path):
     assert both.is_cloud_only is False
     assert both.read_path == _album(local) / "both.png"
     assert resolve_photo_path(local, remote, both.relative_path) == both.read_path
+
+
+def test_reconcile_renames_divergent_remote_so_four_photos_show(tmp_path: Path):
+    """Local 001/002 + remote 001/005 (001 differs) → remote 001 becomes 003."""
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    _jpeg(_album(local) / "试验前-001.jpg", "red")
+    _jpeg(_album(local) / "试验前-002.jpg", "green")
+    _jpeg(_album(remote) / "试验前-001.jpg", "blue")
+    _jpeg(_album(remote) / "试验前-005.jpg", "yellow")
+
+    before = list_merged_photos(local, remote, LEG, TEST, "试验前")
+    assert len(before) == 3
+    assert sum(1 for p in before if p.is_cloud_only) == 1
+
+    renamed = reconcile_divergent_album_names(local, remote, LEG, TEST, "试验前")
+    assert len(renamed) == 1
+    assert Path(renamed[0]).name == "试验前-003.jpg"
+    assert (_album(remote) / "试验前-003.jpg").is_file()
+    assert not (_album(remote) / "试验前-001.jpg").exists()
+    assert (_album(local) / "试验前-001.jpg").is_file()
+
+    after = list_merged_photos(local, remote, LEG, TEST, "试验前")
+    by_name = {Path(p.relative_path).name: p for p in after}
+    assert set(by_name) == {
+        "试验前-001.jpg",
+        "试验前-002.jpg",
+        "试验前-003.jpg",
+        "试验前-005.jpg",
+    }
+    assert by_name["试验前-001.jpg"].is_cloud_only is False
+    assert by_name["试验前-002.jpg"].is_cloud_only is False
+    assert by_name["试验前-003.jpg"].is_cloud_only is True
+    assert by_name["试验前-005.jpg"].is_cloud_only is True
+
+
+def test_reconcile_leaves_identical_sync_copies(tmp_path: Path):
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    _jpeg(_album(local) / "试验前-001.jpg", "red")
+    _jpeg(_album(remote) / "试验前-001.jpg", "red")
+
+    assert reconcile_divergent_album_names(local, remote, LEG, TEST, "试验前") == []
+    assert (_album(remote) / "试验前-001.jpg").is_file()
+    merged = list_merged_photos(local, remote, LEG, TEST, "试验前")
+    assert len(merged) == 1
+    assert merged[0].is_cloud_only is False
 
 
 def test_merged_albums_exclude_spare_and_union_roots(tmp_path: Path):
@@ -116,6 +170,29 @@ def test_list_merged_spare_photos_shows_recycle_not_export(tmp_path: Path):
     assert list_merged_photos(local, remote, LEG, TEST, SPARE_ALBUM_NAME) == []
     assert SPARE_ALBUM_NAME not in list_merged_albums(local, remote, LEG, TEST)
     assert "gone-local.png" not in [p.name for p in iter_export_photos(local, LEG, TEST, remote_root=remote)]
+
+
+def test_resolve_spare_folder_prefers_reachable_remote(tmp_path: Path):
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    local.mkdir()
+    remote.mkdir()
+    path, kind = resolve_spare_folder_to_open(local, remote, LEG, TEST)
+    assert kind == "remote"
+    assert path == spare_dir(remote, LEG, TEST)
+    assert path.is_dir()
+    assert not spare_dir(local, LEG, TEST).exists()
+
+
+def test_resolve_spare_folder_falls_back_to_local(tmp_path: Path):
+    local = tmp_path / "local"
+    local.mkdir()
+    path, kind = resolve_spare_folder_to_open(
+        local, tmp_path / "offline-remote", LEG, TEST
+    )
+    assert kind == "local"
+    assert path == spare_dir(local, LEG, TEST)
+    assert path.is_dir()
 
 
 def test_thumbnail_caches_under_local_thumbs(tmp_path: Path):
@@ -373,4 +450,66 @@ def test_renumber_drops_stale_thumbs_for_reused_names(tmp_path: Path):
         assert img.getpixel((0, 0))[2] >= 200
     with Image.open(new_b) as img:
         assert img.getpixel((0, 0))[0] >= 200
+
+
+def test_copy2_older_source_keeps_stale_thumb_until_invalidated(tmp_path: Path):
+    import os
+    import shutil
+    import time
+
+    local = tmp_path / "local"
+    album = _album(local)
+    first = _png(album / "试验前-001.png", "red")
+    rel = first.relative_to(local).as_posix()
+    old_thumb = thumbnail_for_photo(local, rel, first, size=48)
+    with Image.open(old_thumb) as img:
+        assert img.getpixel((0, 0))[0] >= 200
+
+    incoming = tmp_path / "cam.png"
+    _png(incoming, "blue")
+    older = time.time() - 7 * 24 * 3600
+    os.utime(incoming, (older, older))
+    first.unlink()
+    dest = album / "试验前-001.png"
+    shutil.copy2(incoming, dest)
+    stale = thumbnail_for_photo(local, rel, dest, size=48)
+    with Image.open(stale) as img:
+        assert img.getpixel((0, 0))[0] >= 200
+
+    invalidate_thumbs_for_files(local, [dest])
+    fresh = thumbnail_for_photo(local, rel, dest, size=48)
+    with Image.open(fresh) as img:
+        assert img.getpixel((0, 0))[2] >= 200
+
+
+def test_move_to_spare_then_reimport_does_not_reuse_stale_thumb(tmp_path: Path):
+    import os
+    import time
+
+    from src.io.test_photos import copy_into_album
+
+    local = tmp_path / "local"
+    album = _album(local)
+    first = _png(album / "试验前-001.png", "red")
+    rel = first.relative_to(local).as_posix()
+    old_thumb = thumbnail_for_photo(local, rel, first, size=48)
+    assert old_thumb.is_file()
+    with Image.open(old_thumb) as img:
+        assert img.getpixel((0, 0))[0] >= 200
+
+    move_photo_to_spare(local, None, rel)
+    assert not thumbnail_cache_path(local, rel, size=48).is_file()
+
+    incoming = tmp_path / "cam.png"
+    _png(incoming, "blue")
+    older = time.time() - 7 * 24 * 3600
+    os.utime(incoming, (older, older))
+    written = copy_into_album(album, [incoming], "试验前")
+    dest = written[0]
+    dest_rel = dest.relative_to(local).as_posix()
+    assert dest_rel == rel
+    invalidate_thumbs_for_album_files(album, written)
+    new_thumb = thumbnail_for_photo(local, dest_rel, dest, size=48)
+    with Image.open(new_thumb) as img:
+        assert img.getpixel((0, 0))[2] >= 200
 

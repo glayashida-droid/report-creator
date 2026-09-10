@@ -164,6 +164,18 @@ def locate_project_intranet_folder(
     return IntranetLocateResult("found", found)
 
 
+def resolve_project_folder_to_open(
+    remote: Optional[Path],
+    local: Optional[Path],
+) -> tuple[Optional[Path], str]:
+    """Prefer a reachable 公盘 folder; fall back to the local mirror."""
+    if remote is not None and remote.is_dir():
+        return remote, "remote"
+    if local is not None and local.is_dir():
+        return local, "local"
+    return None, "none"
+
+
 def open_folder_in_file_manager(
     path: Path | str,
     *,
