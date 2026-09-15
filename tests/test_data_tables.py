@@ -2,11 +2,13 @@ import tempfile
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.utils import get_column_letter
 
 from src.io.data_tables import (
     DataTableError,
     PreviewSnapshot,
     attachment_dir,
+    content_column_groups,
     copy_from_template,
     create_blank_workbook,
     decimal_places,
@@ -28,6 +30,8 @@ from src.io.data_tables import (
     resolve_open_argv,
     retarget_node_data_tables,
     rewrite_test_dir_in_relative_path,
+    slice_preview_snapshot,
+    split_preview_snapshot_for_page,
     upload_existing_xlsx,
     value_violates_limit,
 )
@@ -772,6 +776,60 @@ def test_prepare_display_snapshot_single_limit_spans_data_cols():
     assert any("B2:C2" == m or m.startswith("B2:") for m in out.merges)
 
 
+def _five_point_snapshot(*, copies: int = 1) -> PreviewSnapshot:
+    """Build a 5-point-style header: sample + N×(-40/25/85 × 9/14/16V)."""
+    temps = ["-40°C", "25°C", "85°C"] * copies
+    volts = ["9V", "14V", "16V"]
+    row0 = ["样品编号 / Sample No."]
+    row1 = [""]
+    merges: list[str] = []
+    col = 1
+    for temp in temps:
+        row0.append(temp)
+        row0.extend(["", ""])
+        row1.extend(volts)
+        start = get_column_letter(col + 1)
+        end = get_column_letter(col + 3)
+        merges.append(f"{start}1:{end}1")
+        col += 3
+    merges.append("A1:A2")
+    values = [
+        row0,
+        row1,
+        ["A01"] + ["1"] * (len(row0) - 1),
+        ["A02"] + ["2"] * (len(row0) - 1),
+    ]
+    return PreviewSnapshot(sheet_name="S", values=values, merges=merges)
+
+
+def test_content_column_groups_keeps_temperature_blocks():
+    snap = _five_point_snapshot(copies=1)
+    groups = content_column_groups(snap)
+    assert groups == [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+
+
+def test_split_preview_snapshot_repeats_sample_and_keeps_merges():
+    snap = _five_point_snapshot(copies=2)  # 18 content cols
+    assert max(len(r) for r in snap.values) == 19
+    chunks = split_preview_snapshot_for_page(snap, max_content_cols=12)
+    assert len(chunks) == 2
+    assert max(len(r) for r in chunks[0].values) == 13  # sample + 12
+    assert max(len(r) for r in chunks[1].values) == 7  # sample + 6
+    for chunk in chunks:
+        assert chunk.values[0][0].startswith("样品编号")
+        assert chunk.values[2][0] == "A01"
+        groups = content_column_groups(chunk)
+        assert all(len(g) == 3 for g in groups)
+
+
+def test_slice_preview_snapshot_remaps_merges():
+    snap = _five_point_snapshot(copies=1)
+    sliced = slice_preview_snapshot(snap, [0, 7, 8, 9])  # sample + 85°C block
+    assert sliced.values[0][1] == "85°C"
+    assert "B1:D1" in sliced.merges
+    assert "A1:A2" in sliced.merges
+
+
 if __name__ == "__main__":
     test_create_blank_workbook_writes_xlsx_and_returns_ref()
     test_create_blank_rejects_unusable_test_name()
@@ -804,4 +862,7 @@ if __name__ == "__main__":
     test_list_templates_returns_xlsx_sorted_by_name()
     test_delete_attachment_removes_file_missing_is_noop()
     test_retarget_node_data_tables()
+    test_content_column_groups_keeps_temperature_blocks()
+    test_split_preview_snapshot_repeats_sample_and_keeps_merges()
+    test_slice_preview_snapshot_remaps_merges()
     print("test_data_tables: ok")

@@ -377,6 +377,77 @@ def test_rename_merged_photo_stem_conflict_across_roots(tmp_path: Path):
     assert Path(new_rel).name == "样品.jpg"
 
 
+def test_rename_merged_photo_completes_when_local_already_renamed(tmp_path: Path):
+    """Local dest already exists (Finder / partial rename); finish remote, no conflict."""
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    src = _png(_album(local) / "试验前-001.png", "red")
+    _png(_album(remote) / "试验前-001.png", "red")
+    rel = src.relative_to(local).as_posix()
+    src.rename(_album(local) / "123.png")
+
+    new_rel = rename_merged_photo(local, remote, rel, "123")
+    assert Path(new_rel).name == "123.png"
+    assert (_album(local) / "123.png").is_file()
+    assert (_album(remote) / "123.png").is_file()
+    assert not (_album(remote) / "试验前-001.png").exists()
+
+
+def test_rename_merged_photo_already_at_dest_is_success(tmp_path: Path):
+    local = tmp_path / "local"
+    src = _png(_album(local) / "试验前-001.png", "red")
+    rel = src.relative_to(local).as_posix()
+    src.rename(_album(local) / "123.png")
+
+    new_rel = rename_merged_photo(local, None, rel, "123")
+    assert Path(new_rel).name == "123.png"
+    assert (_album(local) / "123.png").is_file()
+
+
+def test_rename_merged_photo_invalidates_thumbs(tmp_path: Path):
+    local = tmp_path / "local"
+    src = _png(_album(local) / "old.png", "red")
+    rel = src.relative_to(local).as_posix()
+    thumb = thumbnail_for_photo(local, rel, src, size=48)
+    assert thumb.is_file()
+
+    new_rel = rename_merged_photo(local, None, rel, "new")
+    assert not thumbnail_cache_path(local, rel, size=48).is_file()
+    dest = local / new_rel
+    fresh = thumbnail_for_photo(local, new_rel, dest, size=48)
+    with Image.open(fresh) as img:
+        assert img.getpixel((0, 0))[0] >= 200
+
+
+def test_rename_merged_photo_rolls_back_when_second_root_fails(tmp_path: Path, monkeypatch):
+    from src.io.project_assets import _rename_path
+
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    src = _png(_album(local) / "old.png", "red")
+    _png(_album(remote) / "old.png", "red")
+    rel = src.relative_to(local).as_posix()
+    real = _rename_path
+    calls = {"n": 0}
+
+    def boom(src_path, dest_path):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise PhotoError("无法重命名照片，请检查公盘是否可写")
+        real(src_path, dest_path)
+
+    monkeypatch.setattr("src.io.project_assets._rename_path", boom)
+    try:
+        rename_merged_photo(local, remote, rel, "new")
+        raise AssertionError("expected failure")
+    except PhotoError:
+        pass
+    assert (_album(local) / "old.png").is_file()
+    assert (_album(remote) / "old.png").is_file()
+    assert not (_album(local) / "new.png").exists()
+    assert not (_album(remote) / "new.png").exists()
+
+
 def test_rename_all_merged_includes_cloud_exif_order(tmp_path: Path):
     local = tmp_path / "local"
     remote = tmp_path / "remote"

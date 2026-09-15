@@ -236,6 +236,90 @@ def _assert_sample_block_vmerges(table, merge_cols: list[int]) -> None:
                 )
 
 
+def test_generate_original_record_embeds_standard_images_like_report(tmp_path: Path):
+    """测试参数 cell: text then blank then library images, same width as report."""
+    from docx.shared import Inches
+
+    from src.generators.word_engine import WordGenerator
+
+    _MIN_PNG = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\xcf\xc0"
+        b"\x00\x00\x03\x01\x01\x00\xc9\xfe\x92\xef\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    from PIL import Image
+    import io
+
+    im = Image.new("RGB", (900, 300), (20, 20, 20))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    png = buf.getvalue()
+    expected_w = WordGenerator._condition_image_width_in(png)
+
+    data = OriginalRecordData(
+        application_no="A1",
+        test_item="振动",
+        standards=[
+            StdModel(
+                test_name="机械冲击",
+                standard_desc="冲击条件正文。",
+                images=[png],
+            ),
+            StdModel(
+                test_name="防尘实验",
+                standard_desc="防尘条件正文。",
+                images=[_MIN_PNG, png],
+            ),
+        ],
+    )
+    out = tmp_path / "with_imgs.docx"
+    generate_original_record(data, out, template_path=TEMPLATE)
+    doc = Document(str(out))
+
+    cell = None
+    for table in doc.tables:
+        for row in table.rows:
+            for tc in row._tr.tc_lst:
+                c = _Cell(tc, table)
+                if any("{{测试参数}}" in (p.text or "") for p in c.paragraphs):
+                    assert False, "placeholder should be gone"
+                texts = [p.text for p in c.paragraphs]
+                if "机械冲击" in texts and "防尘实验" in texts:
+                    cell = c
+                    break
+            if cell is not None:
+                break
+        if cell is not None:
+            break
+    assert cell is not None
+
+    paras = list(cell.paragraphs)
+    mech = next(i for i, p in enumerate(paras) if p.text == "机械冲击")
+    dust = next(i for i, p in enumerate(paras) if p.text == "防尘实验")
+    assert mech < dust
+    assert any(_para_has_image(p) for p in paras[mech:dust])
+    assert paras[mech + 2].text == ""
+    assert _para_has_image(paras[mech + 3])
+
+    dust_images = [i for i, p in enumerate(paras) if i > dust and _para_has_image(p)]
+    assert len(dust_images) == 2
+    assert paras[dust_images[0] - 1].text == ""
+    assert paras[dust_images[1] - 1].text == ""
+
+    widths = []
+    for p in paras:
+        for ext in p._element.xpath(".//a:ext"):
+            cx = ext.get("cx")
+            if cx:
+                widths.append(int(cx))
+    assert Inches(expected_w) in widths
+    assert "{{测试参数}}" not in "\n".join(p.text for p in paras)
+
+
+def _para_has_image(paragraph) -> bool:
+    return bool(paragraph._element.xpath(".//w:drawing"))
+
+
 def _write_simple_xlsx(path: Path, *, with_limit: bool, limit_value: str = "") -> None:
     wb = Workbook()
     ws = wb.active
@@ -326,3 +410,124 @@ def test_generate_original_record_omits_limit_when_unchecked(tmp_path: Path):
     assert "限值" not in joined
     assert "≤2" not in joined
     assert "1.0" in joined
+
+
+def _write_doubled_five_point_xlsx(path: Path) -> None:
+    """Copy 5点法 header blocks twice → 1 sample + 18 content cols."""
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    temps = ["-40°C", "25°C", "85°C"] * 2
+    volts = ["9V", "14V", "16V"]
+    ws["A1"] = "样品编号 / Sample No."
+    ws.merge_cells("A1:A2")
+    col = 2
+    for temp in temps:
+        start = get_column_letter(col)
+        end = get_column_letter(col + 2)
+        ws.cell(1, col, temp)
+        ws.merge_cells(f"{start}1:{end}1")
+        for i, v in enumerate(volts):
+            ws.cell(2, col + i, v)
+        col += 3
+    for r, sid in enumerate(["A01", "A02", "A03"], start=3):
+        ws.cell(r, 1, f"A22600280178-{sid}")
+        for c in range(2, col):
+            ws.cell(r, c, str(r - 2))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(path)
+    wb.close()
+
+
+def test_generate_original_record_data_table_equal_widths(tmp_path: Path):
+    from src.generators.word_engine import _OR_SAMPLE_COL_DXA, _OR_TABLE_WIDTH_DXA
+
+    project = tmp_path / "proj"
+    x1 = project / "t1.xlsx"
+    _write_simple_xlsx(x1, with_limit=False)
+    refs = [
+        DataRef(title="工况", relative_path=str(x1.relative_to(project))),
+    ]
+    data = OriginalRecordData(
+        test_item="Dust",
+        sample_ids=["A01"],
+        project_path=str(project),
+        data_tables=refs,
+        standards=[StdModel(test_name="沙尘")],
+    )
+    out = tmp_path / "eq.docx"
+    generate_original_record(data, out, template_path=TEMPLATE)
+    doc = Document(str(out))
+
+    # Find the generated data table (2 cols: 样品编号 + 读数)
+    data_table = None
+    for t in doc.tables:
+        texts = [_Cell(tc, t).text for row in t.rows for tc in row._tr.tc_lst]
+        if any("读数" in (x or "") for x in texts):
+            data_table = t
+            break
+    assert data_table is not None
+    grid = data_table._tbl.find(qn("w:tblGrid"))
+    widths = [int(gc.get(qn("w:w"))) for gc in grid.findall(qn("w:gridCol"))]
+    assert widths[0] == _OR_SAMPLE_COL_DXA
+    assert sum(widths) == _OR_TABLE_WIDTH_DXA
+    assert len(widths) == 2
+    assert widths[1] == _OR_TABLE_WIDTH_DXA - _OR_SAMPLE_COL_DXA
+    tblPr = data_table._tbl.tblPr
+    tblW = tblPr.find(qn("w:tblW"))
+    layout = tblPr.find(qn("w:tblLayout"))
+    ind = tblPr.find(qn("w:tblInd"))
+    assert tblW is not None and tblW.get(qn("w:w")) == str(_OR_TABLE_WIDTH_DXA)
+    assert tblW.get(qn("w:type")) == "dxa"
+    assert layout is not None and layout.get(qn("w:type")) == "fixed"
+    assert ind is not None and ind.get(qn("w:w")) == "-431"
+
+
+def test_generate_original_record_splits_wide_five_point_table(tmp_path: Path):
+    from src.generators.word_engine import _OR_SAMPLE_COL_DXA, _OR_TABLE_WIDTH_DXA
+
+    project = tmp_path / "proj"
+    x1 = project / "五点翻倍.xlsx"
+    _write_doubled_five_point_xlsx(x1)
+    refs = [
+        DataRef(title="5点法", relative_path=str(x1.relative_to(project))),
+    ]
+    data = OriginalRecordData(
+        test_item="Dust",
+        sample_ids=["A01", "A02", "A03"],
+        project_path=str(project),
+        data_tables=refs,
+        standards=[StdModel(test_name="沙尘")],
+    )
+    out = tmp_path / "wide.docx"
+    generate_original_record(data, out, template_path=TEMPLATE)
+    doc = Document(str(out))
+    paras = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+    assert "5点法" in paras
+    assert "5点法（续）" in paras
+
+    data_tables = []
+    for t in doc.tables:
+        grid = t._tbl.find(qn("w:tblGrid"))
+        if grid is None:
+            continue
+        widths = [int(gc.get(qn("w:w"))) for gc in grid.findall(qn("w:gridCol"))]
+        joined = " ".join(
+            (_Cell(tc, t).text or "") for row in t.rows for tc in row._tr.tc_lst
+        )
+        if "9V" in joined and "样品编号 / Sample No." in joined:
+            data_tables.append((t, widths, joined))
+    assert len(data_tables) == 2
+    # First chunk: as many full temp blocks as fit; second starts mid-sequence
+    # without breaking a 3-col merge (no orphan 9V without its °C header).
+    assert "-40°C" in data_tables[0][2]
+    assert "25°C" in data_tables[1][2] or "85°C" in data_tables[1][2]
+    for _t, widths, joined in data_tables:
+        assert "样品编号 / Sample No." in joined
+        assert widths[0] == _OR_SAMPLE_COL_DXA
+        assert sum(widths) == _OR_TABLE_WIDTH_DXA
+        content = widths[1:]
+        assert max(content) - min(content) <= len(content)  # drift on last col
+        assert len(content) % 3 == 0
+        assert all(w == content[0] for w in content[:-1])

@@ -657,6 +657,75 @@ def test_photo_thumb_tooltip_shows_filename(tmp_path):
     assert item.toolTip() == "试验前-001.png"
 
 
+def test_rename_photo_reloads_gallery_when_disk_already_renamed(tmp_path, monkeypatch):
+    import sys
+
+    from PySide6.QtWidgets import QApplication
+
+    from src.ui.test_photos_panel import PHOTO_REL_ROLE, PhotoAlbumRow
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    local.mkdir()
+    album = create_album(local, "Leg 1", "高温试验", "试验前")
+    create_album(remote, "Leg 1", "高温试验", "试验前")
+    _png(album / "试验前-001.png", "red")
+    _png(_dir(remote, "高温试验") / "试验前" / "试验前-001.png", "red")
+    row = PhotoAlbumRow(
+        local, "Leg 1", "高温试验", "试验前", "P1", remote_root=remote
+    )
+    assert row.gallery.item(0).text() == "试验前-001.png"
+    (album / "试验前-001.png").rename(album / "123.png")
+    warnings = []
+    monkeypatch.setattr(
+        "src.ui.test_photos_panel.QInputDialog.getText",
+        lambda *a, **k: ("123.png", True),
+    )
+    monkeypatch.setattr(
+        "src.ui.test_photos_panel.QMessageBox.warning",
+        lambda *a, **k: warnings.append(a),
+    )
+    rel = row.gallery.item(0).data(PHOTO_REL_ROLE)
+    row._rename_photo(rel)
+    assert warnings == []
+    assert row.gallery.item(0).text() == "123.png"
+
+
+def test_rename_photo_reloads_gallery_after_error(tmp_path, monkeypatch):
+    import sys
+
+    from PySide6.QtWidgets import QApplication
+
+    from src.ui.test_photos_panel import PhotoAlbumRow
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    album = create_album(tmp_path, "Leg 1", "高温试验", "试验前")
+    src = _png(album / "试验前-001.png", "red")
+    row = PhotoAlbumRow(tmp_path, "Leg 1", "高温试验", "试验前", "P1")
+    src.rename(album / "123.png")
+    monkeypatch.setattr(
+        "src.ui.test_photos_panel.QInputDialog.getText",
+        lambda *a, **k: ("nope.png", True),
+    )
+    monkeypatch.setattr(
+        "src.ui.test_photos_panel.rename_merged_photo",
+        lambda *a, **k: (_ for _ in ()).throw(PhotoError("已存在同名文件：nope.png")),
+    )
+    warnings = []
+    monkeypatch.setattr(
+        "src.ui.test_photos_panel.QMessageBox.warning",
+        lambda *a, **k: warnings.append(str(a[2]) if len(a) > 2 else ""),
+    )
+    row._rename_photo("3.测试组/Leg 1-高温试验/试验前/试验前-001.png")
+    assert warnings
+    assert row.gallery.item(0).text() == "123.png"
+
+
 def test_photo_thumb_cloud_tooltip_allows_rename(tmp_path):
     import sys
 

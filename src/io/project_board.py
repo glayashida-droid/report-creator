@@ -164,15 +164,55 @@ def locate_project_intranet_folder(
     return IntranetLocateResult("found", found)
 
 
+def _same_dir(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return os.fspath(left) == os.fspath(right)
+
+
+def _project_folder_candidates(remote: Optional[Path]) -> list[Path]:
+    if remote is None:
+        return []
+    text = os.fspath(remote).strip()
+    if not text:
+        return []
+    out: list[Path] = []
+    seen: set[str] = set()
+    for variant in (text, normalize_config_path(text)):
+        if not variant or variant in seen:
+            continue
+        seen.add(variant)
+        out.append(Path(variant))
+    return out
+
+
 def resolve_project_folder_to_open(
     remote: Optional[Path],
     local: Optional[Path],
 ) -> tuple[Optional[Path], str]:
-    """Prefer a reachable 公盘 folder; fall back to the local mirror."""
-    if remote is not None and remote.is_dir():
-        return remote, "remote"
-    if local is not None and local.is_dir():
-        return local, "local"
+    """Prefer a reachable 公盘 folder; fall back to the local mirror.
+
+    Kind is ``remote``, ``disconnected`` (公盘 configured but unreachable),
+    ``local`` (no distinct 公盘 path), or ``none``.
+    """
+    local_dir = local if local is not None and _is_dir(local) else None
+    remote_dir: Optional[Path] = None
+    distinct_remote = False
+    for candidate in _project_folder_candidates(remote):
+        if _is_dir(candidate):
+            if local_dir is not None and _same_dir(candidate, local_dir):
+                continue
+            remote_dir = candidate
+            break
+        if local_dir is None or not _same_dir(candidate, local_dir):
+            distinct_remote = True
+    if remote_dir is not None:
+        return remote_dir, "remote"
+    if local_dir is not None:
+        if distinct_remote:
+            return local_dir, "disconnected"
+        return local_dir, "local"
     return None, "none"
 
 

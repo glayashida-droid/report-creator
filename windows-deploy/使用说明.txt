@@ -15,6 +15,12 @@ Report Creator - Windows 部署说明
 3. 双击 update.bat
 4. 确认安装目录后开始同步；脚本会自动更新依赖，并刷新桌面快捷方式图标
 
+【不会同步的内容】
+setup.bat / update.bat 同步时会跳过 data\ 与 templates\：
+- data\：开发机上已载入的项目镜像，避免无用项目落到使用者电脑
+- templates\：本地模版副本可能过期，使用者侧应走公盘/配置中的模版路径
+目标机上已有的这两类目录不会被脚本删除，只是不再从 U 盘覆盖过去。
+
 【环境要求】
 - Windows 10 或更高版本
 - 首次部署建议联网（仅用于自动安装 Python 3.12；依赖包已预下载到 windows-deploy\wheels）

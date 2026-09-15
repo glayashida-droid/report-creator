@@ -1171,7 +1171,6 @@ class PhotoAlbumRow(QFrame):
             rename_merged_photo(self.project_root, self.remote_root, rel, text)
         except PhotoError as exc:
             QMessageBox.warning(self, "提示", str(exc))
-            return
         self._on_thumb_renamed()
 
     def _delete_photo(self, rel: str):

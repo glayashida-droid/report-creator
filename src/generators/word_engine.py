@@ -20,6 +20,7 @@ from openpyxl.utils.cell import range_boundaries
 from src.io.data_tables import (
     infer_header_row_count,
     prepare_display_snapshot,
+    split_preview_snapshot_for_page,
     read_preview_snapshot,
 )
 from src.io.project_assets import (
@@ -87,6 +88,13 @@ _WIDTHS_SUMMARY = (704, 2090, 1690, 1400, 1500, 1418)
 _WIDTHS_SUMMARY_BASE = (704, 2400, 2000, 2200, 1498)
 _WIDTHS_EQUIPMENT = (704, 2693, 1843, 2126, 1418)
 _WIDTHS_SAMPLE_RESULT = (1523, 6269, 1353)
+
+# Original-record body tables (result-table grid in original_record_placeholders.docx)
+_OR_SAMPLE_COL_DXA = 1986
+_OR_TABLE_WIDTH_DXA = 10491
+_OR_TABLE_INDENT_DXA = -431  # matches result / cover tables in the template
+# Floor for equal-share content columns before splitting a data table
+_DATA_TABLE_MIN_CONTENT_DXA = 700
 
 # Homepage overview keys that belong in the dynamic 样品信息表 (label as-is).
 # Dates / quantity / see-below rows are appended by the engine.
@@ -808,6 +816,47 @@ class WordGenerator:
                 cell.width = Twips(int(cols[idx]))
 
     @staticmethod
+    def _set_table_fixed_width(
+        table,
+        total_dxa: int,
+        *,
+        indent_dxa: int | None = None,
+    ) -> None:
+        """Force Word to honor column widths (fixed layout + explicit tblW).
+
+        Original-record body tables also use a negative tblInd so the grid lines
+        up with the result / summary tables above and below.
+        """
+        tbl = table._tbl
+        tblPr = tbl.tblPr
+        if tblPr is None:
+            tblPr = OxmlElement("w:tblPr")
+            tbl.insert(0, tblPr)
+
+        tblW = tblPr.find(qn("w:tblW"))
+        if tblW is None:
+            tblW = OxmlElement("w:tblW")
+            tblPr.append(tblW)
+        tblW.set(qn("w:w"), str(int(total_dxa)))
+        tblW.set(qn("w:type"), "dxa")
+
+        layout = tblPr.find(qn("w:tblLayout"))
+        if layout is None:
+            layout = OxmlElement("w:tblLayout")
+            tblPr.append(layout)
+        layout.set(qn("w:type"), "fixed")
+
+        if indent_dxa is not None:
+            ind = tblPr.find(qn("w:tblInd"))
+            if ind is None:
+                ind = OxmlElement("w:tblInd")
+                tblPr.append(ind)
+            ind.set(qn("w:w"), str(int(indent_dxa)))
+            ind.set(qn("w:type"), "dxa")
+
+        table.alignment = WD_TABLE_ALIGNMENT.LEFT
+
+    @staticmethod
     def _estimate_col_widths(
         values: Sequence[Sequence[str]], total_dxa: int = _CONTENT_WIDTH_DXA
     ) -> List[int]:
@@ -830,6 +879,94 @@ class WordGenerator:
         if widths:
             widths[-1] = max(400, widths[-1] + drift)
         return widths
+
+    @staticmethod
+    def _data_table_col_widths(
+        n_cols: int,
+        *,
+        sample_dxa: int = _WIDTHS_SAMPLE_RESULT[0],
+        total_dxa: int = _CONTENT_WIDTH_DXA,
+    ) -> List[int]:
+        """Sample column fixed; remaining content columns share leftover width equally."""
+        n = max(1, int(n_cols))
+        total = int(total_dxa)
+        sample = int(sample_dxa)
+        if n == 1:
+            return [total]
+        sample = max(400, min(sample, total - (n - 1) * 400))
+        rest = total - sample
+        n_data = n - 1
+        base = rest // n_data
+        widths = [sample] + [base] * n_data
+        widths[-1] += rest - base * n_data
+        return widths
+
+    @staticmethod
+    def _max_data_table_content_cols(
+        *,
+        sample_dxa: int = _WIDTHS_SAMPLE_RESULT[0],
+        total_dxa: int = _CONTENT_WIDTH_DXA,
+        min_content_dxa: int = _DATA_TABLE_MIN_CONTENT_DXA,
+    ) -> int:
+        rest = max(0, int(total_dxa) - int(sample_dxa))
+        floor = max(1, int(min_content_dxa))
+        return max(1, rest // floor)
+
+    def _render_data_table_snapshot(
+        self,
+        doc: Document,
+        anchor: Paragraph,
+        snap,
+        *,
+        title: str = "",
+        sample_dxa: int = _WIDTHS_SAMPLE_RESULT[0],
+        total_dxa: int = _CONTENT_WIDTH_DXA,
+        min_content_dxa: int = _DATA_TABLE_MIN_CONTENT_DXA,
+        indent_dxa: int | None = None,
+    ) -> None:
+        """Insert one Excel snapshot as one or more equal-width Word tables."""
+        max_content = self._max_data_table_content_cols(
+            sample_dxa=sample_dxa,
+            total_dxa=total_dxa,
+            min_content_dxa=min_content_dxa,
+        )
+        chunks = split_preview_snapshot_for_page(snap, max_content_cols=max_content)
+        for idx, chunk in enumerate(chunks):
+            label = (title or "").strip()
+            if label and len(chunks) > 1 and idx > 0:
+                label = f"{label}（续）"
+            if label:
+                self._add_para_before(
+                    doc,
+                    anchor,
+                    label,
+                    size=SIZE_BODY,
+                    align=WD_ALIGN_PARAGRAPH.CENTER,
+                )
+            rows = len(chunk.values)
+            cols = max((len(r) for r in chunk.values), default=1)
+            table = self._add_table_before(doc, anchor, rows, cols)
+            widths = self._data_table_col_widths(
+                cols, sample_dxa=sample_dxa, total_dxa=total_dxa
+            )
+            self._set_col_widths(table, widths)
+            self._set_table_fixed_width(
+                table, sum(widths), indent_dxa=indent_dxa
+            )
+            self._set_table_cell_margins(table, top=20, left=40, bottom=20, right=40)
+            self._apply_snapshot_merges(table, chunk)
+            slaves = self._merged_slave_cells(chunk)
+            for r_i, row in enumerate(chunk.values):
+                for c_i in range(cols):
+                    if (r_i, c_i) in slaves:
+                        continue
+                    val = row[c_i] if c_i < len(row) else ""
+                    cell = table.rows[r_i].cells[c_i]
+                    self._set_cell_text(cell, val)
+            n_header = infer_header_row_count(chunk)
+            for i in range(min(n_header, rows)):
+                self._set_row_as_tbl_header(table.rows[i])
+            self._add_para_before(doc, anchor, "")
 
     # ------------------------------------------------------------------ cover tables
 
@@ -1477,28 +1614,14 @@ class WordGenerator:
             if not snap.values:
                 continue
             title = Path(ref.title or path.stem).stem.strip()
-            if title:
-                self._add_para_before(
-                    doc, anchor, title, size=SIZE_BODY, align=WD_ALIGN_PARAGRAPH.CENTER
-                )
-            rows = len(snap.values)
-            cols = max((len(r) for r in snap.values), default=1)
-            table = self._add_table_before(doc, anchor, rows, cols)
-            self._set_col_widths(table, self._estimate_col_widths(snap.values))
-            self._set_table_cell_margins(table, top=20, left=40, bottom=20, right=40)
-            # Merge first, then write only into merge anchors — avoids empty ¶ stacking
-            self._apply_snapshot_merges(table, snap)
-            slaves = self._merged_slave_cells(snap)
-            for r_i, row in enumerate(snap.values):
-                for c_i in range(cols):
-                    if (r_i, c_i) in slaves:
-                        continue
-                    val = row[c_i] if c_i < len(row) else ""
-                    cell = table.rows[r_i].cells[c_i]
-                    self._set_cell_text(cell, val)
-            n_header = infer_header_row_count(snap)
-            for i in range(min(n_header, rows)):
-                self._set_row_as_tbl_header(table.rows[i])
+            self._render_data_table_snapshot(
+                doc,
+                anchor,
+                snap,
+                title=title,
+                sample_dxa=_WIDTHS_SAMPLE_RESULT[0],
+                total_dxa=_CONTENT_WIDTH_DXA,
+            )
 
     def _insert_photos(
         self,

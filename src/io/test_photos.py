@@ -12,7 +12,7 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 from PIL import Image
 
 TEST_GROUP_DIR = "3.测试组"
-RENAME_CONFLICT_MESSAGE = "同名试验项目已存在，请重新命名"
+RENAME_CONFLICT_MESSAGE = "标准试验名同名文件夹已存在，卡片未改名，请留意"
 TEMPLATE_ALBUMS = ("试验前", "试验中", "数据", "试验后")
 IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 JPEG_EXTS = {".jpg", ".jpeg"}

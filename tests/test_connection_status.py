@@ -249,8 +249,40 @@ def test_resolve_project_folder_falls_back_to_local(tmp_path: Path):
     local = tmp_path / "local"
     local.mkdir()
     path, kind = resolve_project_folder_to_open(remote, local)
+    assert kind == "disconnected"
+    assert path == local
+
+
+def test_resolve_project_folder_local_only_when_remote_is_local(tmp_path: Path):
+    local = tmp_path / "local"
+    local.mkdir()
+    path, kind = resolve_project_folder_to_open(local, local)
     assert kind == "local"
     assert path == local
+
+
+def test_resolve_project_folder_local_only_when_remote_missing(tmp_path: Path):
+    local = tmp_path / "local"
+    local.mkdir()
+    path, kind = resolve_project_folder_to_open(None, local)
+    assert kind == "local"
+    assert path == local
+
+
+def test_resolve_project_folder_uses_normalized_unc(tmp_path: Path):
+    remote = tmp_path / "share" / "proj"
+    local = tmp_path / "local"
+    remote.mkdir(parents=True)
+    local.mkdir()
+    with patch(
+        "src.io.project_board.normalize_config_path",
+        return_value=str(remote),
+    ):
+        path, kind = resolve_project_folder_to_open(
+            Path(r"\\10.10.31.8\share\proj"), local
+        )
+    assert kind == "remote"
+    assert path == remote
 
 
 def test_resolve_project_folder_none_when_both_missing(tmp_path: Path):
@@ -271,7 +303,35 @@ def test_open_button_visible_when_remote_ready_before_mirror(tmp_path: Path):
     win._local_path = tmp_path / "local"
     win._set_mirror_status("镜像中...", kind="dim")
     assert not win.btn_open_local.isHidden()
-    assert "公盘" in win.btn_open_local.toolTip()
+    assert win.btn_open_local.toolTip() == "打开公盘文件夹"
+    win.close()
+
+
+def test_open_button_tooltip_local_only(tmp_path: Path):
+    _app()
+    local = tmp_path / "local"
+    local.mkdir()
+    win = MainWindow()
+    win._source_path = local
+    win.state.source_path = ""
+    win._local_path = local
+    win._refresh_open_folder_button()
+    assert not win.btn_open_local.isHidden()
+    assert win.btn_open_local.toolTip() == "打开本地文件夹"
+    win.close()
+
+
+def test_open_button_tooltip_when_remote_disconnected(tmp_path: Path):
+    _app()
+    local = tmp_path / "local"
+    local.mkdir()
+    win = MainWindow()
+    win._source_path = tmp_path / "offline-remote"
+    win.state.source_path = str(tmp_path / "offline-remote")
+    win._local_path = local
+    win._refresh_open_folder_button()
+    assert not win.btn_open_local.isHidden()
+    assert win.btn_open_local.toolTip() == "公盘未连接，打开本地文件夹"
     win.close()
 
 
@@ -317,6 +377,47 @@ def test_open_project_folder_falls_back_to_local_with_prompt(tmp_path: Path):
         with patch.object(QMessageBox, "information") as mock_info:
             win._open_project_folder()
     mock_info.assert_called_once()
-    assert "公盘不可达" in mock_info.call_args.args[2]
+    assert "公盘未连接" in mock_info.call_args.args[2]
     mock_open.assert_called_once_with(local)
+    win.close()
+
+
+def test_open_project_folder_opens_local_only_without_prompt(tmp_path: Path):
+    from PySide6.QtWidgets import QMessageBox
+
+    _app()
+    local = tmp_path / "local"
+    local.mkdir()
+    win = MainWindow()
+    win._source_path = local
+    win.state.source_path = ""
+    win._local_path = local
+    with patch("src.ui.main_window._open_in_file_manager") as mock_open:
+        with patch.object(QMessageBox, "information") as mock_info:
+            win._open_project_folder()
+    mock_open.assert_called_once_with(local)
+    mock_info.assert_not_called()
+    win.close()
+
+
+def test_open_project_folder_opens_normalized_unc_remote(tmp_path: Path):
+    from PySide6.QtWidgets import QMessageBox
+
+    _app()
+    remote = tmp_path / "share" / "proj"
+    local = tmp_path / "local"
+    remote.mkdir(parents=True)
+    local.mkdir()
+    win = MainWindow()
+    win._source_path = Path(r"\\10.10.31.8\share\proj")
+    win.state.source_path = r"\\10.10.31.8\share\proj"
+    win._local_path = local
+    with patch(
+        "src.io.project_board.normalize_config_path",
+        return_value=str(remote),
+    ), patch("src.ui.main_window._open_in_file_manager") as mock_open:
+        with patch.object(QMessageBox, "information") as mock_info:
+            win._open_project_folder()
+    mock_open.assert_called_once_with(remote)
+    mock_info.assert_not_called()
     win.close()

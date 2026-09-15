@@ -10,15 +10,18 @@ from pathlib import Path
 from typing import Iterable, List, Optional, Sequence
 
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from docx.table import Table, _Cell
 from docx.text.paragraph import Paragraph
 
-from src.generators.word_engine import WordGenerator
+from src.generators.word_engine import (
+    WordGenerator,
+    _OR_SAMPLE_COL_DXA,
+    _OR_TABLE_INDENT_DXA,
+    _OR_TABLE_WIDTH_DXA,
+)
 from src.io.data_tables import (
-    infer_header_row_count,
     prepare_display_snapshot,
     read_preview_snapshot,
 )
@@ -32,7 +35,12 @@ from src.io.project_assets import (
 )
 from src.io.project_board import PROJECT_INTRANET_SHARE
 from src.io.test_photos import is_usable_test_name, test_dir
-from src.models.project_state import DataTableRef, TestEquipment, TestStandard
+from src.models.project_state import (
+    DataTableRef,
+    TestEquipment,
+    TestNode,
+    TestStandard,
+)
 
 ORIGINAL_RECORD_TEMPLATE_NAME = "original_record_placeholders.docx"
 RESULT_TABLE_MARKER = "{{RESULT_TABLE}}"
@@ -193,6 +201,7 @@ def generate_original_record(
     _expand_result_tables(doc, data.standards or [], data.sample_ids or [])
     _remove_marker_paragraph(doc, RESULT_TABLE_MARKER)
     _fill_data_tables_section(doc, data, template_path=template)
+    _fill_test_parameters_section(doc, data.standards or [], template_path=template)
 
     placeholders = {
         "{{申请单编号}}": data.application_no or "",
@@ -204,7 +213,6 @@ def generate_original_record(
         "{{测试数量}}": str(len([s for s in (data.sample_ids or []) if str(s).strip()])),
         "{{检验时间}}": format_test_period(data.start_date, data.end_date),
         "{{公盘地址}}": format_share_path_for_record(data.share_path),
-        "{{测试参数}}": stack_standard_blocks(data.standards, "standard_desc"),
         "{{评价要求}}": stack_standard_blocks(data.standards, "evaluation_req"),
         "{{检测人}}": data.tester_name or "",
     }
@@ -213,6 +221,7 @@ def generate_original_record(
     _replace_everywhere(
         doc,
         {
+            "{{测试参数}}": "",
             "{{设备名称}}": "",
             "{{设备型号}}": "",
             "{{设备编号}}": "",
@@ -280,6 +289,29 @@ def _safe_stem(text: str) -> str:
     return cleaned.strip("._")[:80]
 
 
+def _fill_test_parameters_section(
+    doc: Document,
+    standards: Sequence[TestStandard],
+    *,
+    template_path: Path,
+) -> None:
+    """Fill {{测试参数}} like report 检测条件: text, then blank, then library images."""
+    anchor = _find_paragraph(doc, "{{测试参数}}")
+    if anchor is None:
+        return
+
+    stds = list(standards or [])
+    if not stds:
+        _replace_text_in_paragraph(anchor, {"{{测试参数}}": ""})
+        return
+
+    engine = WordGenerator(str(template_path))
+    node = TestNode(test_name="")
+    node.apply_standards(stds)
+    engine._insert_condition_section(doc, anchor, node)
+    engine._delete_paragraph(anchor)
+
+
 def _fill_data_tables_section(
     doc: Document,
     data: OriginalRecordData,
@@ -335,33 +367,15 @@ def _fill_data_tables_section(
     engine = WordGenerator(str(template_path))
     for ref, path, snap in loaded:
         title = Path(ref.title or path.stem).stem.strip()
-        if title:
-            engine._add_para_before(
-                doc,
-                anchor,
-                title,
-                size=10.5,
-                align=WD_ALIGN_PARAGRAPH.CENTER,
-            )
-        rows = len(snap.values)
-        cols = max((len(r) for r in snap.values), default=1)
-        table = engine._add_table_before(doc, anchor, rows, cols)
-        engine._set_col_widths(table, engine._estimate_col_widths(snap.values))
-        engine._set_table_cell_margins(table, top=20, left=40, bottom=20, right=40)
-        engine._apply_snapshot_merges(table, snap)
-        slaves = engine._merged_slave_cells(snap)
-        for r_i, row in enumerate(snap.values):
-            for c_i in range(cols):
-                if (r_i, c_i) in slaves:
-                    continue
-                val = row[c_i] if c_i < len(row) else ""
-                cell = table.rows[r_i].cells[c_i]
-                engine._set_cell_text(cell, val)
-        n_header = infer_header_row_count(snap)
-        for i in range(min(n_header, rows)):
-            engine._set_row_as_tbl_header(table.rows[i])
-        # spacer between stacked tables
-        engine._add_para_before(doc, anchor, "")
+        engine._render_data_table_snapshot(
+            doc,
+            anchor,
+            snap,
+            title=title,
+            sample_dxa=_OR_SAMPLE_COL_DXA,
+            total_dxa=_OR_TABLE_WIDTH_DXA,
+            indent_dxa=_OR_TABLE_INDENT_DXA,
+        )
 
     engine._delete_paragraph(anchor)
 
@@ -370,6 +384,24 @@ def _find_paragraph(doc: Document, marker: str) -> Optional[Paragraph]:
     for p in doc.paragraphs:
         if marker in (p.text or ""):
             return p
+    for table in doc.tables:
+        hit = _find_paragraph_in_table(table, marker)
+        if hit is not None:
+            return hit
+    return None
+
+
+def _find_paragraph_in_table(table: Table, marker: str) -> Optional[Paragraph]:
+    for row in table.rows:
+        for tc in row._tr.tc_lst:
+            cell = _Cell(tc, table)
+            for p in cell.paragraphs:
+                if marker in (p.text or ""):
+                    return p
+            for nested in cell.tables:
+                hit = _find_paragraph_in_table(nested, marker)
+                if hit is not None:
+                    return hit
     return None
 
 

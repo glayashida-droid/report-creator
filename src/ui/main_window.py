@@ -514,9 +514,7 @@ class MainWindow(QMainWindow):
         self.btn_open_local.setFlat(True)
         self.btn_open_local.setCursor(Qt.PointingHandCursor)
         self.btn_open_local.setVisible(False)
-        self.btn_open_local.setToolTip(
-            "优先在访达中打开公盘项目文件夹；不可达则打开本地镜像"
-        )
+        self.btn_open_local.setToolTip("打开公盘文件夹")
         self.btn_open_local.clicked.connect(self._open_project_folder)
 
         backup_sep = QFrame()
@@ -1107,14 +1105,24 @@ class MainWindow(QMainWindow):
         self._set_path_text(str(path))
         self.load_project_folder(path)
 
+    def _folder_target_to_open(self) -> tuple[Optional[Path], str]:
+        raw = (self.state.source_path or "").strip()
+        remote = Path(raw) if raw else self._source_path
+        return resolve_project_folder_to_open(remote, self._local_path)
+
     def _source_project_path(self) -> Optional[Path]:
+        path, kind = self._folder_target_to_open()
+        if kind == "remote":
+            return path
+        if kind == "disconnected":
+            return None
         if self._source_path is not None and self._source_path.is_dir():
             return self._source_path
         raw = (self.state.source_path or "").strip()
         if not raw:
             return None
-        path = Path(raw)
-        return path if path.is_dir() else None
+        candidate = Path(raw)
+        return candidate if candidate.is_dir() else None
 
     def _sync_application_excel_to_mirror(self, src_project_path: Path) -> None:
         if self._local_path is None:
@@ -1724,20 +1732,19 @@ class MainWindow(QMainWindow):
 
     def _remote_brief_for_tooltip(self) -> str:
         """One short line about 公盘 reachability for the 本地镜像 tooltip."""
-        remote = self._source_project_path()
-        configured = (self.state.source_path or "").strip()
+        path, kind = self._folder_target_to_open()
         pending = (
             self._local_path is not None and is_pending_remote_json(self._local_path)
         )
-        if remote is not None and remote.is_dir():
+        if kind == "remote" and path is not None:
             if pending:
-                if remote_diverged_from_pending(self._local_path, remote):
+                if remote_diverged_from_pending(self._local_path, path):
                     return "公盘 可达 · 明细待同步（公盘有更新）"
                 return "公盘 可达 · 明细待同步"
-            if (remote / "project_state.json").is_file():
+            if (path / "project_state.json").is_file():
                 return "公盘 可达 · project_state.json"
             return "公盘 可达"
-        if configured or remote is not None:
+        if kind == "disconnected":
             if pending:
                 return "公盘 不可达 · 明细待同步"
             return "公盘 不可达"
@@ -1758,17 +1765,16 @@ class MainWindow(QMainWindow):
         self.chk_mirror_conn.setToolTip("\n".join(lines))
 
     def _refresh_open_folder_button(self):
-        remote = self._source_project_path()
-        local_ready = self._local_path is not None and self._local_path.is_dir()
-        self.btn_open_local.setVisible(remote is not None or local_ready)
-        if remote is not None:
-            self.btn_open_local.setToolTip("在访达中打开公盘项目文件夹")
-        elif local_ready:
-            self.btn_open_local.setToolTip("公盘不可达，在访达中打开本地镜像文件夹")
+        path, kind = self._folder_target_to_open()
+        self.btn_open_local.setVisible(path is not None)
+        if kind == "remote":
+            self.btn_open_local.setToolTip("打开公盘文件夹")
+        elif kind == "disconnected":
+            self.btn_open_local.setToolTip("公盘未连接，打开本地文件夹")
+        elif kind == "local":
+            self.btn_open_local.setToolTip("打开本地文件夹")
         else:
-            self.btn_open_local.setToolTip(
-                "优先在访达中打开公盘项目文件夹；不可达则打开本地镜像"
-            )
+            self.btn_open_local.setToolTip("打开公盘文件夹")
 
     def _refresh_remote_json_status(self):
         """Refresh 本地镜像 tooltip (公盘 status folded in) and flush pending JSON."""
@@ -1968,20 +1974,16 @@ class MainWindow(QMainWindow):
         self._connection_timer.start(max(interval_ms, 1000))
 
     def _open_project_folder(self):
-        remote = self._source_path
-        if remote is None:
-            raw = (self.state.source_path or "").strip()
-            remote = Path(raw) if raw else None
-        path, kind = resolve_project_folder_to_open(remote, self._local_path)
+        path, kind = self._folder_target_to_open()
         if path is None:
             QMessageBox.warning(
                 self,
                 "提示",
-                "没有可打开的项目文件夹（公盘不可达，本地镜像尚未就绪）",
+                "没有可打开的项目文件夹（公盘未连接，本地镜像尚未就绪）",
             )
             return
-        if kind == "local":
-            QMessageBox.information(self, "提示", "公盘不可达，将打开本地镜像")
+        if kind == "disconnected":
+            QMessageBox.information(self, "提示", "公盘未连接，将打开本地文件夹")
         _open_in_file_manager(path)
 
     def _drop_abandoned(self, worker):

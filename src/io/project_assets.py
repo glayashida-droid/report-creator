@@ -405,22 +405,51 @@ def _iter_existing_roots(
             yield root
 
 
-def _merged_other_stems(
+def _same_file(left: Path, right: Path) -> bool:
+    try:
+        return left.is_file() and right.is_file() and left.resolve() == right.resolve()
+    except OSError:
+        return left == right
+
+
+def _is_already_renamed_copy(dest: Path, remaining_srcs: Sequence[Path]) -> bool:
+    """True when *dest* is this photo already sitting at the new name."""
+    if not dest.is_file():
+        return False
+    if not remaining_srcs:
+        return True
+    return any(_same_photo_payload(dest, src) for src in remaining_srcs)
+
+
+def _dest_stem_taken_by_other(
     local_root: Optional[PathLike],
     remote_root: Optional[PathLike],
     relative_path: Path,
-) -> set[str]:
-    current = relative_path.name
-    stems: set[str] = set()
-    for root in _iter_existing_roots(local_root, remote_root):
+    candidate: str,
+) -> bool:
+    key = photo_stem_key(candidate)
+    remaining_srcs: List[Path] = []
+    roots = list(_iter_existing_roots(local_root, remote_root))
+    for root in roots:
+        src = root / relative_path
+        if src.is_file():
+            remaining_srcs.append(src)
+    for root in roots:
         folder = (root / relative_path).parent
         if not folder.is_dir():
             continue
+        src = root / relative_path
+        src_ok = src.is_file()
         for name in _list_image_names(folder):
-            if name == current:
+            if photo_stem_key(name) != key:
                 continue
-            stems.add(photo_stem_key(name))
-    return stems
+            path = folder / name
+            if src_ok and _same_file(path, src):
+                continue
+            if not src_ok and _is_already_renamed_copy(path, remaining_srcs):
+                continue
+            return True
+    return False
 
 
 def rename_merged_photo(
@@ -429,35 +458,57 @@ def rename_merged_photo(
     relative_path: str,
     new_name: str,
 ) -> str:
-    """Rename a photo on every root that has it. Returns the new relative path."""
+    """Rename a photo on every root that has it. Returns the new relative path.
+
+    Already-renamed roots (dest exists, source gone) are treated as done so a
+    retry after a partial local/remote rename does not raise 已存在同名文件.
+    """
     rel = _require_relative(relative_path)
     if SPARE_DIR_NAME in rel.parts:
         raise PhotoError("不能重命名备用中的照片")
     candidate = planned_photo_name(rel.name, new_name)
     dest_rel = rel.with_name(candidate)
-    sources = []
+    rel_posix = rel.as_posix()
+    dest_posix = dest_rel.as_posix()
+
+    found = False
+    to_rename: List[Tuple[Path, Path]] = []
     for root in _iter_existing_roots(local_root, remote_root):
         src = root / rel
-        if src.is_file():
-            sources.append((root, src))
-    if not sources:
+        dest = root / dest_rel
+        src_ok = src.is_file()
+        dest_ok = dest.is_file()
+        if src_ok or dest_ok:
+            found = True
+        if src_ok and dest_ok and _same_file(src, dest):
+            continue
+        if src_ok and dest_ok:
+            raise PhotoError(f"已存在同名文件：{candidate}")
+        if src_ok:
+            to_rename.append((src, dest))
+    if not found:
         raise PhotoError("找不到照片")
     if candidate == rel.name:
-        return rel.as_posix()
-    if photo_stem_key(candidate) in _merged_other_stems(
-        local_root, remote_root, rel
-    ):
+        return rel_posix
+    if _dest_stem_taken_by_other(local_root, remote_root, rel, candidate):
         raise PhotoError(f"已存在同名文件：{candidate}")
-    for root, src in sources:
-        dest = root / dest_rel
-        try:
-            same = dest.exists() and dest.resolve() == src.resolve()
-        except OSError:
-            same = dest == src
-        if dest.exists() and not same:
-            raise PhotoError(f"已存在同名文件：{candidate}")
-        _rename_path(src, dest)
-    return dest_rel.as_posix()
+
+    applied: List[Tuple[Path, Path]] = []
+    try:
+        for src, dest in to_rename:
+            _rename_path(src, dest)
+            applied.append((dest, src))
+    except PhotoError:
+        for dest, orig in reversed(applied):
+            try:
+                if dest.exists() and not orig.exists():
+                    dest.rename(orig)
+            except OSError:
+                pass
+        raise
+
+    invalidate_photo_thumbs(local_root, [rel_posix, dest_posix])
+    return dest_posix
 
 
 def _rollback_renames(applied: List[Tuple[Path, Path]]) -> None:

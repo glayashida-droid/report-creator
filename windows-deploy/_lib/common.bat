@@ -211,7 +211,9 @@ if not exist "%RC_SYNC_DST%" (
     exit /b 1
 )
 rem Trailing backslash inside quotes breaks CMD ("D:\"). Paths are normalized above.
-robocopy "%RC_SYNC_SRC%" "%RC_SYNC_DST%" /E /NFL /NDL /NJH /NJS /NP /R:2 /W:2 /XD .venv __pycache__ .git .pytest_cache .mypy_cache .cursor .scratch wheels /XF *.pyc *.pyo
+rem Exclude local work data and app templates: never ship the developer's
+rem loaded projects or stale template copies to user machines.
+robocopy "%RC_SYNC_SRC%" "%RC_SYNC_DST%" /E /NFL /NDL /NJH /NJS /NP /R:2 /W:2 /XD .venv __pycache__ .git .pytest_cache .mypy_cache .cursor .scratch wheels data templates /XF *.pyc *.pyo
 set "RC_ROBO=%ERRORLEVEL%"
 if %RC_ROBO% GEQ 8 (
     echo [ERROR] robocopy failed, exit code %RC_ROBO%

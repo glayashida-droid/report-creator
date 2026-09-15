@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 
 from application_parser.sample_id_labels import is_sample_id_column_key
@@ -912,3 +913,166 @@ def delete_attachment(path: Path) -> None:
     target = Path(path)
     if target.is_file():
         target.unlink()
+
+
+def _snapshot_col_count(snap: PreviewSnapshot) -> int:
+    return max((len(r) for r in (snap.values or [])), default=0)
+
+
+def content_column_groups(
+    snap: PreviewSnapshot, *, sample_col: int = 0
+) -> List[List[int]]:
+    """Partition content columns into unsplittable groups via horizontal merges.
+
+    Sample column is excluded. Columns linked by a horizontal merge stay in one
+    group (e.g. -40°C spanning 9V/14V/16V). Unmerged columns are singletons.
+    Groups are ordered left-to-right.
+    """
+    n_cols = _snapshot_col_count(snap)
+    content = [c for c in range(n_cols) if c != sample_col]
+    if not content:
+        return []
+
+    parent = {c: c for c in content}
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    origin_r = snap.origin_row or 1
+    origin_c = snap.origin_col or 1
+    for merge in snap.merges or []:
+        try:
+            min_c, min_r, max_c, max_r = range_boundaries(merge)
+        except Exception:
+            continue
+        c0 = min_c - origin_c
+        c1 = max_c - origin_c
+        if c1 <= c0:
+            continue
+        linked = [c for c in range(c0, c1 + 1) if c in parent]
+        for a, b in zip(linked, linked[1:]):
+            union(a, b)
+
+    groups: List[List[int]] = []
+    seen_roots: set[int] = set()
+    for c in content:
+        root = find(c)
+        if root in seen_roots:
+            continue
+        members = sorted(x for x in content if find(x) == root)
+        if c != members[0]:
+            continue
+        seen_roots.add(root)
+        groups.append(members)
+    return groups
+
+
+def slice_preview_snapshot(
+    snap: PreviewSnapshot, cols: Sequence[int]
+) -> PreviewSnapshot:
+    """Keep only the given 0-based columns (order preserved); remap merges."""
+    col_list = [int(c) for c in cols]
+    col_map = {old: new for new, old in enumerate(col_list)}
+    values: List[List[str]] = []
+    for row in snap.values or []:
+        values.append([(row[c] if c < len(row) else "") for c in col_list])
+
+    origin_r = snap.origin_row or 1
+    origin_c = snap.origin_col or 1
+    new_merges: List[str] = []
+    for merge in snap.merges or []:
+        try:
+            min_c, min_r, max_c, max_r = range_boundaries(merge)
+        except Exception:
+            continue
+        c0 = min_c - origin_c
+        c1 = max_c - origin_c
+        r0 = min_r - origin_r
+        r1 = max_r - origin_r
+        needed = list(range(c0, c1 + 1))
+        if any(c not in col_map for c in needed):
+            continue
+        mapped = [col_map[c] for c in needed]
+        nc0, nc1 = min(mapped), max(mapped)
+        # New snapshot is always origin (1,1)
+        start = f"{get_column_letter(nc0 + 1)}{r0 + 1}"
+        end = f"{get_column_letter(nc1 + 1)}{r1 + 1}"
+        if start == end:
+            continue
+        new_merges.append(f"{start}:{end}")
+
+    return PreviewSnapshot(
+        sheet_name=snap.sheet_name,
+        values=values,
+        merges=new_merges,
+        origin_row=1,
+        origin_col=1,
+    )
+
+
+def pack_content_column_groups(
+    groups: Sequence[Sequence[int]], max_content_cols: int
+) -> List[List[int]]:
+    """Greedy pack unsplittable groups into chunks of at most max_content_cols.
+
+    A single group larger than the budget is still emitted alone (cannot split).
+    """
+    limit = max(1, int(max_content_cols))
+    chunks: List[List[int]] = []
+    current: List[int] = []
+    current_n = 0
+    for group in groups:
+        members = [int(c) for c in group]
+        g_n = len(members)
+        if not members:
+            continue
+        if current and current_n + g_n > limit:
+            chunks.append(current)
+            current = []
+            current_n = 0
+        current.extend(members)
+        current_n += g_n
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def split_preview_snapshot_for_page(
+    snap: PreviewSnapshot,
+    *,
+    max_content_cols: int,
+    sample_col: int = 0,
+) -> List[PreviewSnapshot]:
+    """Split a wide snapshot into page-fitting chunks; repeat sample_col each time.
+
+    Column groups follow horizontal merges so header blocks (e.g. temperature
+    spans) are not broken across tables when possible.
+    """
+    n_cols = _snapshot_col_count(snap)
+    if n_cols <= 0 or not snap.values:
+        return []
+    if sample_col < 0 or sample_col >= n_cols:
+        sample_col = 0
+
+    groups = content_column_groups(snap, sample_col=sample_col)
+    if not groups:
+        return [slice_preview_snapshot(snap, [sample_col])]
+
+    content_n = sum(len(g) for g in groups)
+    if content_n <= max(1, int(max_content_cols)):
+        cols = [sample_col] + [c for g in groups for c in g]
+        return [slice_preview_snapshot(snap, cols)]
+
+    chunks = pack_content_column_groups(groups, max_content_cols)
+    out: List[PreviewSnapshot] = []
+    for content_cols in chunks:
+        out.append(slice_preview_snapshot(snap, [sample_col, *content_cols]))
+    return out or [snap]
