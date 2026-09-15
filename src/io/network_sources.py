@@ -67,6 +67,7 @@ class NetworkSourcesConfig:
     data_tables: DirectorySource
     original_data_sheet: DirectorySource
     connection_check: ConnectionCheckConfig
+    usage_stats: DirectorySource = DirectorySource(directory="")
 
 
 @dataclass(frozen=True)
@@ -163,6 +164,7 @@ def load_network_sources_config(path: Optional[Path] = None) -> NetworkSourcesCo
         report_templates=_directory_source(network, "report_templates"),
         data_tables=_directory_source(network, "data_tables"),
         original_data_sheet=_directory_source(network, "original_data_sheet"),
+        usage_stats=_directory_source(network, "usage_stats"),
         connection_check=ConnectionCheckConfig(
             retry_interval_disconnected_sec=int(
                 check.get("retry_interval_disconnected_sec") or 30
@@ -187,6 +189,7 @@ def network_config_to_payload(config: NetworkSourcesConfig) -> dict:
         "report_templates": {"directory": config.report_templates.directory},
         "data_tables": {"directory": config.data_tables.directory},
         "original_data_sheet": {"directory": config.original_data_sheet.directory},
+        "usage_stats": {"directory": config.usage_stats.directory},
         "connection_check": {
             "retry_interval_disconnected_sec": (
                 config.connection_check.retry_interval_disconnected_sec
@@ -216,6 +219,7 @@ def network_config_from_payload(payload: dict) -> NetworkSourcesConfig:
         report_templates=_directory_source(payload, "report_templates"),
         data_tables=_directory_source(payload, "data_tables"),
         original_data_sheet=_directory_source(payload, "original_data_sheet"),
+        usage_stats=_directory_source(payload, "usage_stats"),
         connection_check=ConnectionCheckConfig(
             retry_interval_disconnected_sec=int(
                 check.get("retry_interval_disconnected_sec") or 30
@@ -404,6 +408,7 @@ def _collect_smb_shares(config: NetworkSourcesConfig) -> list[tuple[str, str]]:
         config.report_templates.directory,
         config.data_tables.directory,
         config.original_data_sheet.directory,
+        config.usage_stats.directory,
     )
     shares: dict[str, str] = {}
     for raw in raw_paths:
@@ -441,6 +446,7 @@ def _needs_smb_mount(config: NetworkSourcesConfig) -> bool:
         config.report_templates.directory,
         config.data_tables.directory,
         config.original_data_sheet.directory,
+        config.usage_stats.directory,
     )
     for raw in raw_paths:
         if _parse_smb_share_url(raw) is None:

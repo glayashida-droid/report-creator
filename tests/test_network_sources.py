@@ -485,6 +485,18 @@ def test_network_config_payload_roundtrip(tmp_path: Path):
     assert restored.equipment_list.directory == config.equipment_list.directory
     assert restored.standards_library.file == config.standards_library.file
     assert restored.connection_check.probe_timeout_sec == config.connection_check.probe_timeout_sec
+    assert restored.usage_stats.directory == config.usage_stats.directory
+
+
+def test_load_network_sources_reads_usage_stats(tmp_path: Path):
+    usage = tmp_path / "usage"
+    usage.mkdir()
+    cfg_path = _write_config(
+        tmp_path,
+        network_sources={"usage_stats": {"directory": str(usage)}},
+    )
+    config = load_network_sources_config(cfg_path)
+    assert config.usage_stats.directory == str(usage)
 
 
 def test_isolated_probe_timeout_returns_disconnected(tmp_path: Path):

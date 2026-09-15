@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -45,6 +46,17 @@ def save_default_tester_name(name: str, data_root: Optional[Path] = None) -> Non
     prefs = load_user_prefs(data_root)
     prefs["default_tester_name"] = (name or "").strip()
     save_user_prefs(prefs, data_root)
+
+
+def usage_machine_id(data_root: Optional[Path] = None) -> str:
+    prefs = load_user_prefs(data_root)
+    machine_id = str(prefs.get("usage_machine_id") or "").strip()
+    if machine_id:
+        return machine_id
+    machine_id = uuid.uuid4().hex
+    prefs["usage_machine_id"] = machine_id
+    save_user_prefs(prefs, data_root)
+    return machine_id
 
 
 def parse_intranet_year(value) -> Optional[int]:

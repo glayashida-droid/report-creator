@@ -3,6 +3,7 @@ import sys
 import re
 import shutil
 import subprocess
+from datetime import datetime, time, timedelta
 from typing import Optional
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -54,6 +55,12 @@ from src.io.network_sources import (
     resolve_report_template_for_language,
 )
 from src.io.special_rules import profile_from_state, refresh_special_profile, state_has_forbidden_na
+from src.io.usage_stats import (
+    UsageTracker,
+    local_usage_root,
+    resolve_usage_directory,
+    usage_tracking_enabled,
+)
 from src.io.user_prefs import (
     default_tester_name,
     nightly_sync_all_projects,
@@ -61,6 +68,7 @@ from src.io.user_prefs import (
     nightly_sync_time,
     save_default_tester_name,
     save_nightly_sync_prefs,
+    usage_machine_id,
 )
 from src.io.leg_templates import (
     TemplateExistsError,
@@ -395,6 +403,14 @@ class MainWindow(QMainWindow):
 
         self.init_ui()
         self._refresh_tester_title_label()
+        self._usage_tracker = None  # type: Optional[UsageTracker]
+        self._usage_heartbeat = QTimer(self)
+        self._usage_heartbeat.setInterval(120_000)
+        self._usage_heartbeat.timeout.connect(self._on_usage_heartbeat)
+        self._usage_midnight = QTimer(self)
+        self._usage_midnight.setSingleShot(True)
+        self._usage_midnight.timeout.connect(self._on_usage_midnight)
+
         self._nightly_sync_timer.start()
 
     def init_ui(self):
@@ -822,6 +838,8 @@ class MainWindow(QMainWindow):
         if self._tester_prompt_pending:
             self._tester_prompt_pending = False
             QTimer.singleShot(0, self._prompt_tester_name)
+        elif self._session_tester_name:
+            QTimer.singleShot(0, self._ensure_usage_tracker)
 
     def _start_deferred_network_connect(self):
         """Mount then probe after the first paint so SMB cannot delay the window."""
@@ -849,7 +867,66 @@ class MainWindow(QMainWindow):
             self.state.tester_name = name
             self._is_dirty = True
         self._refresh_tester_title_label()
+        self._ensure_usage_tracker()
         return True
+
+    def _ensure_usage_tracker(self):
+        if not usage_tracking_enabled():
+            return
+        name = (self._session_tester_name or "").strip()
+        if not name:
+            return
+        now = datetime.now()
+        if self._usage_tracker is None:
+            self._usage_tracker = UsageTracker(
+                tester_name=name,
+                machine_id=usage_machine_id(),
+                local_dir=local_usage_root(),
+                remote_dir=resolve_usage_directory(self._network_config),
+            )
+            self._usage_tracker.start(now)
+            self._usage_heartbeat.start()
+            self._schedule_usage_midnight()
+            return
+        if self._usage_tracker.tester_name != name:
+            self._usage_tracker.rename_tester(name, now)
+        else:
+            self._usage_tracker.remote_dir = resolve_usage_directory(self._network_config)
+            self._usage_tracker.tick(now)
+
+    def _flush_usage(self, *, closing: bool = False):
+        tracker = getattr(self, "_usage_tracker", None)
+        if tracker is None:
+            return
+        now = datetime.now()
+        if closing:
+            tracker.close(now)
+            return
+        tracker.remote_dir = resolve_usage_directory(self._network_config)
+        tracker.tick(now)
+
+    def _on_usage_heartbeat(self):
+        self._flush_usage()
+
+    def _on_usage_midnight(self):
+        self._flush_usage()
+        self._schedule_usage_midnight()
+
+    def _schedule_usage_midnight(self):
+        now = datetime.now()
+        nxt = datetime.combine(now.date() + timedelta(days=1), time.min)
+        delay_ms = max(int((nxt - now).total_seconds() * 1000), 1000)
+        self._usage_midnight.start(delay_ms)
+
+    def _record_usage_report(self):
+        self._ensure_usage_tracker()
+        if self._usage_tracker is not None:
+            self._usage_tracker.record_report(datetime.now())
+
+    def _record_usage_original_record(self):
+        self._ensure_usage_tracker()
+        if self._usage_tracker is not None:
+            self._usage_tracker.record_original_record(datetime.now())
 
     def _refresh_tester_title_label(self):
         name = (self._session_tester_name or self.state.tester_name or "").strip()
@@ -960,6 +1037,10 @@ class MainWindow(QMainWindow):
                 if not self.save_state(show_success=False):
                     event.ignore()
                     return
+
+        self._flush_usage(closing=True)
+        self._usage_heartbeat.stop()
+        self._usage_midnight.stop()
 
         if self._mirror_worker is not None:
             self._mirror_worker.requestInterruption()
@@ -1875,6 +1956,7 @@ class MainWindow(QMainWindow):
         self._schedule_network_probe()
         if self.state.project_id:
             self._refresh_remote_json_status()
+        self._flush_usage()
 
     def _schedule_network_probe(self):
         check = self._network_config.connection_check
@@ -2462,6 +2544,7 @@ class MainWindow(QMainWindow):
                 report_no=report_no,
                 remote_root=str(remote) if remote is not None else None,
             )
+            self._record_usage_report()
 
             msg = QMessageBox(self)
             msg.setWindowTitle("导出成功")

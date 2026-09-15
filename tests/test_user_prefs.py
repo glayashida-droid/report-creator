@@ -12,6 +12,7 @@ from src.io.user_prefs import (
     save_board_intranet_year,
     save_default_tester_name,
     save_nightly_sync_prefs,
+    usage_machine_id,
 )
 
 
@@ -47,3 +48,12 @@ def test_nightly_sync_prefs_roundtrip(tmp_path, monkeypatch):
     assert nightly_sync_all_projects() is False
     save_nightly_sync_prefs(enabled=False, time_hhmm="99:99", all_projects=True)
     assert nightly_sync_time() == "22:30"
+
+
+def test_usage_machine_id_persists(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.io.user_prefs.default_data_root", lambda: tmp_path)
+    first = usage_machine_id()
+    second = usage_machine_id()
+    assert first
+    assert first == second
+    assert load_user_prefs()["usage_machine_id"] == first

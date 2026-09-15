@@ -1032,6 +1032,11 @@ class TestDetailDialog(QDialog):
             QMessageBox.critical(self, "导出失败", f"生成原始记录时发生错误:\n{exc}")
             return
 
+        host = self._main_window()
+        record = getattr(host, "_record_usage_original_record", None)
+        if callable(record):
+            record()
+
         msg = QMessageBox(self)
         msg.setWindowTitle("导出成功")
         msg.setText(f"原始记录已生成至:\n{out_path}")
