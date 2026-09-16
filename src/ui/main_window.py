@@ -48,6 +48,8 @@ from src.io.project_sync import (
 )
 from src.io.sample_files import application_not_found_hint, find_sample_files
 from src.io.network_sources import (
+    ELP_REPORT_LANGUAGE,
+    REPORT_LANGUAGE_CHOICES,
     NetworkSourcesConfig,
     ProbeResult,
     attempt_mount_network_shares,
@@ -55,6 +57,7 @@ from src.io.network_sources import (
     disconnected_probe_result,
     isolated_probe_network_sources,
     load_network_sources_config,
+    resolve_elp_report_template,
     resolve_report_template_for_language,
 )
 from src.io.special_rules import profile_from_state, refresh_special_profile, state_has_forbidden_na
@@ -85,6 +88,7 @@ from src.parsers.db_loader import DuplicateStandardError, duplicate_standard_mes
 from src.ui.leg_graph import LegGraphArea
 from src.ui.load_state_dialog import LoadStateDialog
 from src.ui.tester_name_dialog import TesterNameDialog
+from src.ui.elp_export_dialog import ElpExportDialog
 from src.ui.project_board import ClickableLabel, ProjectBoardPage
 from src.ui.leg_template_dialog import ImportTemplateDialog
 from src.ui.save_success_dialog import SaveSuccessDialog
@@ -254,7 +258,7 @@ class NightlySyncWorker(QThread):
             self.failed.emit(str(exc))
 
 
-APP_VERSION = "1.3.8"
+APP_VERSION = "1.4.0"
 # Calendar popup floor. Dates before this are treated as "no end date"
 # because QDateEdit may clamp the blank sentinel to 1752-09-14.
 _EARLIEST_REAL_YEAR = 1990
@@ -2489,14 +2493,16 @@ class MainWindow(QMainWindow):
                 self,
                 "选择报告语言",
                 "请选择要生成的报告语言：",
-                ["中文", "英文", "中英文"],
+                list(REPORT_LANGUAGE_CHOICES),
                 0,
                 False,
             )
             if not ok:
                 return
 
-            default_no = WordGenerator.default_report_no(self.state, lang)
+            is_elp = lang == ELP_REPORT_LANGUAGE
+            word_lang = "中文" if is_elp else lang
+            default_no = WordGenerator.default_report_no(self.state, word_lang)
             report_no, ok = QInputDialog.getText(
                 self,
                 "请确认报告编号",
@@ -2513,14 +2519,35 @@ class MainWindow(QMainWindow):
             refresh_special_profile(self.state)
             profile = profile_from_state(self.state)
 
-            template_path = resolve_report_template_for_language(
-                lang,
-                self._network_config,
-                use_4sign=profile.use_4sign,
-            )
-            if template_path is None:
-                QMessageBox.warning(self, "错误", "找不到报告模板，请确认公盘模板连接正常")
-                return
+            elp_extras = None
+            elp_plan = None
+            if is_elp:
+                from src.generators.elp_engine import ElpReportGenerator
+                from src.io.network_sources import elp_data_pattern_directory
+                from src.parsers.elp_plan import find_elp_plan_pdf, parse_elp_plan
+
+                template_path = resolve_elp_report_template(self._network_config)
+                if template_path is None:
+                    QMessageBox.warning(self, "错误", "找不到吉利ELP报告模板，请确认公盘 report_templates 中有 ELP 模板")
+                    return
+                project_for_plan = self._local_path or self._source_project_path()
+                plan_pdf = find_elp_plan_pdf(project_for_plan) if project_for_plan else None
+                elp_plan = parse_elp_plan(plan_pdf, ocr_cover=True)
+                dialog = ElpExportDialog(plan_no=elp_plan.plan_no, parent=self)
+                if dialog.exec() != dialog.Accepted:
+                    return
+                elp_extras = dialog.fields()
+                if elp_extras.plan_no:
+                    elp_plan.plan_no = elp_extras.plan_no
+            else:
+                template_path = resolve_report_template_for_language(
+                    lang,
+                    self._network_config,
+                    use_4sign=profile.use_4sign,
+                )
+                if template_path is None:
+                    QMessageBox.warning(self, "错误", "找不到报告模板，请确认公盘模板连接正常")
+                    return
 
             if profile.show_tester and not (self.state.tester_name or "").strip():
                 QMessageBox.warning(self, "无法导出", "当前客户/主机厂要求汇总表填写检测人员，请先确认测试员姓名")
@@ -2552,7 +2579,7 @@ class MainWindow(QMainWindow):
                 else:
                     out_path = WordGenerator.next_duplicate_report_path(report_dir, stem)
 
-            engine = WordGenerator(str(template_path))
+            engine = None
             mode = self.combo_export_mode.currentText()
             target_project_path = str(project_path) if project_path else None
             target_text = self.combo_export_target.currentText()
@@ -2594,13 +2621,28 @@ class MainWindow(QMainWindow):
                 return
 
             remote = self._source_project_path()
-            engine.generate(
-                self.state, str(out_path),
-                project_path=target_project_path, leg_filter=leg_filter,
-                report_language=lang,
-                report_no=report_no,
-                remote_root=str(remote) if remote is not None else None,
-            )
+            if is_elp:
+                engine = ElpReportGenerator(str(template_path))
+                engine.generate(
+                    self.state,
+                    str(out_path),
+                    extras=elp_extras,
+                    plan=elp_plan,
+                    project_path=target_project_path,
+                    leg_filter=leg_filter,
+                    report_no=report_no,
+                    remote_root=str(remote) if remote is not None else None,
+                    pattern_dir=elp_data_pattern_directory(self._network_config),
+                )
+            else:
+                engine = WordGenerator(str(template_path))
+                engine.generate(
+                    self.state, str(out_path),
+                    project_path=target_project_path, leg_filter=leg_filter,
+                    report_language=lang,
+                    report_no=report_no,
+                    remote_root=str(remote) if remote is not None else None,
+                )
             self._record_usage_report()
 
             msg = QMessageBox(self)

@@ -12,6 +12,7 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 from PIL import Image
 
 TEST_GROUP_DIR = "3.测试组"
+SAMPLE_INFO_DIR_NAME = "样品信息"
 RENAME_CONFLICT_MESSAGE = "标准试验名同名文件夹已存在，卡片未改名，请留意"
 TEMPLATE_ALBUMS = ("试验前", "试验中", "数据", "试验后")
 IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
@@ -48,6 +49,25 @@ def test_dir_key(leg_name: str, test_name: str) -> str:
 
 def test_dir(project_root: Path, leg_name: str, test_name: str) -> Path:
     return Path(project_root) / TEST_GROUP_DIR / test_dir_key(leg_name, test_name)
+
+
+def sample_info_dir(project_root: Path) -> Path:
+    return Path(project_root) / TEST_GROUP_DIR / SAMPLE_INFO_DIR_NAME
+
+
+def ensure_sample_info_dir(project_root: Path) -> Path:
+    dest = sample_info_dir(project_root)
+    dest.mkdir(parents=True, exist_ok=True)
+    return dest
+
+
+def list_sample_info_photos(project_root: Path) -> List[Path]:
+    folder = sample_info_dir(project_root)
+    if not folder.is_dir():
+        return []
+    photos = [p for p in folder.iterdir() if is_image_file(p)]
+    photos.sort(key=photo_sort_key)
+    return photos
 
 
 def album_dir(project_root: Path, leg_name: str, test_name: str, album_name: str) -> Path:
@@ -189,6 +209,7 @@ def create_album(project_root: Path, leg_name: str, test_name: str, album_name: 
     if dest.exists():
         raise PhotoError(f"文件夹已存在：{name}")
     dest.mkdir(parents=True, exist_ok=False)
+    ensure_sample_info_dir(project_root)
     return dest
 
 
@@ -202,6 +223,7 @@ def create_template_albums(project_root: Path, leg_name: str, test_name: str) ->
             continue
         dest.mkdir(parents=True, exist_ok=True)
         created.append(name)
+    ensure_sample_info_dir(project_root)
     return created
 
 

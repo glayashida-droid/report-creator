@@ -4,3 +4,4 @@ pdfplumber
 openpyxl
 pandas
 pydantic
+pytesseract

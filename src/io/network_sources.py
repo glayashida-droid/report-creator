@@ -28,6 +28,12 @@ REPORT_TEMPLATE_4SIGN_FILES = {
     "中英文": "template_ze_4sign.docx",
 }
 REPORT_TEMPLATE_FALLBACK = "template_raw.docx"
+ELP_REPORT_LANGUAGE = "吉利ELP专用中文模板"
+REPORT_LANGUAGE_CHOICES = ("中文", "英文", "中英文", ELP_REPORT_LANGUAGE)
+ELP_TEMPLATE_FILENAMES = (
+    "template_elp_zh.docx",
+    "ELP 零部件试验报告模板 - 更新中.docx",
+)
 
 SOURCE_CONFIGURED = "configured"
 SOURCE_FALLBACK = "fallback"
@@ -68,6 +74,7 @@ class NetworkSourcesConfig:
     original_data_sheet: DirectorySource
     connection_check: ConnectionCheckConfig
     usage_stats: DirectorySource = DirectorySource(directory="")
+    elp_data_patten: DirectorySource = DirectorySource(directory="")
 
 
 @dataclass(frozen=True)
@@ -121,6 +128,7 @@ def local_fallback_for(kind: str) -> Path:
         "report_templates": root / "report_templates",
         "data_tables": root / "data_tables",
         "original_data_sheet": root / "original_data_sheet",
+        "elp_data_patten": root / "elp_data_patten",
     }
     return mapping[kind]
 
@@ -165,6 +173,7 @@ def load_network_sources_config(path: Optional[Path] = None) -> NetworkSourcesCo
         data_tables=_directory_source(network, "data_tables"),
         original_data_sheet=_directory_source(network, "original_data_sheet"),
         usage_stats=_directory_source(network, "usage_stats"),
+        elp_data_patten=_directory_source(network, "elp_data_patten"),
         connection_check=ConnectionCheckConfig(
             retry_interval_disconnected_sec=int(
                 check.get("retry_interval_disconnected_sec") or 30
@@ -190,6 +199,7 @@ def network_config_to_payload(config: NetworkSourcesConfig) -> dict:
         "data_tables": {"directory": config.data_tables.directory},
         "original_data_sheet": {"directory": config.original_data_sheet.directory},
         "usage_stats": {"directory": config.usage_stats.directory},
+        "elp_data_patten": {"directory": config.elp_data_patten.directory},
         "connection_check": {
             "retry_interval_disconnected_sec": (
                 config.connection_check.retry_interval_disconnected_sec
@@ -220,6 +230,7 @@ def network_config_from_payload(payload: dict) -> NetworkSourcesConfig:
         data_tables=_directory_source(payload, "data_tables"),
         original_data_sheet=_directory_source(payload, "original_data_sheet"),
         usage_stats=_directory_source(payload, "usage_stats"),
+        elp_data_patten=_directory_source(payload, "elp_data_patten"),
         connection_check=ConnectionCheckConfig(
             retry_interval_disconnected_sec=int(
                 check.get("retry_interval_disconnected_sec") or 30
@@ -409,6 +420,7 @@ def _collect_smb_shares(config: NetworkSourcesConfig) -> list[tuple[str, str]]:
         config.data_tables.directory,
         config.original_data_sheet.directory,
         config.usage_stats.directory,
+        config.elp_data_patten.directory,
     )
     shares: dict[str, str] = {}
     for raw in raw_paths:
@@ -447,6 +459,7 @@ def _needs_smb_mount(config: NetworkSourcesConfig) -> bool:
         config.data_tables.directory,
         config.original_data_sheet.directory,
         config.usage_stats.directory,
+        config.elp_data_patten.directory,
     )
     for raw in raw_paths:
         if _parse_smb_share_url(raw) is None:
@@ -544,6 +557,47 @@ def data_table_templates_directory(config: Optional[NetworkSourcesConfig] = None
 def original_data_sheet_directory(config: Optional[NetworkSourcesConfig] = None) -> Path:
     cfg = config or load_network_sources_config()
     return _resolved_directory(cfg.original_data_sheet.directory, "original_data_sheet")
+
+
+def elp_data_pattern_directory(config: Optional[NetworkSourcesConfig] = None) -> Path:
+    cfg = config or load_network_sources_config()
+    return _resolved_directory(cfg.elp_data_patten.directory, "elp_data_patten")
+
+
+def _elp_template_in_folder(folder: Path) -> Optional[Path]:
+    for name in ELP_TEMPLATE_FILENAMES:
+        path = folder / name
+        if _safe_is_file(path):
+            return path
+    try:
+        matches = sorted(
+            p
+            for p in folder.glob("*ELP*.docx")
+            if _safe_is_file(p) and not p.name.startswith("~")
+        )
+    except OSError:
+        matches = []
+    return matches[0] if matches else None
+
+
+def resolve_elp_report_template(
+    config: Optional[NetworkSourcesConfig] = None,
+) -> Optional[Path]:
+    """ELP Word template: configured report_templates, then local templates/report_templates."""
+    cfg = config or load_network_sources_config()
+    seen: set[str] = set()
+    for folder in (
+        report_templates_directory(cfg),
+        local_fallback_for("report_templates"),
+    ):
+        key = str(folder)
+        if key in seen:
+            continue
+        seen.add(key)
+        found = _elp_template_in_folder(folder)
+        if found is not None:
+            return found
+    return None
 
 
 def resolve_report_template_file(

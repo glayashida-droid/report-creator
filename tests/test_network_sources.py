@@ -303,6 +303,7 @@ def _make_fallback_tree(root: Path) -> Path:
         (root / "report_templates" / name).write_bytes(b"t")
     (root / "data_tables").mkdir()
     (root / "original_data_sheet").mkdir()
+    (root / "elp_data_patten").mkdir()
     (root / "01-设备清单-20260825.xlsx").write_bytes(b"eq")
     return root
 
@@ -539,3 +540,93 @@ def test_isolated_probe_subprocess_with_local_files(tmp_path: Path):
     assert result.standards_ok is True
     assert result.templates_ok is True
     assert result.all_configured_connected is True
+
+
+ELP_SMB = "smb://10.10.31.8/材料实验室b/车载电子/report_creator/elp_data_patten"
+ELP_TEMPLATE_SMB = "smb://10.10.31.8/材料实验室b/车载电子/report_creator/report_templates"
+
+
+def test_elp_smb_paths_normalize_on_mac_and_windows():
+    from src.io.network_sources import default_config_path
+
+    config = load_network_sources_config(default_config_path())
+    assert config.elp_data_patten.directory == ELP_SMB
+    assert config.report_templates.directory == ELP_TEMPLATE_SMB
+    with patch("src.io.network_sources.sys.platform", "darwin"):
+        assert normalize_config_path(ELP_SMB) == (
+            "/Volumes/材料实验室b/车载电子/report_creator/elp_data_patten"
+        )
+        assert normalize_config_path(ELP_TEMPLATE_SMB) == (
+            "/Volumes/材料实验室b/车载电子/report_creator/report_templates"
+        )
+    with patch("src.io.network_sources.sys.platform", "win32"):
+        assert normalize_config_path(ELP_SMB) == (
+            "\\\\10.10.31.8\\材料实验室b\\车载电子\\report_creator\\elp_data_patten"
+        )
+        assert normalize_config_path(ELP_TEMPLATE_SMB) == (
+            "\\\\10.10.31.8\\材料实验室b\\车载电子\\report_creator\\report_templates"
+        )
+
+
+def test_elp_data_pattern_falls_back_to_templates(tmp_path: Path):
+    from src.io.network_sources import elp_data_pattern_directory, local_fallback_for
+
+    fallback = tmp_path / "local_templates"
+    (fallback / "elp_data_patten").mkdir(parents=True)
+    cfg_path = _write_config(
+        tmp_path,
+        network_sources={
+            "elp_data_patten": {
+                "directory": str(tmp_path / "missing_elp_patten"),
+            }
+        },
+    )
+    config = load_network_sources_config(cfg_path)
+    assert config.elp_data_patten.directory.endswith("missing_elp_patten")
+    with patch("src.io.network_sources.local_fallback_root", return_value=fallback):
+        resolved = elp_data_pattern_directory(config)
+        assert resolved == fallback / "elp_data_patten"
+        assert resolved == local_fallback_for("elp_data_patten")
+        assert "example" not in str(resolved)
+
+
+def test_resolve_elp_template_prefers_share_then_local_templates(tmp_path: Path):
+    from src.io.network_sources import resolve_elp_report_template
+
+    cfg_path = _write_config(tmp_path)
+    config = load_network_sources_config(cfg_path)
+    named = Path(config.report_templates.directory) / "template_elp_zh.docx"
+    named.write_bytes(b"elp")
+    assert resolve_elp_report_template(config) == named
+
+    named.unlink()
+    globbed = Path(config.report_templates.directory) / "吉利ELP模板.docx"
+    globbed.write_bytes(b"elp2")
+    assert resolve_elp_report_template(config) == globbed
+
+    globbed.unlink()
+    fallback = tmp_path / "local_templates"
+    local_elp = fallback / "report_templates" / "template_elp_zh.docx"
+    local_elp.parent.mkdir(parents=True)
+    local_elp.write_bytes(b"local-elp")
+    with patch("src.io.network_sources.local_fallback_root", return_value=fallback):
+        found = resolve_elp_report_template(config)
+    assert found == local_elp
+    assert "example" not in str(found)
+
+
+def test_probe_succeeds_without_elp_template(tmp_path: Path):
+    cfg_path = _write_config(tmp_path)
+    config = load_network_sources_config(cfg_path)
+    result = probe_network_sources(config)
+    assert result.all_configured_connected is True
+
+
+def test_payload_roundtrip_keeps_elp_data_patten(tmp_path: Path):
+    cfg_path = _write_config(
+        tmp_path,
+        network_sources={"elp_data_patten": {"directory": ELP_SMB}},
+    )
+    config = load_network_sources_config(cfg_path)
+    restored = network_config_from_payload(network_config_to_payload(config))
+    assert restored.elp_data_patten.directory == ELP_SMB

@@ -14,6 +14,9 @@
     "report_templates": {
       "directory": "smb://10.10.31.8/材料实验室b/车载电子/report_creator/report_templates"
     },
+    "elp_data_patten": {
+      "directory": "smb://10.10.31.8/材料实验室b/车载电子/report_creator/elp_data_patten"
+    },
     "data_tables": {
       "directory": "smb://10.10.31.8/材料实验室b/车载电子/report_creator/data_tables"
     },
