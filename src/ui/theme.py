@@ -344,6 +344,29 @@ QLabel#stdImagePopup {{
     padding: 8px;
 }}
 
+QPushButton#photoThumbZoom {{
+    background-color: {BG_INPUT};
+    color: {CYAN};
+    border: 1px solid {CYAN_DIM};
+    border-radius: 6px;
+    font-weight: 700;
+    font-size: 12px;
+    padding: 0 4px;
+    min-height: 28px;
+    max-height: 28px;
+    min-width: 0px;
+}}
+
+QPushButton#photoThumbZoom:hover:enabled {{
+    border: 1px solid {CYAN};
+    color: {TEXT};
+}}
+
+QPushButton#photoThumbZoom:disabled {{
+    color: {TEXT_DIM};
+    border-color: {BORDER};
+}}
+
 QWidget#drawerAccessory {{
     background: transparent;
     border: none;
@@ -804,6 +827,10 @@ QPushButton#accentButton {{
 QPushButton#accentButton:hover {{
     color: {MAGENTA};
     border: 1px solid {MAGENTA};
+}}
+
+QPushButton#legBatchPrintButton {{
+    padding: 6px 10px;
 }}
 
 QPushButton#nodeDetailButton {{
@@ -1326,6 +1353,36 @@ def plus_icon(color: str = CYAN, size: int = 14):
     painter.drawLine(int(m), int(mid), int(size - m), int(mid))
     painter.end()
     return QIcon(pm)
+
+
+def question_pixmap(color: str = CYAN, size: int = 48):
+    """Circled question mark tinted for dark QMessageBox backgrounds."""
+    from PySide6.QtCore import QRectF, Qt
+    from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPen, QPixmap
+
+    screen = QGuiApplication.primaryScreen()
+    dpr = float(screen.devicePixelRatio()) if screen is not None else 1.0
+    physical = max(1, int(round(size * dpr)))
+    pm = QPixmap(physical, physical)
+    pm.fill(Qt.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setRenderHint(QPainter.TextAntialiasing)
+    painter.scale(dpr, dpr)
+    c = QColor(color)
+    stroke = max(2.0, size * 0.075)
+    painter.setPen(QPen(c, stroke))
+    painter.setBrush(Qt.NoBrush)
+    inset = stroke / 2 + size * 0.04
+    painter.drawEllipse(QRectF(inset, inset, size - 2 * inset, size - 2 * inset))
+    font = QFont()
+    font.setPixelSize(int(size * 0.50))
+    font.setBold(True)
+    painter.setFont(font)
+    painter.drawText(QRectF(0, size * 0.02, size, size), Qt.AlignCenter, "?")
+    painter.end()
+    pm.setDevicePixelRatio(dpr)
+    return pm
 
 
 def style_calendar_nav_arrows(calendar):

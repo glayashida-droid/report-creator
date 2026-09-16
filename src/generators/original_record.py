@@ -67,6 +67,53 @@ class OriginalRecordData:
     leg_name: str = ""
 
 
+def original_record_data_from_node(
+    node: TestNode,
+    *,
+    leg_name: str,
+    state=None,
+    project_path: str = "",
+    remote_root: str = "",
+) -> OriginalRecordData:
+    """Build original-record payload from a persisted test node (not a live dialog)."""
+    app_no = ""
+    sample_name = ""
+    tester = ""
+    share = ""
+    if state is not None:
+        fields = getattr(state, "application_fields", None) or {}
+        app_no = (fields.get("申请单号") or getattr(state, "project_id", "") or "").strip()
+        sample_name = (getattr(state, "sample_name", None) or "").strip()
+        tester = (getattr(state, "tester_name", None) or "").strip()
+        share = (getattr(state, "source_path", None) or "").strip()
+        if not project_path:
+            project_path = str(getattr(state, "project_path", "") or "")
+        if not remote_root:
+            remote_root = str(getattr(state, "source_path", "") or "")
+    return OriginalRecordData(
+        application_no=app_no,
+        test_item=(node.test_name or "").strip(),
+        test_method=node.resolved_test_method(),
+        sample_name=sample_name,
+        sample_ids=[
+            s.sample_id.strip()
+            for s in (node.samples or [])
+            if (getattr(s, "sample_id", None) or "").strip()
+        ],
+        env_condition=node.resolved_env_condition(),
+        start_date=(node.start_date or "").strip(),
+        end_date=(node.end_date or "").strip(),
+        share_path=share,
+        equipments=list(node.equipments or []),
+        standards=list(node.resolved_standards()),
+        tester_name=tester,
+        data_tables=list(node.data_tables or []),
+        project_path=str(project_path or ""),
+        remote_root=str(remote_root or ""),
+        leg_name=(leg_name or "").strip(),
+    )
+
+
 def resolve_original_record_template(config=None) -> Path:
     """Prefer configured original_data_sheet dir, then local original_data_sheet."""
     name = ORIGINAL_RECORD_TEMPLATE_NAME
@@ -282,6 +329,32 @@ def default_output_path(
         if not candidate.exists():
             return candidate
         n += 1
+
+
+def export_node_original_record(
+    data: OriginalRecordData,
+    *,
+    template_path: Path | str,
+) -> Path:
+    """Write one original-record Word file beside the test albums."""
+    if not is_usable_test_name(data.test_item):
+        raise ValueError("请先选择试验名称")
+    if not (data.leg_name or "").strip():
+        raise ValueError("缺少 Leg 名称")
+    folder = resolve_original_record_folder(
+        data.project_path or None,
+        data.remote_root or None,
+        leg_name=data.leg_name,
+        test_item=data.test_item,
+    )
+    if folder is None:
+        raise FileNotFoundError("找不到项目目录（公盘与本地均不可用）")
+    out_path = default_output_path(
+        folder,
+        application_no=data.application_no,
+        test_item=data.test_item,
+    )
+    return generate_original_record(data, out_path, template_path=template_path)
 
 
 def _safe_stem(text: str) -> str:

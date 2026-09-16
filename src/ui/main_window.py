@@ -26,7 +26,10 @@ from src.application_ingest import apply_application_data
 from src.io.to_numbers import apply_autoliv_to_numbers
 from application_parser import parse_application, prepare_excel_bytes
 from src.parsers.pdf_parser import QuotationParser
-from src.io.project_board import resolve_project_folder_to_open
+from src.io.project_board import (
+    resolve_openable_project_folders,
+    resolve_project_folder_to_open,
+)
 from src.io.project_mirror import incremental_copy, list_saved_projects, local_project_dir
 from src.io.project_sync import (
     RemoteJsonError,
@@ -43,7 +46,7 @@ from src.io.project_sync import (
     write_local_json_cache,
     remember_board_after_local_json,
 )
-from src.io.sample_files import find_sample_files
+from src.io.sample_files import application_not_found_hint, find_sample_files
 from src.io.network_sources import (
     NetworkSourcesConfig,
     ProbeResult,
@@ -92,6 +95,7 @@ from src.ui.theme import (
     TEXT_DIM,
     polish_date_edit_calendar,
     plus_icon,
+    question_pixmap,
     refresh_icon,
     set_calendar_selectable_range,
 )
@@ -250,7 +254,7 @@ class NightlySyncWorker(QThread):
             self.failed.emit(str(exc))
 
 
-APP_VERSION = "1.3.7"
+APP_VERSION = "1.3.8"
 # Calendar popup floor. Dates before this are treated as "no end date"
 # because QDateEdit may clamp the blank sentinel to 1752-09-14.
 _EARLIEST_REAL_YEAR = 1990
@@ -384,6 +388,7 @@ class MainWindow(QMainWindow):
         self._mirror_gen = 0
         self._abandoned_workers = []
         self._is_dirty = False
+        self._application_load_hint = ""
         self._json_save_kind = "full"
         self._remote_was_reachable = None  # type: Optional[bool]
         self._network_config = load_network_sources_config()
@@ -514,7 +519,7 @@ class MainWindow(QMainWindow):
         self.btn_open_local.setFlat(True)
         self.btn_open_local.setCursor(Qt.PointingHandCursor)
         self.btn_open_local.setVisible(False)
-        self.btn_open_local.setToolTip("打开公盘文件夹")
+        self.btn_open_local.setToolTip("选择打开本地或公盘文件夹")
         self.btn_open_local.clicked.connect(self._open_project_folder)
 
         backup_sep = QFrame()
@@ -1105,10 +1110,19 @@ class MainWindow(QMainWindow):
         self._set_path_text(str(path))
         self.load_project_folder(path)
 
-    def _folder_target_to_open(self) -> tuple[Optional[Path], str]:
+    def _configured_remote_path(self) -> Optional[Path]:
         raw = (self.state.source_path or "").strip()
-        remote = Path(raw) if raw else self._source_path
-        return resolve_project_folder_to_open(remote, self._local_path)
+        return Path(raw) if raw else self._source_path
+
+    def _folder_target_to_open(self) -> tuple[Optional[Path], str]:
+        return resolve_project_folder_to_open(
+            self._configured_remote_path(), self._local_path
+        )
+
+    def _openable_project_folders(self) -> tuple[Optional[Path], Optional[Path]]:
+        return resolve_openable_project_folders(
+            self._configured_remote_path(), self._local_path
+        )
 
     def _source_project_path(self) -> Optional[Path]:
         path, kind = self._folder_target_to_open()
@@ -1392,8 +1406,15 @@ class MainWindow(QMainWindow):
         )
         lang = self.state._edit_lang()
         if not rows and not (self.state.custom_overview_fields or []):
-            hint = QLabel("未加载" if not has_fields else "暂无字段（已全部移除）")
+            if self._application_load_hint:
+                hint_text = self._application_load_hint
+            elif not has_fields:
+                hint_text = "未加载"
+            else:
+                hint_text = "暂无字段（已全部移除）"
+            hint = QLabel(hint_text)
             hint.setObjectName("dimLabel")
+            hint.setWordWrap(True)
             self.info_form.addRow(hint)
         else:
             imported_keys = set()
@@ -1437,6 +1458,7 @@ class MainWindow(QMainWindow):
         local_path = local_project_dir(project_id)
         local_path.mkdir(parents=True, exist_ok=True)
 
+        self._application_load_hint = ""
         self._source_path = project_path
         self._local_path = local_path
         self._project_path = project_path
@@ -1493,9 +1515,10 @@ class MainWindow(QMainWindow):
         """Parse 申请单 into left-panel overview fields. Returns True on success."""
         app_excel, _quote_pdf = self._find_sample_files(project_path)
         if not app_excel:
-            self._clear_info_form()
-            self.info_form.addRow(QLabel("未找到申请单 Excel"))
-            self.lbl_project_id.setText(f"项目号: {self.state.project_id or '—'}")
+            self._application_load_hint = application_not_found_hint(
+                project_path, self.state.project_id or ""
+            )
+            self.refresh_overview_ui()
             return False
         try:
             raw = app_excel.read_bytes()
@@ -1503,12 +1526,12 @@ class MainWindow(QMainWindow):
             data = parse_application(clean, name)
             apply_application_data(self.state, data)
             apply_autoliv_to_numbers(self.state, clean)
+            self._application_load_hint = ""
             self.refresh_overview_ui()
             return True
         except Exception as e:
-            self._clear_info_form()
-            self.info_form.addRow(QLabel(f"解析申请单失败: {e}"))
-            self.lbl_project_id.setText(f"项目号: {self.state.project_id or '—'}")
+            self._application_load_hint = f"解析申请单失败: {e}"
+            self.refresh_overview_ui()
             return False
 
     def _parse_fresh_project(self, project_path):
@@ -1765,16 +1788,9 @@ class MainWindow(QMainWindow):
         self.chk_mirror_conn.setToolTip("\n".join(lines))
 
     def _refresh_open_folder_button(self):
-        path, kind = self._folder_target_to_open()
+        path, _kind = self._folder_target_to_open()
         self.btn_open_local.setVisible(path is not None)
-        if kind == "remote":
-            self.btn_open_local.setToolTip("打开公盘文件夹")
-        elif kind == "disconnected":
-            self.btn_open_local.setToolTip("公盘未连接，打开本地文件夹")
-        elif kind == "local":
-            self.btn_open_local.setToolTip("打开本地文件夹")
-        else:
-            self.btn_open_local.setToolTip("打开公盘文件夹")
+        self.btn_open_local.setToolTip("选择打开本地或公盘文件夹")
 
     def _refresh_remote_json_status(self):
         """Refresh 本地镜像 tooltip (公盘 status folded in) and flush pending JSON."""
@@ -1973,17 +1989,55 @@ class MainWindow(QMainWindow):
         ) * 1000
         self._connection_timer.start(max(interval_ms, 1000))
 
+    def _choose_open_folder_kind(
+        self, *, local_available: bool, remote_available: bool
+    ) -> Optional[str]:
+        box = QMessageBox(self)
+        box.setIconPixmap(question_pixmap())
+        box.setWindowTitle("打开项目文件夹")
+        box.setText("请选择要打开的位置")
+        btn_local = box.addButton("💻本地文件夹", QMessageBox.ActionRole)
+        btn_remote = box.addButton("💽公盘文件夹", QMessageBox.ActionRole)
+        box.addButton("取消", QMessageBox.RejectRole)
+        btn_local.setEnabled(local_available)
+        btn_remote.setEnabled(remote_available)
+        if remote_available:
+            box.setDefaultButton(btn_remote)
+        elif local_available:
+            box.setDefaultButton(btn_local)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is btn_local:
+            return "local"
+        if clicked is btn_remote:
+            return "remote"
+        return None
+
     def _open_project_folder(self):
-        path, kind = self._folder_target_to_open()
-        if path is None:
+        remote_dir, local_dir = self._openable_project_folders()
+        if remote_dir is None and local_dir is None:
             QMessageBox.warning(
                 self,
                 "提示",
                 "没有可打开的项目文件夹（公盘未连接，本地镜像尚未就绪）",
             )
             return
-        if kind == "disconnected":
-            QMessageBox.information(self, "提示", "公盘未连接，将打开本地文件夹")
+        kind = self._choose_open_folder_kind(
+            local_available=local_dir is not None,
+            remote_available=remote_dir is not None,
+        )
+        if kind is None:
+            return
+        path = local_dir if kind == "local" else remote_dir
+        if path is None:
+            QMessageBox.warning(
+                self,
+                "提示",
+                "公盘未连接，无法打开公盘文件夹"
+                if kind == "remote"
+                else "本地镜像尚未就绪",
+            )
+            return
         _open_in_file_manager(path)
 
     def _drop_abandoned(self, worker):
@@ -2299,6 +2353,7 @@ class MainWindow(QMainWindow):
             )
 
         self.state = loaded
+        self._application_load_hint = ""
         refresh_special_profile(self.state)
         self._mount_tester_on_project()
         self._local_path = saved.local_path

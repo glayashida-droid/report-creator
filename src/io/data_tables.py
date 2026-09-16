@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.cell.cell import MergedCell
+from openpyxl.styles import Alignment
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 
@@ -28,8 +30,10 @@ from src.io.test_photos import (
 from src.models.project_state import DataTableRef, TestNode
 
 ATTACHMENT_DIR = "数据表附件"
-LIMIT_ROW_LABEL = "限值"
+EMPTY_LIMIT_DISPLAY = "/"
+_CENTER_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=True)
 _BAD_NAME = re.compile(r'[\\/:*?"<>|]')
+_BOUND_LABEL_SEP_RE = re.compile(r"[\s/／|]+")
 
 # macOS .app bundle names / Windows executable stems, preferred order
 _EXCEL_APP_NAMES = ("Microsoft Excel",)
@@ -229,23 +233,71 @@ def _sample_id_col_merge_bottom(ws) -> dict[int, int]:
     return out
 
 
-def _limit_row_sheet_index(ws) -> int | None:
-    """1-based sheet row whose column A equals「限值」."""
-    bbox = _used_bbox(ws)
-    if bbox is None:
+def _classify_bound_label(text: str) -> str | None:
+    """Return 'upper' / 'lower' for 上限·下限 / upper·lower (incl. bilingual)."""
+    raw = (text or "").strip()
+    if not raw:
         return None
-    min_r, _min_c, max_r, _max_c = bbox
-    for r in range(min_r, max_r + 1):
-        if str(ws.cell(row=r, column=1).value or "").strip() == LIMIT_ROW_LABEL:
-            return r
+    compact = _BOUND_LABEL_SEP_RE.sub("", raw)
+    key = compact.casefold()
+    if compact in {"上限", "数据上限"} or key == "upper" or key in {
+        "上限upper",
+        "upper上限",
+        "数据上限upper",
+        "upper数据上限",
+    }:
+        return "upper"
+    if compact in {"下限", "数据下限"} or key == "lower" or key in {
+        "下限lower",
+        "lower下限",
+        "数据下限lower",
+        "lower数据下限",
+    }:
+        return "lower"
     return None
 
 
+@dataclass(frozen=True)
+class BoundRowIndices:
+    """0-based preview rows, or 1-based sheet rows, depending on caller."""
+
+    upper: int | None = None
+    lower: int | None = None
+    label_col: int = 0
+
+    def indices(self) -> tuple[int, ...]:
+        return tuple(r for r in (self.upper, self.lower) if r is not None)
+
+
+def _scan_bound_rows_in_column(ws, col: int, min_r: int, max_r: int) -> BoundRowIndices:
+    upper = lower = None
+    for r in range(min_r, max_r + 1):
+        kind = _classify_bound_label(str(ws.cell(row=r, column=col).value or ""))
+        if kind == "upper" and upper is None:
+            upper = r
+        elif kind == "lower" and lower is None:
+            lower = r
+    return BoundRowIndices(upper=upper, lower=lower, label_col=col)
+
+
+def _bound_row_sheet_indices(ws) -> BoundRowIndices:
+    """1-based sheet rows/column for 上限/下限 labels (col A, else col B)."""
+    bbox = _used_bbox(ws)
+    if bbox is None:
+        return BoundRowIndices()
+    min_r, _min_c, max_r, _max_c = bbox
+    for col in (1, 2):
+        found = _scan_bound_rows_in_column(ws, col, min_r, max_r)
+        if found.indices():
+            return found
+    return BoundRowIndices()
+
+
 def _sample_id_start_row(ws) -> int:
-    """First row for sample ids: below limit row if present, else below content/header."""
-    limit_r = _limit_row_sheet_index(ws)
-    if limit_r is not None:
-        return limit_r + 1
+    """First row for sample ids: below bound rows if present, else below content/header."""
+    bound_rows = _bound_row_sheet_indices(ws).indices()
+    if bound_rows:
+        return max(bound_rows) + 1
     bbox = _used_bbox(ws)
     if bbox is None:
         return 2
@@ -284,11 +336,132 @@ def _should_insert_sample_id_column(ws, start_row: int) -> bool:
     header_end_row = max(1, start_row - 1)
     if _col1_has_sample_id_header(ws, header_end_row):
         return False
-    limit_r = _limit_row_sheet_index(ws)
-    if limit_r is not None and limit_r < start_row:
-        # Col A already has 限值 (and possibly empty header cells) — do not insert.
+    bound = _bound_row_sheet_indices(ws)
+    if bound.indices() and min(bound.indices()) < start_row:
+        # Bound labels already occupy col A or B — do not insert a third left column.
         return False
     return _col1_has_content(ws)
+
+
+def _unmerge_overlapping(ws, min_r: int, min_c: int, max_r: int, max_c: int) -> None:
+    overlapping = [
+        str(rng)
+        for rng in ws.merged_cells.ranges
+        if not (
+            rng.max_row < min_r
+            or rng.min_row > max_r
+            or rng.max_col < min_c
+            or rng.min_col > max_c
+        )
+    ]
+    for ref in overlapping:
+        ws.unmerge_cells(ref)
+
+
+def _ensure_bound_label_column(ws, bound: BoundRowIndices) -> BoundRowIndices:
+    """Keep 上限/下限 in column B so sample ids can span A:B."""
+    if not bound.indices() or bound.label_col == 2:
+        return bound
+    ws.insert_cols(2)
+    for r in bound.indices():
+        ws.cell(row=r, column=2).value = ws.cell(row=r, column=1).value
+        ws.cell(row=r, column=1).value = None
+    return BoundRowIndices(upper=bound.upper, lower=bound.lower, label_col=2)
+
+
+def _apply_sample_header_through_bounds(ws, last_bound_row: int) -> None:
+    """Merge 样品编号 in column A through the 上限/下限 rows, centered."""
+    _unmerge_overlapping(ws, 1, 1, last_bound_row, 1)
+    ws.cell(row=1, column=1).value = _sample_id_column_header_text()
+    ws.cell(row=1, column=1).alignment = _CENTER_ALIGN
+    if last_bound_row > 1:
+        ws.merge_cells(
+            start_row=1, start_column=1, end_row=last_bound_row, end_column=1
+        )
+
+
+def _write_sample_ids_spanning_label_col(
+    ws, start_row: int, sample_ids: Sequence[str]
+) -> None:
+    """Write ids merged across A:B and centered (图2)."""
+    for i, sid in enumerate(sample_ids):
+        r = start_row + i
+        _unmerge_overlapping(ws, r, 1, r, 2)
+        ws.cell(row=r, column=1).value = sid
+        ws.cell(row=r, column=2).value = None
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=2)
+        ws.cell(row=r, column=1).alignment = _CENTER_ALIGN
+
+
+def _fill_empty_bound_cells(ws, bound: BoundRowIndices) -> None:
+    """Write '/' into empty 上限/下限 data cells so the xlsx matches preview."""
+    bbox = _used_bbox(ws)
+    if bbox is None or not bound.indices():
+        return
+    _min_r, min_c, _max_r, max_c = bbox
+    skip = {1, bound.label_col}
+    for r in bound.indices():
+        for c in range(min_c, max_c + 1):
+            if c in skip:
+                continue
+            cell = ws.cell(row=r, column=c)
+            if isinstance(cell, MergedCell):
+                continue
+            if not _is_nonempty(cell.value):
+                cell.value = EMPTY_LIMIT_DISPLAY
+
+
+def _merge_sample_id_rows_from(ws, start_row: int) -> None:
+    """Merge existing sample-id rows across A:B without changing id values."""
+    bbox = _used_bbox(ws)
+    if bbox is None:
+        return
+    max_r = bbox[2]
+    for r in range(start_row, max_r + 1):
+        cell_a = ws.cell(row=r, column=1)
+        if isinstance(cell_a, MergedCell) or not _is_nonempty(cell_a.value):
+            continue
+        _unmerge_overlapping(ws, r, 1, r, 2)
+        cell_b = ws.cell(row=r, column=2)
+        if not isinstance(cell_b, MergedCell):
+            cell_b.value = None
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=2)
+        ws.cell(row=r, column=1).alignment = _CENTER_ALIGN
+
+
+def _apply_bound_display_layout(ws) -> BoundRowIndices:
+    """Move bound labels to B, merge 样品编号 through bounds, fill '/'."""
+    bound = _bound_row_sheet_indices(ws)
+    if not bound.indices():
+        return bound
+    bound = _ensure_bound_label_column(ws, bound)
+    last_bound = max(bound.indices())
+    _apply_sample_header_through_bounds(ws, last_bound)
+    _fill_empty_bound_cells(ws, bound)
+    return bound
+
+
+def sync_display_layout(path: Path) -> None:
+    """Write preview layout into the first sheet without changing sample ids.
+
+    Empty 上限/下限 data cells become '/'; 样品编号 merges through bound rows;
+    existing sample-id rows span A:B. No-op when the sheet has no bound rows.
+    """
+    xlsx = Path(path)
+    if not xlsx.is_file():
+        raise DataTableError("数据表文件不存在")
+    wb = load_workbook(xlsx)
+    try:
+        ws = wb.worksheets[0]
+        bound = _apply_bound_display_layout(ws)
+        if bound.indices():
+            _merge_sample_id_rows_from(ws, max(bound.indices()) + 1)
+            try:
+                wb.save(xlsx)
+            except OSError as exc:
+                raise DataTableError(f"无法写入数据表：{exc}") from exc
+    finally:
+        wb.close()
 
 
 def import_sample_ids(path: Path, sample_ids: Sequence[str]) -> None:
@@ -304,17 +477,18 @@ def import_sample_ids(path: Path, sample_ids: Sequence[str]) -> None:
         if _should_insert_sample_id_column(ws, start_row):
             ws.insert_cols(1)
             start_row = _sample_id_start_row(ws)
-        limit_r = _limit_row_sheet_index(ws)
-        if limit_r is not None:
-            header_end_row = max(1, limit_r - 1)
+        bound = _bound_row_sheet_indices(ws)
+        if bound.indices():
+            bound = _ensure_bound_label_column(ws, bound)
+            last_bound = max(bound.indices())
+            _apply_sample_header_through_bounds(ws, last_bound)
+            _write_sample_ids_spanning_label_col(ws, last_bound + 1, ids)
+            _fill_empty_bound_cells(ws, bound)
         else:
             header_end_row = max(1, start_row - 1)
-        _write_sample_id_column_header(ws, header_end_row)
-        # Keep 限值 label if present.
-        if limit_r is not None:
-            ws.cell(row=limit_r, column=1, value=LIMIT_ROW_LABEL)
-        for i, sid in enumerate(ids):
-            ws.cell(row=start_row + i, column=1, value=sid)
+            _write_sample_id_column_header(ws, header_end_row)
+            for i, sid in enumerate(ids):
+                ws.cell(row=start_row + i, column=1, value=sid)
         wb.save(xlsx)
     finally:
         wb.close()
@@ -547,24 +721,6 @@ def parse_numeric_display(text: str) -> float | None:
         return None
 
 
-# Range separators: fullwidth tilde, ASCII tilde, wave dash.
-_LIMIT_RANGE_SEPS = ("～", "~", "〜")
-
-# One-sided limit prefixes, longest first.
-_LIMIT_ONE_SIDED = (
-    ("大于等于", "ge"),
-    ("小于等于", "le"),
-    ("大于", "gt"),
-    ("小于", "lt"),
-    (">=", "ge"),
-    ("<=", "le"),
-    ("≥", "ge"),
-    ("≤", "le"),
-    (">", "gt"),
-    ("<", "lt"),
-)
-
-
 @dataclass(frozen=True)
 class LimitRule:
     """Numeric bound for one column (or whole table). Missing side = unbounded."""
@@ -575,50 +731,87 @@ class LimitRule:
     hi_exclusive: bool = False
 
 
-def find_limit_row_index(snap: PreviewSnapshot, *, sample_col: int = 0) -> int | None:
-    """0-based grid row whose sample column text equals「限值」."""
+def find_bound_row_indices(
+    snap: PreviewSnapshot, *, sample_col: int = 0
+) -> BoundRowIndices:
+    """0-based grid rows for 上限/下限; labels may sit in sample_col or the next column."""
     values = snap.values or []
-    for r, row in enumerate(values):
-        text = (row[sample_col] if sample_col < len(row) else "").strip()
-        if text == LIMIT_ROW_LABEL:
-            return r
-    return None
+    ncols = max((len(r) for r in values), default=0)
+    search_cols = [sample_col]
+    if sample_col + 1 < ncols:
+        search_cols.append(sample_col + 1)
+    for c in search_cols:
+        upper = lower = None
+        for r, row in enumerate(values):
+            text = row[c] if c < len(row) else ""
+            kind = _classify_bound_label(text)
+            if kind == "upper" and upper is None:
+                upper = r
+            elif kind == "lower" and lower is None:
+                lower = r
+        if upper is not None or lower is not None:
+            return BoundRowIndices(upper=upper, lower=lower, label_col=c)
+    return BoundRowIndices(label_col=sample_col)
 
 
 def has_limit_row(snap: PreviewSnapshot, *, sample_col: int = 0) -> bool:
-    return find_limit_row_index(snap, sample_col=sample_col) is not None
+    return bool(find_bound_row_indices(snap, sample_col=sample_col).indices())
 
 
-def parse_limit_expression(text: str) -> LimitRule | None:
-    """Parse a limit cell; None if empty or not a supported expression."""
-    s = (text or "").strip()
-    if not s:
-        return None
-    for sep in _LIMIT_RANGE_SEPS[1:]:
-        s = s.replace(sep, "～")
-    if "～" in s:
-        left, _, right = s.partition("～")
-        lo = parse_numeric_display(left.strip())
-        hi = parse_numeric_display(right.strip())
-        if lo is None or hi is None:
-            return None
-        if lo > hi:
-            lo, hi = hi, lo
-        return LimitRule(lo=lo, hi=hi)
-    for prefix, kind in _LIMIT_ONE_SIDED:
-        if s.startswith(prefix):
-            num = parse_numeric_display(s[len(prefix) :].strip())
-            if num is None:
-                return None
-            if kind == "gt":
-                return LimitRule(lo=num, lo_exclusive=True)
-            if kind == "lt":
-                return LimitRule(hi=num, hi_exclusive=True)
-            if kind == "ge":
-                return LimitRule(lo=num)
-            if kind == "le":
-                return LimitRule(hi=num)
-    return None
+def _skip_limit_cols(bounds: BoundRowIndices, sample_col: int) -> set[int]:
+    skip = {sample_col}
+    if bounds.label_col != sample_col:
+        skip.add(bounds.label_col)
+    return skip
+
+
+def _first_data_col(bounds: BoundRowIndices, sample_col: int) -> int:
+    skip = _skip_limit_cols(bounds, sample_col)
+    return max(skip) + 1
+
+
+def _pad_row(row: list[str], ncols: int) -> list[str]:
+    while len(row) < ncols:
+        row.append("")
+    return row
+
+
+def _cell_text(values: List[List[str]], r: int | None, c: int) -> str:
+    if r is None or r < 0 or r >= len(values):
+        return ""
+    row = values[r]
+    return row[c] if c < len(row) else ""
+
+
+def _occupied_column_bounds(
+    snap: PreviewSnapshot, *, sample_col: int = 0
+) -> tuple[BoundRowIndices, dict[int, tuple[float | None, float | None]], int]:
+    """Per occupied data column: (lower, upper). Occupied = at least one numeric side."""
+    bounds = find_bound_row_indices(snap, sample_col=sample_col)
+    values = snap.values or []
+    ncols = max((len(r) for r in values), default=0)
+    skip_cols = _skip_limit_cols(bounds, sample_col)
+    per_col: dict[int, tuple[float | None, float | None]] = {}
+    for c in range(ncols):
+        if c in skip_cols:
+            continue
+        lo = parse_numeric_display(_cell_text(values, bounds.lower, c))
+        hi = parse_numeric_display(_cell_text(values, bounds.upper, c))
+        if lo is not None or hi is not None:
+            per_col[c] = (lo, hi)
+    return bounds, per_col, ncols
+
+
+def _rule_from_sides(
+    lo: float | None, hi: float | None, *, inclusive: bool
+) -> LimitRule:
+    exclusive = not inclusive
+    return LimitRule(
+        lo=lo,
+        hi=hi,
+        lo_exclusive=exclusive if lo is not None else False,
+        hi_exclusive=exclusive if hi is not None else False,
+    )
 
 
 def value_violates_limit(val: float, rule: LimitRule) -> bool:
@@ -638,48 +831,46 @@ def value_violates_limit(val: float, rule: LimitRule) -> bool:
 
 
 def _column_limit_rules(
-    snap: PreviewSnapshot, *, sample_col: int = 0
+    snap: PreviewSnapshot, *, sample_col: int = 0, inclusive: bool = True
 ) -> dict[int, LimitRule] | None:
-    """Map data-column index → rule. None if no limit row; {} if row but no exprs."""
-    limit_r = find_limit_row_index(snap, sample_col=sample_col)
-    if limit_r is None:
+    """Map data-column index → rule. None if no bound rows; {} if rows but no numbers."""
+    bounds, per_col, ncols = _occupied_column_bounds(snap, sample_col=sample_col)
+    if not bounds.indices():
         return None
-    values = snap.values or []
-    row = values[limit_r] if limit_r < len(values) else []
-    ncols = max((len(r) for r in values), default=0)
-    parsed: list[tuple[int, LimitRule]] = []
-    for c in range(ncols):
-        if c == sample_col:
-            continue
-        text = row[c] if c < len(row) else ""
-        rule = parse_limit_expression(text)
-        if rule is not None:
-            parsed.append((c, rule))
-    if len(parsed) == 1:
-        _, rule = parsed[0]
-        return {c: rule for c in range(ncols) if c != sample_col}
-    return {c: rule for c, rule in parsed}
+    if not per_col:
+        return {}
+    if len(per_col) == 1:
+        lo, hi = next(iter(per_col.values()))
+        rule = _rule_from_sides(lo, hi, inclusive=inclusive)
+        skip_cols = _skip_limit_cols(bounds, sample_col)
+        return {c: rule for c in range(ncols) if c not in skip_cols}
+    return {
+        c: _rule_from_sides(lo, hi, inclusive=inclusive)
+        for c, (lo, hi) in per_col.items()
+    }
 
 
 def find_out_of_range_by_limits(
-    snap: PreviewSnapshot, *, sample_col: int = 0
+    snap: PreviewSnapshot, *, sample_col: int = 0, inclusive: bool = True
 ) -> List[Tuple[int, int]]:
-    """Cells outside limit-row rules. Empty if no limit row or no parseable exprs."""
-    rules = _column_limit_rules(snap, sample_col=sample_col)
+    """Cells outside 上限/下限 rules. Empty if no bound rows or no parseable numbers."""
+    rules = _column_limit_rules(
+        snap, sample_col=sample_col, inclusive=inclusive
+    )
     if not rules:
         return []
     values = snap.values or []
     header_rows, nrows, ncols = _data_region(snap)
-    limit_r = find_limit_row_index(snap, sample_col=sample_col)
-    data_start = header_rows
-    if limit_r is not None:
-        data_start = max(data_start, limit_r + 1)
+    skip_rows = set(find_bound_row_indices(snap, sample_col=sample_col).indices())
+    skip_cols = _skip_limit_cols(
+        find_bound_row_indices(snap, sample_col=sample_col), sample_col
+    )
     flagged: List[Tuple[int, int]] = []
     for c, rule in rules.items():
-        if c < 0 or c >= ncols or c == sample_col:
+        if c < 0 or c >= ncols or c in skip_cols:
             continue
-        for r in range(data_start, nrows):
-            if limit_r is not None and r == limit_r:
+        for r in range(header_rows, nrows):
+            if r in skip_rows:
                 continue
             row = values[r] if r < len(values) else []
             text = row[c] if c < len(row) else ""
@@ -694,8 +885,6 @@ def find_out_of_range_by_limits(
 def _sheet_a1_range(
     r0: int, c0: int, r1: int, c1: int, *, origin_row: int, origin_col: int
 ) -> str:
-    from openpyxl.utils import get_column_letter
-
     min_r = origin_row + r0
     min_c = origin_col + c0
     max_r = origin_row + r1
@@ -705,10 +894,72 @@ def _sheet_a1_range(
     )
 
 
+def _drop_grid_rows(
+    values: List[List[str]],
+    merges: List[str],
+    drop: set[int],
+    *,
+    origin_r: int,
+) -> tuple[List[List[str]], List[str]]:
+    if not drop:
+        return values, merges
+    new_values = [row for i, row in enumerate(values) if i not in drop]
+    new_merges: List[str] = []
+    for merge in merges:
+        try:
+            min_c, min_r, max_c, max_r = range_boundaries(merge)
+        except Exception:
+            continue
+        r0 = min_r - origin_r
+        r1 = max_r - origin_r
+        if any(r0 <= d <= r1 for d in drop):
+            continue
+        r0 -= sum(1 for d in drop if d < r0)
+        r1 -= sum(1 for d in drop if d < r1)
+        min_r = origin_r + r0
+        max_r = origin_r + r1
+        new_merges.append(
+            f"{get_column_letter(min_c)}{min_r}:{get_column_letter(max_c)}{max_r}"
+        )
+    return new_values, new_merges
+
+
+def _span_bound_row(
+    values: List[List[str]],
+    merges: List[str],
+    row_i: int,
+    src_col: int,
+    *,
+    sample_col: int,
+    first_data: int,
+    skip_cols: set[int],
+    ncols: int,
+    origin_r: int,
+    origin_c: int,
+) -> List[str]:
+    row = _pad_row(values[row_i], ncols)
+    expr = row[src_col] if src_col < len(row) else ""
+    if first_data >= ncols:
+        return merges
+    for c in range(ncols):
+        if c in skip_cols:
+            continue
+        row[c] = expr if c == first_data else ""
+    span = _sheet_a1_range(
+        row_i,
+        first_data,
+        row_i,
+        ncols - 1,
+        origin_row=origin_r,
+        origin_col=origin_c,
+    )
+    return [m for m in merges if m != span] + [span]
+
+
 def prepare_display_snapshot(
     snap: PreviewSnapshot, *, include_limit_row: bool = True, sample_col: int = 0
 ) -> PreviewSnapshot:
-    """Copy snap for UI/Word: optionally drop limit row; single-expr limit spans data cols.
+    """Copy snap for UI/Word: bound rows, single-occupied span, empty cells → '/'.
 
     Does not mutate the source snapshot or the xlsx on disk.
     """
@@ -716,71 +967,68 @@ def prepare_display_snapshot(
     merges = list(snap.merges or [])
     origin_r = snap.origin_row or 1
     origin_c = snap.origin_col or 1
-    limit_r = find_limit_row_index(
-        PreviewSnapshot(
-            sheet_name=snap.sheet_name,
-            values=values,
-            merges=merges,
-            origin_row=origin_r,
-            origin_col=origin_c,
-        ),
-        sample_col=sample_col,
+    working = PreviewSnapshot(
+        sheet_name=snap.sheet_name,
+        values=values,
+        merges=merges,
+        origin_row=origin_r,
+        origin_col=origin_c,
     )
+    bounds, per_col, ncols = _occupied_column_bounds(
+        working, sample_col=sample_col
+    )
+    bound_rows = bounds.indices()
 
-    if limit_r is not None:
-        row = values[limit_r]
-        ncols = max((len(r) for r in values), default=0)
-        while len(row) < ncols:
-            row.append("")
-        parsed_cols = [
-            c
-            for c in range(ncols)
-            if c != sample_col and parse_limit_expression(row[c] if c < len(row) else "")
-        ]
-        if len(parsed_cols) == 1:
-            src = parsed_cols[0]
-            expr = row[src]
-            first_data = sample_col + 1
-            if first_data < ncols:
-                for c in range(ncols):
-                    if c == sample_col:
-                        continue
-                    row[c] = expr if c == first_data else ""
-                span = _sheet_a1_range(
-                    limit_r,
-                    first_data,
-                    limit_r,
-                    ncols - 1,
-                    origin_row=origin_r,
-                    origin_col=origin_c,
+    if bound_rows:
+        for row_i in bound_rows:
+            _pad_row(values[row_i], ncols)
+        skip_cols = _skip_limit_cols(bounds, sample_col)
+        first_data = _first_data_col(bounds, sample_col)
+        spanned: set[int] = set()
+        if len(per_col) == 1:
+            src = next(iter(per_col))
+            lo, hi = per_col[src]
+            if hi is not None and bounds.upper is not None:
+                merges = _span_bound_row(
+                    values,
+                    merges,
+                    bounds.upper,
+                    src,
+                    sample_col=sample_col,
+                    first_data=first_data,
+                    skip_cols=skip_cols,
+                    ncols=ncols,
+                    origin_r=origin_r,
+                    origin_c=origin_c,
                 )
-                merges = [m for m in merges if m != span] + [span]
-
+                spanned.add(bounds.upper)
+            if lo is not None and bounds.lower is not None:
+                merges = _span_bound_row(
+                    values,
+                    merges,
+                    bounds.lower,
+                    src,
+                    sample_col=sample_col,
+                    first_data=first_data,
+                    skip_cols=skip_cols,
+                    ncols=ncols,
+                    origin_r=origin_r,
+                    origin_c=origin_c,
+                )
+                spanned.add(bounds.lower)
+        for row_i in bound_rows:
+            if row_i in spanned:
+                continue
+            row = values[row_i]
+            for c in range(ncols):
+                if c in skip_cols:
+                    continue
+                if not (row[c] if c < len(row) else "").strip():
+                    row[c] = EMPTY_LIMIT_DISPLAY
         if not include_limit_row:
-            values = values[:limit_r] + values[limit_r + 1 :]
-            new_merges: List[str] = []
-            for merge in merges:
-                try:
-                    min_c, min_r, max_c, max_r = range_boundaries(merge)
-                except Exception:
-                    continue
-                r0 = min_r - origin_r
-                r1 = max_r - origin_r
-                if r0 <= limit_r <= r1:
-                    continue
-                if r0 > limit_r:
-                    r0 -= 1
-                    r1 -= 1
-                    min_r = origin_r + r0
-                    max_r = origin_r + r1
-                    from openpyxl.utils import get_column_letter
-
-                    merge = (
-                        f"{get_column_letter(min_c)}{min_r}:"
-                        f"{get_column_letter(max_c)}{max_r}"
-                    )
-                new_merges.append(merge)
-            merges = new_merges
+            values, merges = _drop_grid_rows(
+                values, merges, set(bound_rows), origin_r=origin_r
+            )
 
     return PreviewSnapshot(
         sheet_name=snap.sheet_name,
@@ -797,10 +1045,10 @@ def _data_region(snap: PreviewSnapshot) -> tuple[int, int, int]:
     nrows = len(values)
     ncols = max((len(r) for r in values), default=0)
     header_rows = infer_header_row_count(snap) if values else 0
-    limit_r = find_limit_row_index(snap)
-    if limit_r is not None and limit_r < header_rows:
-        # Limit row must not count as repeating Word header.
-        header_rows = limit_r
+    first_bound = min(find_bound_row_indices(snap).indices(), default=None)
+    if first_bound is not None and first_bound < header_rows:
+        # Bound rows must not count as repeating Word header.
+        header_rows = first_bound
     return header_rows, nrows, ncols
 
 
@@ -814,12 +1062,15 @@ def find_decimal_inconsistencies(
     """
     values = snap.values or []
     header_rows, nrows, ncols = _data_region(snap)
+    skip_rows = set(find_bound_row_indices(snap, sample_col=sample_col).indices())
     flagged: List[Tuple[int, int]] = []
     for c in range(ncols):
         if c == sample_col:
             continue
         places_by_row: List[Tuple[int, int]] = []
         for r in range(header_rows, nrows):
+            if r in skip_rows:
+                continue
             row = values[r] if r < len(values) else []
             text = row[c] if c < len(row) else ""
             places = decimal_places(text)
@@ -857,12 +1108,15 @@ def find_out_of_range(
         lo, hi = hi, lo
     values = snap.values or []
     header_rows, nrows, ncols = _data_region(snap)
+    skip_rows = set(find_bound_row_indices(snap, sample_col=sample_col).indices())
     cols = range(ncols) if col is None else [col]
     flagged: List[Tuple[int, int]] = []
     for c in cols:
         if c == sample_col or c < 0 or c >= ncols:
             continue
         for r in range(header_rows, nrows):
+            if r in skip_rows:
+                continue
             row = values[r] if r < len(values) else []
             text = row[c] if c < len(row) else ""
             val = parse_numeric_display(text)

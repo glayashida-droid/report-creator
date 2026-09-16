@@ -10,6 +10,11 @@ from PySide6.QtGui import QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDro
 
 from src.models.project_state import TestLeg, TestNode
 from src.parsers.db_loader import DuplicateStandardError, duplicate_standard_message
+from src.generators.original_record import (
+    export_node_original_record,
+    original_record_data_from_node,
+    resolve_original_record_template,
+)
 from src.ui.candidate_pool import CANDIDATE_TEST_MIME, candidate_test_from_mime, pool_drag_active
 from src.ui.test_detail_dialog import TestDetailDialog
 from src.io.test_photos import (
@@ -453,14 +458,24 @@ class LegWidget(QFrame):
 
         header_layout = QHBoxLayout()
         header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(4)
         lbl_title = QLabel(f"<b>{self.leg_data.leg_name}</b>")
-        btn_del = QPushButton("删除")
-        btn_del.setObjectName("accentButton")
-        btn_del.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-        btn_del.clicked.connect(lambda: self.leg_deleted.emit(self))
+        self.btn_batch_print = QPushButton("打印TR")
+        self.btn_batch_print.setObjectName("legBatchPrintButton")
+        self.btn_batch_print.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self.btn_batch_print.setToolTip("打印本 Leg 全部原始记录")
+        self.btn_batch_print.clicked.connect(self.on_batch_print)
+        self.btn_delete = QPushButton("删除")
+        self.btn_delete.setObjectName("accentButton")
+        self.btn_delete.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self.btn_delete.clicked.connect(lambda: self.leg_deleted.emit(self))
+        header_h = max(self.btn_batch_print.sizeHint().height(), self.btn_delete.sizeHint().height())
+        self.btn_batch_print.setFixedHeight(header_h)
+        self.btn_delete.setFixedHeight(header_h)
         header_layout.addWidget(lbl_title)
         header_layout.addStretch()
-        header_layout.addWidget(btn_del)
+        header_layout.addWidget(self.btn_batch_print)
+        header_layout.addWidget(self.btn_delete)
         self.layout.addLayout(header_layout)
 
         self.nodes_layout = QVBoxLayout()
@@ -600,6 +615,83 @@ class LegWidget(QFrame):
         state = self._project_state()
         raw = getattr(state, "project_path", "") if state is not None else ""
         return Path(raw) if raw else None
+
+    def _remote_root(self) -> Optional[Path]:
+        state = self._project_state()
+        raw = (getattr(state, "source_path", "") or "").strip() if state is not None else ""
+        return Path(raw) if raw else None
+
+    def _main_window(self):
+        widget = self.parent()
+        while widget is not None and not hasattr(widget, "_network_config"):
+            widget = widget.parent()
+        return widget
+
+    def on_batch_print(self):
+        nodes = list(self.leg_data.nodes or [])
+        if not nodes or any(not node.is_detail_complete() for node in nodes):
+            QMessageBox.warning(
+                self,
+                "提示",
+                "🙋‍♂️尚有试验未维护完整，请全部维护后打印",
+            )
+            return
+        reply = QMessageBox.question(
+            self,
+            "批量打印TR",
+            f"🙋‍♀️是否打印整条{self.leg_data.leg_name}的所有原始记录？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        host = self._main_window()
+        try:
+            template = resolve_original_record_template(
+                getattr(host, "_network_config", None) if host is not None else None
+            )
+        except FileNotFoundError as exc:
+            QMessageBox.warning(self, "无法导出", str(exc))
+            return
+        state = self._project_state()
+        project_path = str(self._project_root() or "")
+        remote_root = str(self._remote_root() or "")
+        successes: List[str] = []
+        failures: List[str] = []
+        record = getattr(host, "_record_usage_original_record", None) if host is not None else None
+        for node in nodes:
+            name = (node.test_name or "").strip() or "（未命名试验）"
+            try:
+                data = original_record_data_from_node(
+                    node,
+                    leg_name=self.leg_data.leg_name,
+                    state=state,
+                    project_path=project_path,
+                    remote_root=remote_root,
+                )
+                out_path = export_node_original_record(data, template_path=template)
+            except Exception as exc:
+                failures.append(f"{name}：{exc}")
+                continue
+            successes.append(str(out_path))
+            if callable(record):
+                record()
+        if failures and not successes:
+            QMessageBox.critical(
+                self,
+                "导出失败",
+                "未能生成原始记录：\n" + "\n".join(failures),
+            )
+            return
+        lines = []
+        if successes:
+            lines.append(f"已生成 {len(successes)} 份原始记录：")
+            lines.extend(successes)
+        if failures:
+            lines.append("")
+            lines.append(f"失败 {len(failures)} 份：")
+            lines.extend(failures)
+        QMessageBox.information(self, "批量打印TR", "\n".join(lines))
 
     def _hooked_dir_key_for_node(self, nw: TestNodeWidget) -> Optional[str]:
         root = self._project_root()

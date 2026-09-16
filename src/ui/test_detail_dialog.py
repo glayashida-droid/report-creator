@@ -40,8 +40,8 @@ from src.io.data_tables import (
     copy_from_template,
     create_blank_workbook,
     delete_attachment,
+    find_bound_row_indices,
     find_decimal_inconsistencies,
-    find_limit_row_index,
     find_out_of_range_by_limits,
     has_limit_row,
     import_sample_ids,
@@ -49,6 +49,7 @@ from src.io.data_tables import (
     open_attachment,
     prepare_display_snapshot,
     read_preview_snapshot,
+    sync_display_layout,
     upload_existing_xlsx,
 )
 from src.io.project_assets import (
@@ -288,15 +289,29 @@ def _pixmap_from_standard_bytes(data: bytes) -> QPixmap:
 
 
 class StdImagePopup(QLabel):
-    """Frameless enlarged image; click to dismiss."""
+    """Frameless enlarged image; click or Escape to dismiss."""
 
     def __init__(self, pixmap, parent=None):
         super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint)
         self.setObjectName("stdImagePopup")
         self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setFocusPolicy(Qt.StrongFocus)
         self.setCursor(Qt.PointingHandCursor)
         self.setPixmap(pixmap)
         self.adjustSize()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.raise_()
+        self.activateWindow()
+        self.setFocus(Qt.ActiveWindowFocusReason)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.close()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -749,7 +764,7 @@ class TestDetailDialog(QDialog):
         self.txt_env_condition.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         date_row.addWidget(self.lbl_env)
         date_row.addWidget(self.txt_env_condition, stretch=1)
-        self.btn_print_raw = QPushButton("打印")
+        self.btn_print_raw = QPushButton("打印TR")
         self.btn_print_raw.setToolTip("打印原始记录")
         self.btn_print_raw.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.btn_print_raw.clicked.connect(self._on_print_raw_record)
@@ -2502,6 +2517,12 @@ class TestDetailDialog(QDialog):
             self._project_root(), self._remote_root(), ref.relative_path
         )
 
+    def _sync_data_table_display_layout(self, ref: DataTableRef) -> None:
+        path = self._resolve_data_table(ref)
+        if path is None:
+            return
+        sync_display_layout(path)
+
     def _leg_name(self) -> str:
         if self._project_state is None:
             return ""
@@ -2574,12 +2595,13 @@ class TestDetailDialog(QDialog):
         table.verticalHeader().setVisible(True)
         table._preview_snap = snap
         table._display_snap = display
+        bound_rows = set(find_bound_row_indices(display).indices())
         for r, row in enumerate(rows):
             for c in range(cols):
                 text = row[c] if c < len(row) else ""
                 item = QTableWidgetItem(text)
                 item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                if has_limit_row(snap) and find_limit_row_index(snap) == r and c > 0:
+                if c == 0 or (c > 0 and r in bound_rows):
                     item.setTextAlignment(Qt.AlignCenter)
                 table.setItem(r, c, item)
         origin_r = display.origin_row or 1
@@ -2647,9 +2669,9 @@ class TestDetailDialog(QDialog):
         if btn is not None:
             btn.setEnabled(enabled)
             if enabled:
-                btn.setToolTip("按表内限值行校验数据列是否超限")
+                btn.setToolTip("按表内上限/下限行校验数据列是否超限")
             else:
-                btn.setToolTip("当前表无限值行，无法数据校验")
+                btn.setToolTip("当前表无上限/下限行，无法数据校验")
         chk = getattr(table, "_limit_export_chk", None)
         if chk is not None:
             chk.setVisible(enabled)
@@ -2662,9 +2684,19 @@ class TestDetailDialog(QDialog):
             QMessageBox.warning(self, "提示", "暂无预览数据")
             return
         if not has_limit_row(snap):
-            QMessageBox.warning(self, "提示", "当前表无限值行，无法数据校验")
+            QMessageBox.warning(self, "提示", "当前表无上限/下限行，无法数据校验")
             return
-        flagged = find_out_of_range_by_limits(snap)
+        reply = QMessageBox.question(
+            self,
+            "数据校验",
+            "👋数据等于限值是否算做合格？",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.Yes,
+        )
+        if reply == QMessageBox.Cancel:
+            return
+        inclusive = reply == QMessageBox.Yes
+        flagged = find_out_of_range_by_limits(snap, inclusive=inclusive)
         self._apply_preview_validation_colors(table, snap, range_cells=flagged)
         if not flagged:
             SaveSuccessDialog(self, seconds=3, message="✌️ 数据校验通过").exec()
@@ -2722,14 +2754,14 @@ class TestDetailDialog(QDialog):
             btn_open.clicked.connect(lambda _=False, r=ref: self._open_data_table(r))
             bar.addWidget(btn_open)
             btn_refresh = QPushButton("刷新")
-            btn_refresh.setToolTip("重新扫描数据表附件文件夹并读取预览")
+            btn_refresh.setToolTip("把预览布局写入附件（空限值填 /、样品编号合并）并重新读取")
             btn_refresh.clicked.connect(
                 lambda _=False, r=ref: self._refresh_data_table_preview(r)
             )
             bar.addWidget(btn_refresh)
             btn_validate = QPushButton("数据校验")
             btn_validate.setObjectName("accentButton")
-            btn_validate.setToolTip("按表内限值行校验数据列是否超限")
+            btn_validate.setToolTip("按表内上限/下限行校验数据列是否超限")
             bar.addWidget(btn_validate)
             btn_delete = QPushButton("删除")
             btn_delete.setToolTip("从列表移除并删除本地附件文件")
@@ -2780,6 +2812,10 @@ class TestDetailDialog(QDialog):
             getattr(d, "_data_table_rel", ""): d._expanded for d in self._data_table_drawers
         }
         for r in self._data_tables:
+            try:
+                self._sync_data_table_display_layout(r)
+            except DataTableError as exc:
+                QMessageBox.warning(self, "提示", str(exc))
             self._data_table_preview_cache.pop(r.relative_path, None)
             self._load_preview_for_ref(r, force=True)
         self._refresh_data_table_list()
@@ -2925,6 +2961,10 @@ class TestDetailDialog(QDialog):
         if path is None:
             QMessageBox.warning(self, "提示", "找不到数据表附件（本地与公盘均无）")
             return
+        try:
+            sync_display_layout(path)
+        except DataTableError:
+            pass
         try:
             open_attachment(path)
         except DataTableError as exc:
@@ -3194,8 +3234,7 @@ class TestDetailDialog(QDialog):
         if not self._apply_schedule_dates():
             return
 
-        self.node_data.apply_standards(self._selected_standards())
-        self.node_data.sync_card_names_from_standards()
+        self.node_data.commit_standard_selection(self._selected_standards())
         selected_keys = {s.ref_key() for s in self.node_data.resolved_standards()}
         self.node_data.result_table_omissions = [
             key for key in sorted(self._omitted_result_keys) if key in selected_keys

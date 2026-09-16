@@ -10,6 +10,15 @@ from src.models.project_state import (
 )
 
 
+def _std(sid: str, chapter: str, name: str, item: str = "") -> TestStandard:
+    return TestStandard(
+        standard_id=sid,
+        chapter=chapter,
+        test_name=name,
+        test_item=item,
+    )
+
+
 def test_sync_card_names_uses_first_standard_only():
     node = TestNode(test_name="报价随机振动试验")
     node.apply_standards(
@@ -48,6 +57,57 @@ def test_sync_clears_english_when_test_item_missing():
     node.sync_card_names_from_standards()
     assert node.test_name == "高温"
     assert node.test_name_en == ""
+
+
+def test_first_pick_syncs_card_names():
+    node = TestNode(test_name="报价名", test_name_en="Quote EN")
+    node.commit_standard_selection([_std("A", "1", "库名A", "Lib A")])
+    assert node.test_name == "库名A"
+    assert node.test_name_en == "Lib A"
+
+
+def test_same_first_standard_keeps_custom_card_names():
+    node = TestNode(test_name="库名A")
+    node.commit_standard_selection([_std("A", "1", "库名A", "Lib A")])
+    node.test_name = "自定义B"
+    node.test_name_en = "Custom B"
+    node.commit_standard_selection(
+        [
+            _std("A", "1", "库名A", "Lib A"),
+            _std("B", "2", "第二项", "Second"),
+        ]
+    )
+    assert node.test_name == "自定义B"
+    assert node.test_name_en == "Custom B"
+
+
+def test_changing_first_standard_overwrites_card_names():
+    node = TestNode(test_name="自定义B", test_name_en="Custom B")
+    node.apply_standards([_std("A", "1", "库名A", "Lib A")])
+    node.commit_standard_selection([_std("C", "3", "库名C", "Lib C")])
+    assert node.test_name == "库名C"
+    assert node.test_name_en == "Lib C"
+
+
+def test_clearing_standards_keeps_custom_card_names():
+    node = TestNode(test_name="自定义B", test_name_en="Custom B")
+    node.apply_standards([_std("A", "1", "库名A", "Lib A")])
+    node.commit_standard_selection([])
+    assert node.test_name == "自定义B"
+    assert node.test_name_en == "Custom B"
+    assert node.standards == []
+
+
+def test_reordering_first_standard_overwrites_card_names():
+    node = TestNode(test_name="自定义B")
+    node.apply_standards(
+        [_std("A", "1", "库名A", "Lib A"), _std("C", "3", "库名C", "Lib C")]
+    )
+    node.commit_standard_selection(
+        [_std("C", "3", "库名C", "Lib C"), _std("A", "1", "库名A", "Lib A")]
+    )
+    assert node.test_name == "库名C"
+    assert node.test_name_en == "Lib C"
 
 
 def test_report_label_uses_card_names_not_joined_test_item():
@@ -136,8 +196,72 @@ def test_word_export_english_uses_card_name_en(tmp_path):
     assert "Library fallback" not in blob
 
 
+def _app():
+    import sys
+
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    return app
+
+
+def test_detail_save_keeps_custom_name_when_first_standard_unchanged():
+    from src.ui.test_detail_dialog import TestDetailDialog
+
+    _app()
+    node = TestNode(test_name="自定义B", test_name_en="Custom B")
+    node.apply_standards([_std("A", "1", "库名A", "Lib A")])
+    catalog = [
+        {
+            "标准号": "A",
+            "章节号": "1",
+            "试验名称": "库名A",
+            "test item": "Lib A",
+        }
+    ]
+    dlg = TestDetailDialog(node, catalog, [])
+    try:
+        dlg.save_and_close()
+    finally:
+        dlg.close()
+    assert node.test_name == "自定义B"
+    assert node.test_name_en == "Custom B"
+
+
+def test_detail_save_syncs_name_when_first_standard_is_new():
+    from PySide6.QtCore import Qt
+
+    from src.ui.test_detail_dialog import TestDetailDialog
+
+    _app()
+    node = TestNode(test_name="报价名", test_name_en="Quote EN")
+    catalog = [
+        {
+            "标准号": "A",
+            "章节号": "1",
+            "试验名称": "库名A",
+            "test item": "Lib A",
+        }
+    ]
+    dlg = TestDetailDialog(node, catalog, [])
+    try:
+        dlg.std_table.item(0, 0).setCheckState(Qt.Checked)
+        dlg.save_and_close()
+    finally:
+        dlg.close()
+    assert node.test_name == "库名A"
+    assert node.test_name_en == "Lib A"
+
+
 if __name__ == "__main__":
     test_sync_card_names_uses_first_standard_only()
     test_sync_clears_english_when_test_item_missing()
+    test_first_pick_syncs_card_names()
+    test_same_first_standard_keeps_custom_card_names()
+    test_changing_first_standard_overwrites_card_names()
+    test_clearing_standards_keeps_custom_card_names()
+    test_reordering_first_standard_overwrites_card_names()
     test_report_label_uses_card_names_not_joined_test_item()
     print("test_card_names: ok (run pytest for tmp_path tests)")

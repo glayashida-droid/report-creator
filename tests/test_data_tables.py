@@ -13,17 +13,17 @@ from src.io.data_tables import (
     create_blank_workbook,
     decimal_places,
     delete_attachment,
+    find_bound_row_indices,
     find_decimal_inconsistencies,
-    find_limit_row_index,
     find_out_of_range,
     find_out_of_range_by_limits,
     has_limit_row,
     import_sample_ids,
     infer_header_row_count,
+    sync_display_layout,
     list_attachment_refs,
     list_data_table_templates,
     open_attachment,
-    parse_limit_expression,
     parse_numeric_display,
     prepare_display_snapshot,
     read_preview_snapshot,
@@ -34,6 +34,7 @@ from src.io.data_tables import (
     split_preview_snapshot_for_page,
     upload_existing_xlsx,
     value_violates_limit,
+    LimitRule,
 )
 from src.io.test_photos import test_dir_key as leg_test_dir_key
 from src.models.project_state import DataTableRef, ProjectState, TestLeg, TestNode
@@ -599,55 +600,154 @@ def test_find_out_of_range_whole_table_and_column():
     assert find_out_of_range(snap, 0.0, 3.0, col=0) == []
 
 
-def test_find_limit_row_index_and_has_limit_row():
+def test_find_bound_row_indices_zh_en_bilingual_and_old_label():
     snap = PreviewSnapshot(
         sheet_name="S",
         values=[
-            ["样品编号", "桥路"],
-            ["限值", "0～3"],
-            ["A01", "1.0"],
+            ["样品编号", "电流"],
+            ["上限", "5"],
+            ["下限", "1"],
+            ["A01", "3"],
         ],
         merges=[],
     )
-    assert find_limit_row_index(snap) == 1
+    bound = find_bound_row_indices(snap)
+    assert bound.upper == 1
+    assert bound.lower == 2
     assert has_limit_row(snap) is True
-    empty = PreviewSnapshot(sheet_name="S", values=[["样品编号", "桥路"], ["A01", "1"]], merges=[])
-    assert find_limit_row_index(empty) is None
+
+    en = PreviewSnapshot(
+        sheet_name="S",
+        values=[["Sample No.", "I"], ["Upper", "5"], ["Lower", "1"], ["A01", "3"]],
+        merges=[],
+    )
+    en_b = find_bound_row_indices(en)
+    assert en_b.upper == 1 and en_b.lower == 2
+
+    bilingual = PreviewSnapshot(
+        sheet_name="S",
+        values=[
+            ["样品编号", "电流"],
+            ["上限\nUpper", "5"],
+            ["下限 / Lower", "1"],
+        ],
+        merges=[],
+    )
+    bi = find_bound_row_indices(bilingual)
+    assert bi.upper == 1 and bi.lower == 2
+
+    reversed_order = PreviewSnapshot(
+        sheet_name="S",
+        values=[["样品编号", "电流"], ["下限", "1"], ["上限", "5"], ["A01", "3"]],
+        merges=[],
+    )
+    rev = find_bound_row_indices(reversed_order)
+    assert rev.lower == 1 and rev.upper == 2
+
+    old = PreviewSnapshot(
+        sheet_name="S",
+        values=[["样品编号", "桥路"], ["限值", "0～3"], ["A01", "1"]],
+        merges=[],
+    )
+    assert find_bound_row_indices(old).indices() == ()
+    assert has_limit_row(old) is False
+
+    data_label = PreviewSnapshot(
+        sheet_name="S",
+        values=[["样品编号", ""], ["数据上限", "5"], ["数据下限", "1"]],
+        merges=[],
+    )
+    dl = find_bound_row_indices(data_label)
+    assert dl.upper == 1 and dl.lower == 2
+
+    side = PreviewSnapshot(
+        sheet_name="S",
+        values=[
+            ["样品编号", "", "9V"],
+            ["", "上限", "5"],
+            ["", "下限", "1"],
+            ["A01", "", "3"],
+        ],
+        merges=[],
+    )
+    sb = find_bound_row_indices(side)
+    assert sb.upper == 1 and sb.lower == 2 and sb.label_col == 1
+    assert find_out_of_range_by_limits(side, inclusive=True) == []
+
+    empty = PreviewSnapshot(
+        sheet_name="S", values=[["样品编号", "桥路"], ["A01", "1"]], merges=[]
+    )
     assert has_limit_row(empty) is False
 
 
-def test_parse_limit_expression_range_and_one_sided():
-    rule = parse_limit_expression("0～3")
-    assert rule is not None
-    assert value_violates_limit(0.0, rule) is False
-    assert value_violates_limit(3.0, rule) is False
-    assert value_violates_limit(-0.1, rule) is True
-    assert value_violates_limit(3.1, rule) is True
+def test_value_violates_limit_inclusive_and_exclusive():
+    closed = LimitRule(lo=1.0, hi=5.0)
+    assert value_violates_limit(1.0, closed) is False
+    assert value_violates_limit(5.0, closed) is False
+    assert value_violates_limit(0.9, closed) is True
+    assert value_violates_limit(5.1, closed) is True
 
-    neg = parse_limit_expression("-5～0")
-    assert neg is not None
-    assert value_violates_limit(-5.0, neg) is False
-    assert value_violates_limit(-6.0, neg) is True
+    opened = LimitRule(lo=1.0, hi=5.0, lo_exclusive=True, hi_exclusive=True)
+    assert value_violates_limit(1.0, opened) is True
+    assert value_violates_limit(5.0, opened) is True
+    assert value_violates_limit(1.1, opened) is False
+    assert value_violates_limit(4.9, opened) is False
 
-    ascii_tilde = parse_limit_expression("1~5")
-    assert ascii_tilde == parse_limit_expression("1～5")
-    wave = parse_limit_expression("1〜5")
-    assert wave == parse_limit_expression("1～5")
-    neg_ascii = parse_limit_expression("-5~0")
-    assert neg_ascii == parse_limit_expression("-5～0")
+    upper_only = LimitRule(hi=5.0)
+    assert value_violates_limit(5.0, upper_only) is False
+    assert value_violates_limit(5.1, upper_only) is True
+    upper_open = LimitRule(hi=5.0, hi_exclusive=True)
+    assert value_violates_limit(5.0, upper_open) is True
 
-    assert value_violates_limit(5.0, parse_limit_expression("大于5")) is True
-    assert value_violates_limit(5.1, parse_limit_expression(">5")) is False
-    assert value_violates_limit(5.0, parse_limit_expression("小于5")) is True
-    assert value_violates_limit(4.9, parse_limit_expression("<5")) is False
-    assert value_violates_limit(5.0, parse_limit_expression("大于等于5")) is False
-    assert value_violates_limit(4.9, parse_limit_expression("≥5")) is True
-    assert value_violates_limit(5.0, parse_limit_expression("小于等于5")) is False
-    assert value_violates_limit(5.1, parse_limit_expression("<=5")) is True
+    lower_only = LimitRule(lo=1.0)
+    assert value_violates_limit(1.0, lower_only) is False
+    lower_open = LimitRule(lo=1.0, lo_exclusive=True)
+    assert value_violates_limit(1.0, lower_open) is True
 
-    assert parse_limit_expression("") is None
-    assert parse_limit_expression("abc") is None
-    assert parse_limit_expression("0-3") is None
+    zero = LimitRule(lo=0.0)
+    assert value_violates_limit(-0.1, zero) is True
+    assert value_violates_limit(0.0, zero) is False
+
+
+def test_find_out_of_range_split_columns_do_not_form_interval():
+    """图1：上限在电流、下限在电阻 → 分列判定，不打包成 1～5。"""
+    snap = PreviewSnapshot(
+        sheet_name="S",
+        values=[
+            ["样品编号", "电流", "电阻"],
+            ["上限", "5", ""],
+            ["下限", "", "1"],
+            ["A01", "5", "1"],
+            ["A02", "6", "0"],
+            ["A03", "3", "2"],
+        ],
+        merges=[],
+    )
+    # inclusive: 电流 ≤5, 电阻 ≥1
+    flagged = find_out_of_range_by_limits(snap, inclusive=True)
+    assert set(flagged) == {(4, 1), (4, 2)}
+    opened = find_out_of_range_by_limits(snap, inclusive=False)
+    assert set(opened) == {(3, 1), (3, 2), (4, 1), (4, 2)}
+
+
+def test_find_out_of_range_same_column_applies_whole_table():
+    """图2：上下限都在电流列 → 整表按 1～5。"""
+    snap = PreviewSnapshot(
+        sheet_name="S",
+        values=[
+            ["样品编号", "电流", "电阻"],
+            ["上限", "5", ""],
+            ["下限", "1", ""],
+            ["A01", "3", "3"],
+            ["A02", "5", "1"],
+            ["A03", "6", "0"],
+        ],
+        merges=[],
+    )
+    flagged = find_out_of_range_by_limits(snap, inclusive=True)
+    assert set(flagged) == {(5, 1), (5, 2)}
+    opened = find_out_of_range_by_limits(snap, inclusive=False)
+    assert set(opened) == {(4, 1), (4, 2), (5, 1), (5, 2)}
 
 
 def test_find_out_of_range_by_limits_per_column_and_skips():
@@ -655,48 +755,22 @@ def test_find_out_of_range_by_limits_per_column_and_skips():
         sheet_name="S",
         values=[
             ["样品编号", "桥路", "短路", "备注"],
-            ["限值", "0～3", "0～100", ""],
+            ["上限", "3", "100", ""],
+            ["下限", "0", "0", ""],
             ["A01", "1.2", "9.0", "ok"],
             ["A02", "5.0", "2.5", "x"],
             ["A03", "2.0", "1.0", ""],
         ],
         merges=[],
     )
-    # Two exprs → per-column; 备注 empty → skip; only 桥路 5.0 out
     flagged = find_out_of_range_by_limits(snap)
-    assert set(flagged) == {(3, 1)}
-    assert (1, 1) not in flagged  # limit row itself
-    assert (2, 2) not in flagged  # 9.0 within 0～100
+    assert set(flagged) == {(4, 1)}
+    assert (1, 1) not in flagged
+    assert (2, 1) not in flagged
+    assert (3, 2) not in flagged
 
 
-def test_find_out_of_range_by_limits_single_cell_applies_whole_table():
-    snap = PreviewSnapshot(
-        sheet_name="S",
-        values=[
-            ["样品编号", "桥路", "短路"],
-            ["限值", "", "0～3"],
-            ["A01", "1.2", "9.0"],
-            ["A02", "5.0", "2.5"],
-        ],
-        merges=[],
-    )
-    assert set(find_out_of_range_by_limits(snap)) == {(2, 2), (3, 1)}
-
-
-def test_find_out_of_range_by_limits_mixed_tilde_seps_are_per_column():
-    snap = PreviewSnapshot(
-        sheet_name="S",
-        values=[
-            ["样品编号", "桥路", "短路"],
-            ["限值", "1～4", "1~5"],
-            ["A01", "4", "6"],
-        ],
-        merges=[],
-    )
-    assert set(find_out_of_range_by_limits(snap)) == {(2, 2)}
-
-
-def test_find_out_of_range_by_limits_no_limit_row_returns_empty():
+def test_find_out_of_range_by_limits_no_bound_rows_returns_empty():
     snap = PreviewSnapshot(
         sheet_name="S",
         values=[["样品编号", "值"], ["A01", "9"]],
@@ -705,44 +779,175 @@ def test_find_out_of_range_by_limits_no_limit_row_returns_empty():
     assert find_out_of_range_by_limits(snap) == []
 
 
-def test_find_out_of_range_by_limits_limit_row_but_no_exprs_passes():
+def test_find_out_of_range_by_limits_bound_rows_but_no_numbers_passes():
     snap = PreviewSnapshot(
         sheet_name="S",
-        values=[["样品编号", "值"], ["限值", ""], ["A01", "9"]],
+        values=[["样品编号", "值"], ["上限", ""], ["下限", ""], ["A01", "9"]],
         merges=[],
     )
     assert has_limit_row(snap)
     assert find_out_of_range_by_limits(snap) == []
 
 
-def test_import_sample_ids_preserves_limit_row():
+def test_find_out_of_range_only_upper_row():
+    snap = PreviewSnapshot(
+        sheet_name="S",
+        values=[["样品编号", "值"], ["上限", "5"], ["A01", "5"], ["A02", "6"]],
+        merges=[],
+    )
+    assert find_out_of_range_by_limits(snap, inclusive=True) == [(3, 1)]
+    assert set(find_out_of_range_by_limits(snap, inclusive=False)) == {(2, 1), (3, 1)}
+
+
+def test_import_sample_ids_preserves_bound_rows():
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "with_limit.xlsx"
         wb = Workbook()
         ws = wb.active
         ws["B1"] = "-40°C"
         ws["B2"] = "9V"
-        ws["A3"] = "限值"
-        ws["B3"] = "0～10"
+        ws["A3"] = "上限"
+        ws["B3"] = "10"
+        ws["A4"] = "下限"
+        ws["B4"] = "0"
         wb.save(path)
         wb.close()
         import_sample_ids(path, ["A01", "A02"])
         wb = load_workbook(path)
         ws = wb.active
         assert "样品编号" in str(ws["A1"].value or "")
-        assert ws["A3"].value == "限值"
-        assert ws["B3"].value == "0～10"
-        assert ws["A4"].value == "A01"
-        assert ws["A5"].value == "A02"
+        assert ws["A3"].value in (None, "样品编号\nSample No.")
+        assert ws["B3"].value == "上限"
+        assert ws["B4"].value == "下限"
+        assert ws["C3"].value == 10 or str(ws["C3"].value) == "10"
+        assert ws["C4"].value == 0 or str(ws["C4"].value) == "0"
+        assert ws["A5"].value == "A01"
+        assert ws["A6"].value == "A02"
+        merges = {str(rng) for rng in ws.merged_cells.ranges}
+        assert any(m.startswith("A1:") and m.endswith("A4") for m in merges)
+        assert "A5:B5" in merges
+        assert "A6:B6" in merges
+        assert ws["A5"].alignment.horizontal == "center"
+        assert ws["A1"].alignment.vertical == "center"
         wb.close()
 
 
-def test_prepare_display_snapshot_drops_limit_row_when_excluded():
+def test_import_sample_ids_bound_labels_already_in_col_b():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "already.xlsx"
+        wb = Workbook()
+        ws = wb.active
+        ws["A1"] = "样品编号\nSample No."
+        ws.merge_cells("A1:A4")
+        ws["C1"] = "-40°C"
+        ws["C2"] = "9V"
+        ws["B3"] = "上限"
+        ws["B4"] = "下限"
+        ws["A5"] = "OLD"
+        wb.save(path)
+        wb.close()
+        import_sample_ids(path, ["A01"])
+        wb = load_workbook(path)
+        ws = wb.active
+        assert ws["B3"].value == "上限"
+        assert ws["C1"].value == "-40°C"
+        assert ws["A5"].value == "A01"
+        assert "A5:B5" in {str(rng) for rng in ws.merged_cells.ranges}
+        wb.close()
+
+
+def test_import_sample_ids_fills_empty_bound_cells_with_slash():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "limits.xlsx"
+        wb = Workbook()
+        ws = wb.active
+        ws["B1"] = "9V"
+        ws["C1"] = "14V"
+        ws["D1"] = "16V"
+        ws["A2"] = "数据上限"
+        ws["B2"] = 5
+        ws["C2"] = 2
+        ws["A3"] = "数据下限"
+        ws["B3"] = 1
+        ws["C3"] = 1
+        wb.save(path)
+        wb.close()
+        import_sample_ids(path, ["A01"])
+        wb = load_workbook(path)
+        ws = wb.active
+        assert ws["B2"].value == "数据上限"
+        assert ws["C2"].value == 5 or str(ws["C2"].value) == "5"
+        assert ws["D2"].value == 2 or str(ws["D2"].value) == "2"
+        assert ws["E2"].value == "/"
+        assert ws["E3"].value == "/"
+        assert ws["A4"].value == "A01"
+        wb.close()
+
+
+def test_sync_display_layout_fills_slash_and_merges_existing_ids():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "existing.xlsx"
+        wb = Workbook()
+        ws = wb.active
+        ws["A1"] = "样品编号Sample No."
+        ws["C1"] = "9V"
+        ws["D1"] = "14V"
+        ws["E1"] = "16V"
+        ws["B2"] = "数据上限"
+        ws["C2"] = 5
+        ws["D2"] = 2
+        ws["B3"] = "数据下限"
+        ws["C3"] = 1
+        ws["D3"] = 1
+        ws["A4"] = "A22600280175-A01"
+        ws["C4"] = 1
+        ws["A5"] = "A22600280175-A02"
+        ws["C5"] = 2
+        wb.save(path)
+        wb.close()
+        sync_display_layout(path)
+        wb = load_workbook(path)
+        ws = wb.active
+        assert "样品编号" in str(ws["A1"].value or "")
+        assert ws["A4"].value == "A22600280175-A01"
+        assert ws["A5"].value == "A22600280175-A02"
+        assert ws["E2"].value == "/"
+        assert ws["E3"].value == "/"
+        assert ws["C2"].value == 5 or str(ws["C2"].value) == "5"
+        merges = {str(rng) for rng in ws.merged_cells.ranges}
+        assert any(m.startswith("A1:") and m.endswith("A3") for m in merges)
+        assert "A4:B4" in merges
+        assert "A5:B5" in merges
+        wb.close()
+
+
+def test_sync_display_layout_skips_sheets_without_bound_rows():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "plain.xlsx"
+        wb = Workbook()
+        ws = wb.active
+        ws["A1"] = "样品编号"
+        ws["B1"] = "值"
+        ws["A2"] = "A01"
+        ws["B2"] = 9
+        wb.save(path)
+        wb.close()
+        sync_display_layout(path)
+        wb = load_workbook(path)
+        ws = wb.active
+        assert ws["A2"].value == "A01"
+        assert ws["B2"].value == 9 or str(ws["B2"].value) == "9"
+        assert list(ws.merged_cells.ranges) == []
+        wb.close()
+
+
+def test_prepare_display_snapshot_drops_bound_rows_when_excluded():
     snap = PreviewSnapshot(
         sheet_name="S",
         values=[
             ["样品编号", "桥路"],
-            ["限值", "0～3"],
+            ["上限", "3"],
+            ["下限", "0"],
             ["A01", "1.0"],
         ],
         merges=[],
@@ -753,27 +958,65 @@ def test_prepare_display_snapshot_drops_limit_row_when_excluded():
     assert len(out.values) == 2
     assert out.values[0][0] == "样品编号"
     assert out.values[1][0] == "A01"
-    assert "限值" not in {r[0] for r in out.values}
+    assert "上限" not in {r[0] for r in out.values}
+    assert "下限" not in {r[0] for r in out.values}
 
 
-def test_prepare_display_snapshot_single_limit_spans_data_cols():
+def test_prepare_display_snapshot_single_occupied_spans_data_cols():
     snap = PreviewSnapshot(
         sheet_name="S",
         values=[
-            ["样品编号", "桥路", "短路"],
-            ["限值", "", "0～3"],
-            ["A01", "1.0", "2.0"],
+            ["样品编号", "电流", "电阻"],
+            ["上限", "5", ""],
+            ["下限", "1", ""],
+            ["A01", "3", "3"],
         ],
         merges=[],
         origin_row=1,
         origin_col=1,
     )
     out = prepare_display_snapshot(snap, include_limit_row=True)
-    assert out.values[1][0] == "限值"
-    assert out.values[1][1] == "0～3"
+    assert out.values[1][0] == "上限"
+    assert out.values[1][1] == "5"
     assert out.values[1][2] == ""
-    # B2:C2 in sheet coords (origin 1,1) → grid row1 cols 1-2
-    assert any("B2:C2" == m or m.startswith("B2:") for m in out.merges)
+    assert out.values[2][0] == "下限"
+    assert out.values[2][1] == "1"
+    assert out.values[2][2] == ""
+    assert any(m.startswith("B2:") for m in out.merges)
+    assert any(m.startswith("B3:") for m in out.merges)
+
+
+def test_prepare_display_snapshot_split_columns_fill_slash():
+    snap = PreviewSnapshot(
+        sheet_name="S",
+        values=[
+            ["样品编号", "电流", "电阻"],
+            ["上限", "5", ""],
+            ["下限", "", "1"],
+            ["A01", "3", "3"],
+        ],
+        merges=[],
+        origin_row=1,
+        origin_col=1,
+    )
+    out = prepare_display_snapshot(snap, include_limit_row=True)
+    assert out.values[1] == ["上限", "5", "/"]
+    assert out.values[2] == ["下限", "/", "1"]
+
+
+def test_find_decimal_inconsistencies_skips_bound_rows():
+    snap = PreviewSnapshot(
+        sheet_name="S",
+        values=[
+            ["样品编号", "值"],
+            ["上限", "5"],
+            ["下限", "1.0"],
+            ["A01", "5.0"],
+            ["A02", "5.0"],
+        ],
+        merges=[],
+    )
+    assert find_decimal_inconsistencies(snap) == []
 
 
 def _five_point_snapshot(*, copies: int = 1) -> PreviewSnapshot:
@@ -847,14 +1090,23 @@ if __name__ == "__main__":
     test_import_sample_ids_inserts_col_when_col1_has_content()
     test_import_sample_ids_starts_below_multi_row_header()
     test_import_sample_ids_missing_file_raises()
-    test_find_limit_row_index_and_has_limit_row()
-    test_parse_limit_expression_range_and_one_sided()
+    test_find_bound_row_indices_zh_en_bilingual_and_old_label()
+    test_value_violates_limit_inclusive_and_exclusive()
+    test_find_out_of_range_split_columns_do_not_form_interval()
+    test_find_out_of_range_same_column_applies_whole_table()
     test_find_out_of_range_by_limits_per_column_and_skips()
-    test_find_out_of_range_by_limits_single_cell_applies_whole_table()
-    test_find_out_of_range_by_limits_mixed_tilde_seps_are_per_column()
-    test_import_sample_ids_preserves_limit_row()
-    test_prepare_display_snapshot_drops_limit_row_when_excluded()
-    test_prepare_display_snapshot_single_limit_spans_data_cols()
+    test_find_out_of_range_by_limits_no_bound_rows_returns_empty()
+    test_find_out_of_range_by_limits_bound_rows_but_no_numbers_passes()
+    test_find_out_of_range_only_upper_row()
+    test_import_sample_ids_preserves_bound_rows()
+    test_import_sample_ids_bound_labels_already_in_col_b()
+    test_import_sample_ids_fills_empty_bound_cells_with_slash()
+    test_sync_display_layout_fills_slash_and_merges_existing_ids()
+    test_sync_display_layout_skips_sheets_without_bound_rows()
+    test_prepare_display_snapshot_drops_bound_rows_when_excluded()
+    test_prepare_display_snapshot_single_occupied_spans_data_cols()
+    test_prepare_display_snapshot_split_columns_fill_slash()
+    test_find_decimal_inconsistencies_skips_bound_rows()
     test_resolve_open_argv_prefers_excel_then_wps_then_default()
     test_open_attachment_uses_injected_runner_and_raises_on_failure()
     test_list_templates_empty_or_missing_is_safe()

@@ -84,12 +84,24 @@ def warn_duplicate_test_names(parent) -> None:
 
 
 THUMB = 72
+THUMB_SIZES = (48, 72, 96, 128, 160)
 NAME_H = 18
 THUMB_GAP = 6
 VISIBLE_ROWS = 2
 THUMB_CARD_W = THUMB + 18
 THUMB_CARD_H = THUMB + 10 + NAME_H
 GALLERY_H = VISIBLE_ROWS * THUMB_CARD_H + (VISIBLE_ROWS - 1) * THUMB_GAP
+
+
+def thumb_card_size(thumb: int) -> QSize:
+    return QSize(thumb + 18, thumb + 10 + NAME_H)
+
+
+def gallery_height(thumb: int) -> int:
+    card = thumb_card_size(thumb)
+    return VISIBLE_ROWS * card.height() + (VISIBLE_ROWS - 1) * THUMB_GAP
+
+
 PHOTO_REL_ROLE = Qt.UserRole
 PHOTO_CLOUD_ROLE = Qt.UserRole + 1
 PHOTO_PATH_ROLE = Qt.UserRole + 2
@@ -200,7 +212,8 @@ class PhotoThumbDelegate(QStyledItemDelegate):
         painter.restore()
 
     def sizeHint(self, option, index):
-        return QSize(THUMB_CARD_W, THUMB_CARD_H)
+        thumb = getattr(self.parent(), "_thumb", THUMB)
+        return thumb_card_size(thumb)
 
 
 class PhotoThumbList(ContainedListWidget):
@@ -232,6 +245,7 @@ class PhotoThumbList(ContainedListWidget):
         self.setSelectionMode(QAbstractItemView.SingleSelection)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._thumb = THUMB
         self.setIconSize(QSize(THUMB, THUMB))
         self.setGridSize(QSize(THUMB_CARD_W + THUMB_GAP, THUMB_CARD_H + THUMB_GAP))
         self.setSpacing(THUMB_GAP)
@@ -239,6 +253,7 @@ class PhotoThumbList(ContainedListWidget):
         self.setWordWrap(True)
         self.setFrameShape(QFrame.NoFrame)
         self.setFixedHeight(GALLERY_H)
+        self._apply_thumb_metrics()
         self.setItemDelegate(PhotoThumbDelegate(self))
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
@@ -265,22 +280,51 @@ class PhotoThumbList(ContainedListWidget):
     def add_photo(self, photo: MergedPhoto, local_root: Path) -> None:
         pix = QPixmap()
         display = Path(photo.read_path)
+        thumb = self._thumb
         try:
             display = thumbnail_for_photo(
-                local_root, photo.relative_path, photo.read_path, size=THUMB * 2
+                local_root, photo.relative_path, photo.read_path, size=thumb * 2
             )
         except Exception:
             pass
         loaded = _pixmap_from_disk(display)
         if not loaded.isNull():
-            pix = loaded.scaled(THUMB, THUMB, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            pix = loaded.scaled(thumb, thumb, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         item = QListWidgetItem(QIcon(pix), Path(photo.read_path).name)
         item.setData(PHOTO_REL_ROLE, photo.relative_path)
         item.setData(PHOTO_CLOUD_ROLE, bool(photo.is_cloud_only))
         item.setData(PHOTO_PATH_ROLE, str(photo.read_path))
-        item.setSizeHint(QSize(THUMB_CARD_W, THUMB_CARD_H))
+        item.setSizeHint(thumb_card_size(thumb))
         item.setToolTip(Path(photo.read_path).name)
         self.addItem(item)
+
+    def zoom_step(self, delta: int) -> None:
+        try:
+            idx = THUMB_SIZES.index(self._thumb)
+        except ValueError:
+            idx = THUMB_SIZES.index(THUMB)
+        nxt = max(0, min(len(THUMB_SIZES) - 1, idx + delta))
+        self.set_thumb_size(THUMB_SIZES[nxt])
+
+    def set_thumb_size(self, size: int) -> None:
+        if size == self._thumb:
+            self._row._sync_zoom_buttons()
+            return
+        self._thumb = size
+        self._apply_thumb_metrics()
+        self._row.reload()
+        self._row._sync_zoom_buttons()
+        self._row.updateGeometry()
+
+    def _apply_thumb_metrics(self) -> None:
+        card = thumb_card_size(self._thumb)
+        self.setIconSize(QSize(self._thumb, self._thumb))
+        self.setGridSize(QSize(card.width() + THUMB_GAP, card.height() + THUMB_GAP))
+        self.setFixedHeight(gallery_height(self._thumb))
+        for i in range(self.count()):
+            item = self.item(i)
+            if item is not None:
+                item.setSizeHint(card)
 
     def supportedDropActions(self):
         if self._in_spare:
@@ -876,9 +920,10 @@ class PhotoAlbumRow(QFrame):
         self.album_name = album_name
         self.project_id = project_id
         self._is_spare = album_name == SPARE_ALBUM_NAME
+        self._popup = None
         self.setObjectName("photoAlbumRow")
         self.setAcceptDrops(not self._is_spare)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
         root = QHBoxLayout(self)
         root.setContentsMargins(10, 8, 10, 8)
@@ -931,14 +976,31 @@ class PhotoAlbumRow(QFrame):
             self.btn_rename_all.setToolTip("按拍摄时间从 001 重新编号（含云端照片）")
             self.btn_rename_all.clicked.connect(self._rename_all)
         left.addWidget(self.btn_rename_all, 0, Qt.AlignHCenter)
+
+        zoom_row = QHBoxLayout()
+        zoom_row.setContentsMargins(0, 0, 0, 0)
+        zoom_row.setSpacing(4)
+        self.btn_zoom_in = QPushButton("🔍+")
+        self.btn_zoom_out = QPushButton("🤌-")
+        for btn in (self.btn_zoom_in, self.btn_zoom_out):
+            btn.setObjectName("photoThumbZoom")
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFixedSize(49, 28)
+        self.btn_zoom_in.setToolTip("放大这一夹的预览")
+        self.btn_zoom_out.setToolTip("缩小这一夹的预览")
+        self.btn_zoom_in.clicked.connect(self._zoom_thumbs_in)
+        self.btn_zoom_out.clicked.connect(self._zoom_thumbs_out)
+        zoom_row.addWidget(self.btn_zoom_in)
+        zoom_row.addWidget(self.btn_zoom_out)
+        left.addLayout(zoom_row)
         left.addStretch(1)
         root.addLayout(left, 0)
         root.setAlignment(Qt.AlignTop)
 
         self.gallery = PhotoThumbList(self, in_spare=self._is_spare)
         root.addWidget(self.gallery, stretch=1)
-        self._popup = None
         self.reload()
+        self._sync_zoom_buttons()
 
     @property
     def is_spare(self) -> bool:
@@ -981,6 +1043,20 @@ class PhotoAlbumRow(QFrame):
         for photo in photos:
             self.gallery.add_photo(photo, self.project_root)
         self.chip.setText(self.album_name)
+
+    def _zoom_thumbs_in(self):
+        self.gallery.zoom_step(1)
+
+    def _zoom_thumbs_out(self):
+        self.gallery.zoom_step(-1)
+
+    def _sync_zoom_buttons(self):
+        try:
+            idx = THUMB_SIZES.index(self.gallery._thumb)
+        except ValueError:
+            idx = THUMB_SIZES.index(THUMB)
+        self.btn_zoom_out.setEnabled(idx > 0)
+        self.btn_zoom_in.setEnabled(idx < len(THUMB_SIZES) - 1)
 
     def _on_thumb_removed(self):
         self.reload()

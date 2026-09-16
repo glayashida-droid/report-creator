@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 from unittest.mock import patch
 
 from PySide6.QtCore import QDate, QPoint
@@ -772,6 +773,138 @@ def test_english_edit_pool_pick_updates_chinese_name_and_dir(tmp_path):
     assert nw.node_data.test_name == "振动试验"
     assert not old_dir.exists()
     assert _test_dir(tmp_path, "Leg 1", "振动试验").is_dir()
+
+
+def _complete_node(name: str) -> TestNode:
+    node = TestNode(test_name=name)
+    node.apply_standards(
+        [TestStandard(standard_id="S1", chapter="1", test_name=name, standard_desc="条件")]
+    )
+    node.equipments = [TestEquipment(name="设备", code="EQ-1")]
+    node.samples = [TestSample(sample_id="A01", result=TestResult.PASS)]
+    return node
+
+
+def test_leg_card_batch_print_sits_left_of_delete():
+    _app()
+    state = ProjectState(
+        project_id="P1",
+        legs=[TestLeg(leg_id="L1", leg_name="Leg 1", nodes=[TestNode(test_name="高温试验")])],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    leg = area.leg_widgets[0]
+    assert leg.btn_batch_print.text() == "打印TR"
+    assert leg.btn_batch_print.toolTip() == "打印本 Leg 全部原始记录"
+    assert leg.btn_delete.text() == "删除"
+    header = leg.layout.itemAt(0).layout()
+    widgets = [header.itemAt(i).widget() for i in range(header.count())]
+    widgets = [w for w in widgets if w is not None]
+    assert widgets[-2] is leg.btn_batch_print
+    assert widgets[-1] is leg.btn_delete
+    assert leg.btn_batch_print.minimumHeight() == leg.btn_delete.minimumHeight() > 0
+    assert leg.btn_batch_print.maximumHeight() == leg.btn_delete.maximumHeight()
+    area.close()
+
+
+def test_batch_print_blocked_when_any_node_incomplete():
+    _app()
+    state = ProjectState(
+        project_id="P1",
+        legs=[
+            TestLeg(
+                leg_id="L1",
+                leg_name="Leg 1",
+                nodes=[_complete_node("高温试验"), TestNode(test_name="Dust test")],
+            )
+        ],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    with (
+        patch.object(QMessageBox, "warning") as mock_warn,
+        patch.object(QMessageBox, "question") as mock_q,
+        patch("src.ui.leg_graph.export_node_original_record") as mock_export,
+    ):
+        area.leg_widgets[0].on_batch_print()
+        mock_warn.assert_called_once()
+        assert mock_warn.call_args[0][1] == "提示"
+        assert mock_warn.call_args[0][2] == "🙋‍♂️尚有试验未维护完整，请全部维护后打印"
+        mock_q.assert_not_called()
+        mock_export.assert_not_called()
+
+
+def test_batch_print_blocked_when_leg_empty():
+    _app()
+    state = ProjectState(project_id="P1")
+    area = LegGraphArea(state)
+    area.add_leg()
+    with (
+        patch.object(QMessageBox, "warning") as mock_warn,
+        patch.object(QMessageBox, "question") as mock_q,
+        patch("src.ui.leg_graph.export_node_original_record") as mock_export,
+    ):
+        area.leg_widgets[0].on_batch_print()
+        mock_warn.assert_called_once()
+        assert "尚有试验未维护完整" in mock_warn.call_args[0][2]
+        mock_q.assert_not_called()
+        mock_export.assert_not_called()
+
+
+def test_batch_print_confirm_cancel_does_not_export():
+    _app()
+    state = ProjectState(
+        project_id="P1",
+        legs=[TestLeg(leg_id="L1", leg_name="Leg 2", nodes=[_complete_node("高温试验")])],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    with (
+        patch.object(QMessageBox, "warning") as mock_warn,
+        patch.object(QMessageBox, "question", return_value=QMessageBox.No) as mock_q,
+        patch("src.ui.leg_graph.export_node_original_record") as mock_export,
+    ):
+        area.leg_widgets[0].on_batch_print()
+        mock_warn.assert_not_called()
+        mock_q.assert_called_once()
+        assert mock_q.call_args[0][1] == "批量打印TR"
+        assert mock_q.call_args[0][2] == "🙋‍♀️是否打印整条Leg 2的所有原始记录？"
+        mock_export.assert_not_called()
+
+
+def test_batch_print_confirmed_exports_each_node_in_order(tmp_path):
+    _app()
+    first = _complete_node("高温试验")
+    second = _complete_node("沙尘试验")
+    state = ProjectState(
+        project_id="P1",
+        project_path=str(tmp_path),
+        legs=[TestLeg(leg_id="L1", leg_name="Leg 1", nodes=[first, second])],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    written = []
+
+    def _fake_export(data, *, template_path):
+        path = Path(tmp_path) / f"{data.test_item}.docx"
+        written.append(data.test_item)
+        return path
+
+    with (
+        patch.object(QMessageBox, "warning") as mock_warn,
+        patch.object(QMessageBox, "question", return_value=QMessageBox.Yes),
+        patch.object(QMessageBox, "information") as mock_info,
+        patch("src.ui.leg_graph.export_node_original_record", side_effect=_fake_export) as mock_export,
+    ):
+        area.leg_widgets[0].on_batch_print()
+        mock_warn.assert_not_called()
+        assert mock_export.call_count == 2
+        assert written == ["高温试验", "沙尘试验"]
+        assert mock_export.call_args_list[0].kwargs["template_path"]
+        info_text = mock_info.call_args[0][2]
+        assert "已生成 2 份原始记录" in info_text
+        assert "高温试验.docx" in info_text
+        assert "沙尘试验.docx" in info_text
 
 
 if __name__ == "__main__":

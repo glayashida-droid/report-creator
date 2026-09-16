@@ -187,6 +187,36 @@ def _project_folder_candidates(remote: Optional[Path]) -> list[Path]:
     return out
 
 
+def resolve_openable_project_folders(
+    remote: Optional[Path],
+    local: Optional[Path],
+) -> tuple[Optional[Path], Optional[Path]]:
+    """Return ``(remote_dir, local_dir)`` independently.
+
+    A remote candidate that is the same directory as local is not treated as 公盘.
+    """
+    local_dir = local if local is not None and _is_dir(local) else None
+    remote_dir: Optional[Path] = None
+    for candidate in _project_folder_candidates(remote):
+        if not _is_dir(candidate):
+            continue
+        if local_dir is not None and _same_dir(candidate, local_dir):
+            continue
+        remote_dir = candidate
+        break
+    return remote_dir, local_dir
+
+
+def _has_configured_distinct_remote(
+    remote: Optional[Path],
+    local_dir: Optional[Path],
+) -> bool:
+    for candidate in _project_folder_candidates(remote):
+        if local_dir is None or not _same_dir(candidate, local_dir):
+            return True
+    return False
+
+
 def resolve_project_folder_to_open(
     remote: Optional[Path],
     local: Optional[Path],
@@ -196,21 +226,11 @@ def resolve_project_folder_to_open(
     Kind is ``remote``, ``disconnected`` (公盘 configured but unreachable),
     ``local`` (no distinct 公盘 path), or ``none``.
     """
-    local_dir = local if local is not None and _is_dir(local) else None
-    remote_dir: Optional[Path] = None
-    distinct_remote = False
-    for candidate in _project_folder_candidates(remote):
-        if _is_dir(candidate):
-            if local_dir is not None and _same_dir(candidate, local_dir):
-                continue
-            remote_dir = candidate
-            break
-        if local_dir is None or not _same_dir(candidate, local_dir):
-            distinct_remote = True
+    remote_dir, local_dir = resolve_openable_project_folders(remote, local)
     if remote_dir is not None:
         return remote_dir, "remote"
     if local_dir is not None:
-        if distinct_remote:
+        if _has_configured_distinct_remote(remote, local_dir):
             return local_dir, "disconnected"
         return local_dir, "local"
     return None, "none"

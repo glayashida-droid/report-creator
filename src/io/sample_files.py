@@ -11,6 +11,9 @@ _PROJECT_ID_RE = re.compile(r"(A\d{8,})", re.IGNORECASE)
 # CTI 报价单号前缀，常见于 ``SZV2607242479701 客户--项目.pdf`` 这类文件名。
 _CTI_QUOTE_NO_RE = re.compile(r"^SZV\d+", re.IGNORECASE)
 
+APPLICATION_NAME_MISMATCH_HINT = "申请单和文件夹不同名，未加载成功"
+APPLICATION_NOT_FOUND_HINT = "未找到申请单 Excel"
+
 
 def project_id_match_tokens(project_id: str) -> list[str]:
     """IDs that may appear on the 申请单 filename.
@@ -78,6 +81,32 @@ def find_application_excel(project_path: Path, project_id: str) -> Optional[Path
         return None
     ranked.sort()
     return ranked[0][2]
+
+
+def _has_mismatched_application_xlsx(project_path: Path, project_id: str) -> bool:
+    """True when 1.接样组 has an A-number xlsx that is not this project."""
+    sample_dir = _sample_dir(project_path)
+    tokens = project_id_match_tokens(project_id)
+    if not tokens or not sample_dir.is_dir():
+        return False
+    for path in _iter_xlsx(sample_dir):
+        if _stem_match_key(path.stem, tokens) is not None:
+            continue
+        if _PROJECT_ID_RE.search(path.stem):
+            return True
+    return False
+
+
+def application_not_found_hint(project_path: Path, project_id: str) -> str:
+    """Empty-state copy when the 申请单 Excel cannot be loaded.
+
+    Matching filenames return ``""`` (caller should parse, not show this).
+    """
+    if find_application_excel(project_path, project_id) is not None:
+        return ""
+    if _has_mismatched_application_xlsx(project_path, project_id):
+        return APPLICATION_NAME_MISMATCH_HINT
+    return APPLICATION_NOT_FOUND_HINT
 
 
 def _quotation_name_match(name: str) -> bool:

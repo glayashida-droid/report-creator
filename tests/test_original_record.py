@@ -12,10 +12,12 @@ from openpyxl import Workbook
 from src.generators.original_record import (
     OriginalRecordData,
     default_output_path,
+    export_node_original_record,
     format_id_range,
     format_share_path_for_record,
     format_test_period,
     generate_original_record,
+    original_record_data_from_node,
     resolve_original_record_folder,
     resolve_original_record_template,
     stack_standard_blocks,
@@ -23,7 +25,10 @@ from src.generators.original_record import (
 from src.io.test_photos import TEST_GROUP_DIR
 from src.models.project_state import (
     DataTableRef as DataRef,
+    ProjectState,
     TestEquipment as EqModel,
+    TestNode,
+    TestSample,
     TestStandard as StdModel,
 )
 
@@ -85,6 +90,55 @@ def test_resolve_original_record_folder_requires_roots_and_names(tmp_path: Path)
         resolve_original_record_folder(root, None, leg_name="Leg 1", test_item="请选择试验...")
         is None
     )
+
+
+def test_original_record_data_from_node_uses_persisted_fields():
+    node = TestNode(
+        test_name="沙尘试验",
+        test_method="VW 1",
+        env_condition="23C",
+        start_date="2026-09-08",
+        end_date="2026-09-09",
+    )
+    node.apply_standards([StdModel(standard_id="VW", chapter="8", test_name="沙尘试验")])
+    node.equipments = [EqModel(name="沙尘箱", code="T1")]
+    node.samples = [TestSample(sample_id="A01"), TestSample(sample_id="  ")]
+    node.data_tables = [DataRef(title="工况", relative_path="a.xlsx")]
+    state = ProjectState(
+        project_id="P1",
+        sample_name="控制器",
+        tester_name="张三",
+        source_path="/Volumes/share/proj",
+        project_path="/tmp/local",
+        application_fields={"申请单号": "A226"},
+    )
+    data = original_record_data_from_node(node, leg_name="Leg 1", state=state)
+    assert data.application_no == "A226"
+    assert data.test_item == "沙尘试验"
+    assert data.test_method == "VW 1"
+    assert data.sample_name == "控制器"
+    assert data.sample_ids == ["A01"]
+    assert data.env_condition == "23C"
+    assert data.start_date == "2026-09-08"
+    assert data.end_date == "2026-09-09"
+    assert data.share_path == "/Volumes/share/proj"
+    assert data.equipments == node.equipments
+    assert [s.standard_id for s in data.standards] == ["VW"]
+    assert data.tester_name == "张三"
+    assert data.data_tables == node.data_tables
+    assert data.project_path == "/tmp/local"
+    assert data.remote_root == "/Volumes/share/proj"
+    assert data.leg_name == "Leg 1"
+
+
+def test_export_node_original_record_requires_project_dir():
+    data = OriginalRecordData(test_item="沙尘", leg_name="Leg 1")
+    try:
+        export_node_original_record(data, template_path=TEMPLATE)
+    except FileNotFoundError as exc:
+        assert "项目目录" in str(exc)
+        return
+    assert False, "expected FileNotFoundError"
 
 
 def test_default_output_path_saves_beside_albums(tmp_path: Path):
@@ -326,7 +380,7 @@ def _write_simple_xlsx(path: Path, *, with_limit: bool, limit_value: str = "") -
     ws["A1"] = "样品编号"
     ws["B1"] = "读数"
     if with_limit:
-        ws["A2"] = "限值"
+        ws["A2"] = "上限"
         ws["B2"] = limit_value
         ws["A3"] = "A01"
         ws["B3"] = "1.0"
@@ -342,7 +396,7 @@ def test_generate_original_record_data_tables_titles_and_limit_flag(tmp_path: Pa
     project = tmp_path / "proj"
     x1 = project / "t1.xlsx"
     x2 = project / "t2.xlsx"
-    _write_simple_xlsx(x1, with_limit=True, limit_value="≤2")
+    _write_simple_xlsx(x1, with_limit=True, limit_value="2")
     _write_simple_xlsx(x2, with_limit=False)
 
     refs = [
@@ -378,8 +432,8 @@ def test_generate_original_record_data_tables_titles_and_limit_flag(tmp_path: Pa
         "\n".join(_Cell(tc, t).text for row in t.rows for tc in row._tr.tc_lst)
         for t in doc.tables
     )
-    assert "限值" in joined
-    assert "≤2" in joined
+    assert "上限" in joined
+    assert "2" in joined
     assert "读数" in joined
     assert "1.0" in joined
 
@@ -387,7 +441,7 @@ def test_generate_original_record_data_tables_titles_and_limit_flag(tmp_path: Pa
 def test_generate_original_record_omits_limit_when_unchecked(tmp_path: Path):
     project = tmp_path / "proj"
     x1 = project / "t1.xlsx"
-    _write_simple_xlsx(x1, with_limit=True, limit_value="≤2")
+    _write_simple_xlsx(x1, with_limit=True, limit_value="2")
     refs = [
         DataRef(
             title="5点法",
@@ -407,8 +461,7 @@ def test_generate_original_record_omits_limit_when_unchecked(tmp_path: Path):
     joined = "\n".join(
         _Cell(tc, t).text for t in doc.tables for row in t.rows for tc in row._tr.tc_lst
     )
-    assert "限值" not in joined
-    assert "≤2" not in joined
+    assert "上限" not in joined
     assert "1.0" in joined
 
 

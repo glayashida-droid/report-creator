@@ -15,7 +15,10 @@ from src.io.network_sources import (
     ProbeResult,
     StandardsLibrarySource,
 )
-from src.io.project_board import resolve_project_folder_to_open
+from src.io.project_board import (
+    resolve_openable_project_folders,
+    resolve_project_folder_to_open,
+)
 from src.ui.main_window import (
     ConnectionStatusCheck,
     MainWindow,
@@ -23,7 +26,7 @@ from src.ui.main_window import (
     _is_network_connection,
     _templates_are_network,
 )
-from src.ui.theme import apply_cyberpunk_theme
+from src.ui.theme import CYAN, apply_cyberpunk_theme, question_pixmap
 
 
 def _app():
@@ -293,6 +296,34 @@ def test_resolve_project_folder_none_when_both_missing(tmp_path: Path):
     assert path is None
 
 
+def test_resolve_openable_folders_returns_both(tmp_path: Path):
+    remote = tmp_path / "remote"
+    local = tmp_path / "local"
+    remote.mkdir()
+    local.mkdir()
+    remote_dir, local_dir = resolve_openable_project_folders(remote, local)
+    assert remote_dir == remote
+    assert local_dir == local
+
+
+def test_resolve_openable_folders_omits_unreachable_remote(tmp_path: Path):
+    local = tmp_path / "local"
+    local.mkdir()
+    remote_dir, local_dir = resolve_openable_project_folders(
+        tmp_path / "missing-remote", local
+    )
+    assert remote_dir is None
+    assert local_dir == local
+
+
+def test_resolve_openable_folders_treats_same_dir_as_local_only(tmp_path: Path):
+    local = tmp_path / "local"
+    local.mkdir()
+    remote_dir, local_dir = resolve_openable_project_folders(local, local)
+    assert remote_dir is None
+    assert local_dir == local
+
+
 def test_open_button_visible_when_remote_ready_before_mirror(tmp_path: Path):
     _app()
     remote = tmp_path / "remote"
@@ -303,7 +334,7 @@ def test_open_button_visible_when_remote_ready_before_mirror(tmp_path: Path):
     win._local_path = tmp_path / "local"
     win._set_mirror_status("镜像中...", kind="dim")
     assert not win.btn_open_local.isHidden()
-    assert win.btn_open_local.toolTip() == "打开公盘文件夹"
+    assert win.btn_open_local.toolTip() == "选择打开本地或公盘文件夹"
     win.close()
 
 
@@ -317,7 +348,7 @@ def test_open_button_tooltip_local_only(tmp_path: Path):
     win._local_path = local
     win._refresh_open_folder_button()
     assert not win.btn_open_local.isHidden()
-    assert win.btn_open_local.toolTip() == "打开本地文件夹"
+    assert win.btn_open_local.toolTip() == "选择打开本地或公盘文件夹"
     win.close()
 
 
@@ -331,7 +362,7 @@ def test_open_button_tooltip_when_remote_disconnected(tmp_path: Path):
     win._local_path = local
     win._refresh_open_folder_button()
     assert not win.btn_open_local.isHidden()
-    assert win.btn_open_local.toolTip() == "公盘未连接，打开本地文件夹"
+    assert win.btn_open_local.toolTip() == "选择打开本地或公盘文件夹"
     win.close()
 
 
@@ -343,9 +374,7 @@ def test_open_button_hidden_until_a_folder_exists():
     win.close()
 
 
-def test_open_project_folder_opens_remote_without_prompt(tmp_path: Path):
-    from PySide6.QtWidgets import QMessageBox
-
+def test_open_project_folder_lets_user_pick_remote(tmp_path: Path):
     _app()
     remote = tmp_path / "remote"
     local = tmp_path / "local"
@@ -355,17 +384,49 @@ def test_open_project_folder_opens_remote_without_prompt(tmp_path: Path):
     win._source_path = remote
     win.state.source_path = str(remote)
     win._local_path = local
-    with patch("src.ui.main_window._open_in_file_manager") as mock_open:
-        with patch.object(QMessageBox, "information") as mock_info:
+    with patch.object(win, "_choose_open_folder_kind", return_value="remote") as mock_choose:
+        with patch("src.ui.main_window._open_in_file_manager") as mock_open:
             win._open_project_folder()
+    mock_choose.assert_called_once_with(local_available=True, remote_available=True)
     mock_open.assert_called_once_with(remote)
-    mock_info.assert_not_called()
     win.close()
 
 
-def test_open_project_folder_falls_back_to_local_with_prompt(tmp_path: Path):
-    from PySide6.QtWidgets import QMessageBox
+def test_open_project_folder_lets_user_pick_local(tmp_path: Path):
+    _app()
+    remote = tmp_path / "remote"
+    local = tmp_path / "local"
+    remote.mkdir()
+    local.mkdir()
+    win = MainWindow()
+    win._source_path = remote
+    win.state.source_path = str(remote)
+    win._local_path = local
+    with patch.object(win, "_choose_open_folder_kind", return_value="local"):
+        with patch("src.ui.main_window._open_in_file_manager") as mock_open:
+            win._open_project_folder()
+    mock_open.assert_called_once_with(local)
+    win.close()
 
+
+def test_open_project_folder_cancel_does_not_open(tmp_path: Path):
+    _app()
+    remote = tmp_path / "remote"
+    local = tmp_path / "local"
+    remote.mkdir()
+    local.mkdir()
+    win = MainWindow()
+    win._source_path = remote
+    win.state.source_path = str(remote)
+    win._local_path = local
+    with patch.object(win, "_choose_open_folder_kind", return_value=None):
+        with patch("src.ui.main_window._open_in_file_manager") as mock_open:
+            win._open_project_folder()
+    mock_open.assert_not_called()
+    win.close()
+
+
+def test_open_project_folder_disconnected_opens_local_when_chosen(tmp_path: Path):
     _app()
     local = tmp_path / "local"
     local.mkdir()
@@ -373,18 +434,15 @@ def test_open_project_folder_falls_back_to_local_with_prompt(tmp_path: Path):
     win._source_path = tmp_path / "offline-remote"
     win.state.source_path = str(tmp_path / "offline-remote")
     win._local_path = local
-    with patch("src.ui.main_window._open_in_file_manager") as mock_open:
-        with patch.object(QMessageBox, "information") as mock_info:
+    with patch.object(win, "_choose_open_folder_kind", return_value="local") as mock_choose:
+        with patch("src.ui.main_window._open_in_file_manager") as mock_open:
             win._open_project_folder()
-    mock_info.assert_called_once()
-    assert "公盘未连接" in mock_info.call_args.args[2]
+    mock_choose.assert_called_once_with(local_available=True, remote_available=False)
     mock_open.assert_called_once_with(local)
     win.close()
 
 
-def test_open_project_folder_opens_local_only_without_prompt(tmp_path: Path):
-    from PySide6.QtWidgets import QMessageBox
-
+def test_open_project_folder_local_only_when_chosen(tmp_path: Path):
     _app()
     local = tmp_path / "local"
     local.mkdir()
@@ -392,17 +450,15 @@ def test_open_project_folder_opens_local_only_without_prompt(tmp_path: Path):
     win._source_path = local
     win.state.source_path = ""
     win._local_path = local
-    with patch("src.ui.main_window._open_in_file_manager") as mock_open:
-        with patch.object(QMessageBox, "information") as mock_info:
+    with patch.object(win, "_choose_open_folder_kind", return_value="local") as mock_choose:
+        with patch("src.ui.main_window._open_in_file_manager") as mock_open:
             win._open_project_folder()
+    mock_choose.assert_called_once_with(local_available=True, remote_available=False)
     mock_open.assert_called_once_with(local)
-    mock_info.assert_not_called()
     win.close()
 
 
 def test_open_project_folder_opens_normalized_unc_remote(tmp_path: Path):
-    from PySide6.QtWidgets import QMessageBox
-
     _app()
     remote = tmp_path / "share" / "proj"
     local = tmp_path / "local"
@@ -415,9 +471,36 @@ def test_open_project_folder_opens_normalized_unc_remote(tmp_path: Path):
     with patch(
         "src.io.project_board.normalize_config_path",
         return_value=str(remote),
-    ), patch("src.ui.main_window._open_in_file_manager") as mock_open:
-        with patch.object(QMessageBox, "information") as mock_info:
-            win._open_project_folder()
+    ), patch.object(win, "_choose_open_folder_kind", return_value="remote"), patch(
+        "src.ui.main_window._open_in_file_manager"
+    ) as mock_open:
+        win._open_project_folder()
     mock_open.assert_called_once_with(remote)
-    mock_info.assert_not_called()
     win.close()
+
+
+def test_question_pixmap_is_cyan_on_dark_background():
+    from PySide6.QtGui import QColor
+
+    _app()
+    pm = question_pixmap()
+    img = pm.toImage()
+    assert not img.isNull()
+    target = QColor(CYAN)
+    cyans = 0
+    darks = 0
+    for y in range(0, img.height(), 2):
+        for x in range(0, img.width(), 2):
+            c = img.pixelColor(x, y)
+            if c.alpha() < 40:
+                continue
+            if (
+                abs(c.red() - target.red()) < 80
+                and abs(c.green() - target.green()) < 80
+                and abs(c.blue() - target.blue()) < 80
+            ):
+                cyans += 1
+            if c.red() < 50 and c.green() < 50 and c.blue() < 50:
+                darks += 1
+    assert cyans > 0
+    assert cyans > darks

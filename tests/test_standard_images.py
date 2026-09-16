@@ -10,6 +10,7 @@ from src.parsers.xlsx_images import load_xlsx_row_images
 from src.ui.test_detail_dialog import (
     DrawerSection,
     StdImageLink,
+    StdImagePopup,
     TestDetailDialog,
     _image_link_text,
     _pixmap_from_standard_bytes,
@@ -154,6 +155,24 @@ def test_condition_header_shows_image_and_full_title():
         assert links[0]._popup is None
     finally:
         dlg.close()
+
+
+def test_std_image_popup_escape_closes():
+    from PySide6.QtGui import QColor, QPixmap
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    _app()
+    pix = QPixmap(20, 20)
+    pix.fill(QColor("white"))
+    popup = StdImagePopup(pix)
+    popup.show()
+    QApplication.processEvents()
+    closed = []
+    popup.destroyed.connect(lambda *_: closed.append(True))
+    QTest.keyClick(popup, Qt.Key_Escape)
+    QApplication.processEvents()
+    assert closed
 
 
 def test_wrap_title_drawer_keeps_full_text():

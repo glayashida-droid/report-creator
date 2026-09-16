@@ -18,7 +18,7 @@ class DataTableRef(BaseModel):
 
     title: str
     relative_path: str
-    # Session-only: whether Word export includes the 限值 row. Never written to JSON.
+    # Session-only: whether Word export includes 上限/下限 rows. Never written to JSON.
     include_limit_row_in_report: bool = Field(default=False, exclude=True)
 
 
@@ -310,7 +310,7 @@ class TestNode(BaseModel):
         return (self.test_name or "").strip()
 
     def sync_card_names_from_standards(self) -> None:
-        """Overwrite card labels from the first selected standard (always on save)."""
+        """Overwrite card labels from the first selected standard."""
         stds = self.resolved_standards()
         if not stds:
             return
@@ -319,6 +319,18 @@ class TestNode(BaseModel):
         if cn:
             self.test_name = cn
         self.test_name_en = (first.test_item or "").strip()
+
+    def _first_standard_ref_key(self) -> Optional[tuple]:
+        stds = self.resolved_standards()
+        return stds[0].ref_key() if stds else None
+
+    def commit_standard_selection(self, picked: List[TestStandard]) -> None:
+        """Persist checked standards. Card names follow the first standard only when its identity changes."""
+        old_key = self._first_standard_ref_key()
+        self.apply_standards(picked)
+        new_key = self._first_standard_ref_key()
+        if new_key and new_key != old_key:
+            self.sync_card_names_from_standards()
 
     def resolved_env_condition(self) -> str:
         if self._has_text(self.env_condition):

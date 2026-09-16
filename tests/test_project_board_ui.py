@@ -536,7 +536,7 @@ def test_detail_dialog_to_combo_uses_full_names():
     assert dlg.txt_env_condition.parentWidget() is dlg.date_start.parentWidget()
     assert dlg.btn_print_raw.parentWidget() is dlg.date_start.parentWidget()
     assert abs(dlg.txt_env_condition.y() - dlg.date_start.y()) <= 8
-    assert dlg.btn_print_raw.text() == "打印"
+    assert dlg.btn_print_raw.text() == "打印TR"
     assert dlg.btn_print_raw.toolTip() == "打印原始记录"
     assert abs(dlg.btn_print_raw.y() - dlg.date_start.y()) <= 8
     env_h = dlg.txt_env_condition.height()
@@ -555,7 +555,7 @@ def test_detail_dialog_hides_to_row_without_numbers():
     assert not dlg.to_row_host.isVisible()
     assert dlg.txt_env_condition.parentWidget() is dlg.date_start.parentWidget()
     assert abs(dlg.txt_env_condition.y() - dlg.date_start.y()) <= 8
-    assert dlg.btn_print_raw.text() == "打印"
+    assert dlg.btn_print_raw.text() == "打印TR"
     dlg.close()
 
 

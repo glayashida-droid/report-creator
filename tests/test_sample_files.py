@@ -1,6 +1,9 @@
 from pathlib import Path
 
 from src.io.sample_files import (
+    APPLICATION_NAME_MISMATCH_HINT,
+    APPLICATION_NOT_FOUND_HINT,
+    application_not_found_hint,
     find_application_excel,
     find_quotation_pdf,
     find_sample_files,
@@ -89,3 +92,53 @@ def test_finds_quotation_by_cti_quote_number_filename(tmp_path: Path):
     _touch(sample / "参考报告-A225036644650100001E.pdf")
 
     assert find_quotation_pdf(tmp_path) == quote
+
+
+def test_hint_when_xlsx_uses_another_project_id(tmp_path: Path):
+    _touch(tmp_path / "1.接样组" / "A22600280175.xlsx")
+
+    assert find_application_excel(tmp_path, "A2220011234567") is None
+    assert (
+        application_not_found_hint(tmp_path, "A2220011234567")
+        == APPLICATION_NAME_MISMATCH_HINT
+    )
+    assert APPLICATION_NAME_MISMATCH_HINT == "申请单和文件夹不同名，未加载成功"
+
+
+def test_hint_when_no_application_xlsx(tmp_path: Path):
+    _touch(tmp_path / "1.接样组" / "KX21-试验清单.xlsx")
+
+    assert (
+        application_not_found_hint(tmp_path, "A2220011234567")
+        == APPLICATION_NOT_FOUND_HINT
+    )
+
+
+def test_hint_empty_when_application_xlsx_matches(tmp_path: Path):
+    _touch(tmp_path / "1.接样组" / "A22600280175.xlsx")
+
+    assert application_not_found_hint(tmp_path, "A2260028017501") == ""
+
+
+def test_overview_box_shows_name_mismatch_instead_of_unloaded():
+    import sys
+
+    from PySide6.QtWidgets import QApplication, QLabel
+
+    from src.ui.main_window import MainWindow
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+
+    win = MainWindow()
+    win._application_load_hint = APPLICATION_NAME_MISMATCH_HINT
+    win.refresh_overview_ui()
+    labels = [
+        win.info_form.itemAt(i).widget().text()
+        for i in range(win.info_form.count())
+        if isinstance(win.info_form.itemAt(i).widget(), QLabel)
+    ]
+    assert APPLICATION_NAME_MISMATCH_HINT in labels
+    assert "未加载" not in labels
+    win.close()
