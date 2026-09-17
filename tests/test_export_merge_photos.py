@@ -55,3 +55,21 @@ def test_export_includes_remote_only_excludes_spare_no_album_pollution(tmp_path:
 
     for t in temps:
         t.unlink(missing_ok=True)
+
+
+def test_export_uses_photo_file_order(tmp_path: Path):
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    local.mkdir()
+    album = _album(local)
+    _png(album / "试验前-001.png")
+    _png(album / "样品12345.png")
+    exported = iter_merged_export_photos(
+        local,
+        remote,
+        LEG,
+        TEST,
+        order=["试验前"],
+        photo_file_order={"试验前": ["样品12345.png", "试验前-001.png"]},
+    )
+    assert [item.stem for item in exported] == ["样品12345", "试验前-001"]

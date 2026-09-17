@@ -211,6 +211,31 @@ class TestNode(BaseModel):
     data_tables: List[DataTableRef] = Field(default_factory=list)
     # Manual order of photo album folders under 3.测试组/{Leg名}-{试验名}/; empty → default sort.
     photo_album_order: List[str] = Field(default_factory=list)
+    # Manual order of filenames inside each album; missing album → filename sort.
+    photo_file_order: Dict[str, List[str]] = Field(default_factory=dict)
+
+    @field_validator("photo_file_order", mode="before")
+    @classmethod
+    def _coerce_photo_file_order(cls, value):
+        if not value or not isinstance(value, dict):
+            return {}
+        out: Dict[str, List[str]] = {}
+        for album, names in value.items():
+            key = str(album or "").strip()
+            if not key or not isinstance(names, (list, tuple)):
+                continue
+            cleaned: List[str] = []
+            seen = set()
+            for raw in names:
+                name = Path(str(raw or "").strip()).name
+                if not name or name in seen:
+                    continue
+                cleaned.append(name)
+                seen.add(name)
+            if cleaned:
+                out[key] = cleaned
+        return out
+
     # Selected standards whose sample-result tables were removed (条件等仍保留).
     # Each entry is (标准号, 章节号). Uncheck then re-check restores the table.
     result_table_omissions: List[Tuple[str, str]] = Field(default_factory=list)

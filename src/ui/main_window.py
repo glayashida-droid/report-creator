@@ -3,6 +3,7 @@ import sys
 import re
 import shutil
 import subprocess
+import threading
 from datetime import datetime, time, timedelta
 from typing import Optional
 from pathlib import Path
@@ -258,6 +259,50 @@ class NightlySyncWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class ElpExportPrepWorker(QThread):
+    """Parse the ELP plan (cover OCR) and warm calibration-photo embed cache."""
+
+    def __init__(self, plan_pdf, pattern_dir, key, parent=None):
+        super().__init__(parent)
+        self._plan_pdf = plan_pdf
+        self._pattern_dir = pattern_dir
+        self.key = key
+        from src.parsers.elp_plan import ElpPlan
+
+        self.plan = ElpPlan()
+        self._plan_ready = threading.Event()
+
+    def run(self):
+        try:
+            from src.generators.elp_prep import (
+                parse_elp_plan_for_export,
+                warm_elp_pattern_cache,
+            )
+
+            self.plan = parse_elp_plan_for_export(self._plan_pdf)
+        except Exception:
+            from src.parsers.elp_plan import ElpPlan
+
+            self.plan = ElpPlan()
+        finally:
+            self._plan_ready.set()
+        if self.isInterruptionRequested():
+            return
+        try:
+            warm_elp_pattern_cache(
+                self._pattern_dir,
+                cancelled=self.isInterruptionRequested,
+            )
+        except Exception:
+            pass
+
+    def wait_plan(self):
+        while not self._plan_ready.is_set():
+            QApplication.processEvents()
+            self._plan_ready.wait(0.05)
+        return self.plan
+
+
 APP_VERSION = "1.4.0"
 # Calendar popup floor. Dates before this are treated as "no end date"
 # because QDateEdit may clamp the blank sentinel to 1752-09-14.
@@ -405,6 +450,7 @@ class MainWindow(QMainWindow):
         self._session_tester_name = saved_tester
         self._tester_prompt_pending = not bool(saved_tester)
         self._sync_worker = None  # type: Optional[NightlySyncWorker]
+        self._elp_prep_worker = None  # type: Optional[ElpExportPrepWorker]
         self._nightly_sync_timer = QTimer(self)
         self._nightly_sync_timer.setInterval(30_000)
         self._nightly_sync_timer.timeout.connect(self._on_nightly_sync_tick)
@@ -1055,6 +1101,9 @@ class MainWindow(QMainWindow):
         if self._network_probe_worker is not None:
             self._network_probe_worker.requestInterruption()
             self._network_probe_worker.wait(2000)
+        if self._elp_prep_worker is not None:
+            self._elp_prep_worker.requestInterruption()
+            self._elp_prep_worker.wait(8000)
         self._connection_timer.stop()
         for worker in list(self._abandoned_workers):
             worker.requestInterruption()
@@ -2050,6 +2099,38 @@ class MainWindow(QMainWindow):
         except ValueError:
             pass
 
+    def _start_elp_export_prep(self, plan_pdf, pattern_dir):
+        pdf_key = ""
+        if plan_pdf is not None:
+            try:
+                pdf_key = str(Path(plan_pdf).resolve())
+            except OSError:
+                pdf_key = str(plan_pdf)
+        dir_key = ""
+        if pattern_dir is not None:
+            try:
+                dir_key = str(Path(pattern_dir).resolve())
+            except OSError:
+                dir_key = str(pattern_dir)
+        key = (pdf_key, dir_key)
+        current = self._elp_prep_worker
+        if current is not None and getattr(current, "key", None) == key:
+            return
+        if current is not None and current.isRunning():
+            self._abandoned_workers.append(current)
+            current.finished.connect(lambda _w=current: self._drop_abandoned(_w))
+        worker = ElpExportPrepWorker(plan_pdf, pattern_dir, key, self)
+        self._elp_prep_worker = worker
+        worker.start()
+
+    def _wait_elp_export_prep(self):
+        worker = self._elp_prep_worker
+        if worker is None:
+            return
+        while worker.isRunning():
+            QApplication.processEvents()
+            worker.wait(50)
+
     def _start_mirror(self, src, dest):
         if self._mirror_worker is not None:
             try:
@@ -2501,6 +2582,19 @@ class MainWindow(QMainWindow):
                 return
 
             is_elp = lang == ELP_REPORT_LANGUAGE
+            elp_pattern_dir = None
+            if is_elp:
+                from src.io.network_sources import elp_data_pattern_directory
+                from src.parsers.elp_plan import resolve_elp_plan_pdf
+
+                template_path = resolve_elp_report_template(self._network_config)
+                if template_path is None:
+                    QMessageBox.warning(self, "错误", "找不到吉利ELP报告模板，请确认公盘 report_templates 中有 ELP 模板")
+                    return
+                plan_pdf = resolve_elp_plan_pdf(self._local_path, self._source_project_path())
+                elp_pattern_dir = elp_data_pattern_directory(self._network_config)
+                self._start_elp_export_prep(plan_pdf, elp_pattern_dir)
+
             word_lang = "中文" if is_elp else lang
             default_no = WordGenerator.default_report_no(self.state, word_lang)
             report_no, ok = QInputDialog.getText(
@@ -2522,19 +2616,12 @@ class MainWindow(QMainWindow):
             elp_extras = None
             elp_plan = None
             if is_elp:
-                from src.generators.elp_engine import ElpReportGenerator
-                from src.io.network_sources import elp_data_pattern_directory
-                from src.parsers.elp_plan import find_elp_plan_pdf, parse_elp_plan
+                from src.parsers.elp_plan import ElpPlan
 
-                template_path = resolve_elp_report_template(self._network_config)
-                if template_path is None:
-                    QMessageBox.warning(self, "错误", "找不到吉利ELP报告模板，请确认公盘 report_templates 中有 ELP 模板")
-                    return
-                project_for_plan = self._local_path or self._source_project_path()
-                plan_pdf = find_elp_plan_pdf(project_for_plan) if project_for_plan else None
-                elp_plan = parse_elp_plan(plan_pdf, ocr_cover=True)
+                worker = self._elp_prep_worker
+                elp_plan = worker.wait_plan() if worker is not None else ElpPlan()
                 dialog = ElpExportDialog(plan_no=elp_plan.plan_no, parent=self)
-                if dialog.exec() != dialog.Accepted:
+                if dialog.exec() != QDialog.Accepted:
                     return
                 elp_extras = dialog.fields()
                 if elp_extras.plan_no:
@@ -2621,35 +2708,49 @@ class MainWindow(QMainWindow):
                 return
 
             remote = self._source_project_path()
-            if is_elp:
-                engine = ElpReportGenerator(str(template_path))
-                engine.generate(
-                    self.state,
-                    str(out_path),
-                    extras=elp_extras,
-                    plan=elp_plan,
-                    project_path=target_project_path,
-                    leg_filter=leg_filter,
-                    report_no=report_no,
-                    remote_root=str(remote) if remote is not None else None,
-                    pattern_dir=elp_data_pattern_directory(self._network_config),
-                )
-            else:
-                engine = WordGenerator(str(template_path))
-                engine.generate(
-                    self.state, str(out_path),
-                    project_path=target_project_path, leg_filter=leg_filter,
-                    report_language=lang,
-                    report_no=report_no,
-                    remote_root=str(remote) if remote is not None else None,
-                )
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                if is_elp:
+                    from src.generators.elp_engine import ElpReportGenerator
+
+                    self._wait_elp_export_prep()
+                    engine = ElpReportGenerator(str(template_path))
+                    engine.generate(
+                        self.state,
+                        str(out_path),
+                        extras=elp_extras,
+                        plan=elp_plan,
+                        project_path=target_project_path,
+                        leg_filter=leg_filter,
+                        report_no=report_no,
+                        remote_root=str(remote) if remote is not None else None,
+                        pattern_dir=elp_pattern_dir,
+                    )
+                else:
+                    engine = WordGenerator(str(template_path))
+                    engine.generate(
+                        self.state, str(out_path),
+                        project_path=target_project_path, leg_filter=leg_filter,
+                        report_language=lang,
+                        report_no=report_no,
+                        remote_root=str(remote) if remote is not None else None,
+                    )
+            finally:
+                QApplication.restoreOverrideCursor()
             self._record_usage_report()
 
+            toc_note = ""
+            if is_elp:
+                if getattr(engine, "toc_refreshed", False):
+                    toc_note = "\n目录已自动更新。"
+                else:
+                    toc_note = "\n未能自动更新目录。用 Word 打开时请选择「是」。"
             msg = QMessageBox(self)
             msg.setWindowTitle("导出成功")
             msg.setText(
                 f"报告已生成至:\n{out_path}"
                 f"{scope_note}\n报告语言: {lang}\n报告编号: {report_no}"
+                f"{toc_note}"
             )
             btn_open = msg.addButton("打开所在文件夹", QMessageBox.ActionRole)
             msg.addButton(QMessageBox.Ok)

@@ -4,31 +4,42 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.oxml.ns import qn
-from docx.shared import Inches
+from docx.shared import Emu, Inches, Pt
 from docx.table import Table
 
 from src.generators.elp_docx import (
+    BLACK_VAL,
     cell_has_blue,
     cell_text,
     clone_table_row,
+    delete_row_cell,
+    delete_table,
     delete_table_row,
     force_black_text,
     force_blue_text,
+    insert_cloned_row_after,
+    insert_cloned_table_after,
     iter_body_children,
+    paint_blue_runs_black,
     paragraph_style_name,
     remove_drawings,
+    replace_table_from_grid,
+    run_has_drawing,
     set_blue_portion,
     set_photo_caption,
+    set_run_color,
     unique_cells,
     wrap_paragraph,
     wrap_table,
+    write_runs,
 )
 from src.generators.word_engine import PHOTO_WIDTH_IN, WordGenerator
+from src.generators.word_fields import finalize_exported_fields
 from src.io.network_sources import elp_data_pattern_directory
 from src.io.special_rules import DEFAULT_LAB_ADDRESS_CN, profile_from_state
 from src.io.test_photos import is_image_file, list_sample_info_photos
@@ -72,6 +83,7 @@ class ElpReportGenerator:
         self._word = WordGenerator(template_path)
         self._word._report_language = "中文"
         self._export_temps: list = []
+        self.toc_refreshed = False
 
     def generate(
         self,
@@ -85,10 +97,12 @@ class ElpReportGenerator:
         extras: Optional[ElpExportFields] = None,
         plan: Optional[ElpPlan] = None,
         pattern_dir: Optional[Path] = None,
+        refresh_fields: Optional[Callable[[str], bool]] = None,
     ) -> None:
         extras = extras or ElpExportFields()
         plan = plan or ElpPlan()
         self._export_temps = []
+        self.toc_refreshed = False
         try:
             doc = Document(self.template_path)
             pairs = list(state.iter_nodes_for_export(leg_filter))
@@ -98,6 +112,12 @@ class ElpReportGenerator:
             self._fill_headers(doc, fields.get("试验类型") or "", report_no)
             self._fill_object_table(doc, state, fields, extras, plan, nodes)
             self._fill_lab_and_maker(doc, state, fields)
+            self._prefetch_export_photos(
+                pairs,
+                project_path,
+                remote_root,
+                pattern_dir,
+            )
             self._fill_sample_photos(doc, project_path)
             self._fill_plan_chapter6(doc, plan, nodes)
             self._rewrite_chapter7(
@@ -113,7 +133,11 @@ class ElpReportGenerator:
             )
             self._fill_summary_table(doc, nodes)
             self._fill_diff_table(doc, nodes)
+            paint_blue_runs_black(doc)
             doc.save(output_path)
+            self.toc_refreshed = finalize_exported_fields(
+                output_path, refresher=refresh_fields
+            )
         finally:
             for temp in self._export_temps:
                 try:
@@ -155,12 +179,23 @@ class ElpReportGenerator:
 
     @staticmethod
     def _replace_paragraph_blue(paragraph, value: str) -> None:
-        blue = [run for run in paragraph.runs if _run_is_blue(run)]
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        runs = list(paragraph.runs)
+        blue = [run for run in runs if _run_is_blue(run)]
         if not blue:
             return
+        for run in runs:
+            if run in blue:
+                break
+            if run_has_drawing(run):
+                continue
+            if not (run.text or "").strip():
+                run.text = ""
         blue[0].text = value or ""
+        set_run_color(blue[0], BLACK_VAL)
         for run in blue[1:]:
             run.text = ""
+            set_run_color(run, BLACK_VAL)
 
     def _fill_headers(self, doc: Document, test_type: str, report_no: str) -> None:
         for section in doc.sections:
@@ -174,20 +209,81 @@ class ElpReportGenerator:
                 if part is None:
                     continue
                 for paragraph in part.paragraphs:
-                    text = paragraph.text or ""
-                    if "试验类型" in text and test_type:
-                        self._replace_paragraph_blue(paragraph, test_type)
-                    if "报告编号" in text and report_no:
-                        self._append_header_report_no(paragraph, report_no)
+                    self._rewrite_header_paragraph(paragraph, test_type, report_no, section)
+                    text = (paragraph.text or "").strip()
+                    if "试验类型" in text or "报告编号" in text:
+                        continue
+                    paragraph.paragraph_format.space_before = Pt(0)
+                    paragraph.paragraph_format.space_after = Pt(0)
 
     @staticmethod
-    def _append_header_report_no(paragraph, report_no: str) -> None:
-        if report_no and report_no in (paragraph.text or ""):
-            return
-        from src.generators.elp_docx import set_run_color
+    def _header_usable_width(section):
+        page = section.page_width
+        left = section.left_margin or 0
+        right = section.right_margin or 0
+        return page - left - right
 
-        run = paragraph.add_run(report_no)
-        set_run_color(run, "0000FF")
+    @staticmethod
+    def _clear_header_first_indent(paragraph) -> None:
+        paragraph.paragraph_format.first_line_indent = Pt(0)
+        pPr = paragraph._p.get_or_add_pPr()
+        ind = pPr.find(qn("w:ind"))
+        if ind is not None:
+            for attr in (qn("w:firstLine"), qn("w:firstLineChars")):
+                if attr in ind.attrib:
+                    del ind.attrib[attr]
+
+    @staticmethod
+    def _set_header_tab_stops(paragraph, section, *, center: bool, right: bool) -> None:
+        stops = paragraph.paragraph_format.tab_stops
+        stops.clear_all()
+        usable = int(ElpReportGenerator._header_usable_width(section))
+        if center:
+            stops.add_tab_stop(Emu(usable // 2), WD_TAB_ALIGNMENT.CENTER)
+        if right:
+            stops.add_tab_stop(Emu(usable), WD_TAB_ALIGNMENT.RIGHT)
+
+    @staticmethod
+    def _rewrite_header_paragraph(paragraph, test_type: str, report_no: str, section) -> None:
+        text = paragraph.text or ""
+        has_type = "试验类型" in text
+        has_no = "报告编号" in text
+        if not has_type and not has_no:
+            return
+        no_label = ""
+        if has_no:
+            if "No." in text:
+                no_label = "报告编号No.："
+            elif "No" in text:
+                no_label = "报告编号No："
+            else:
+                no_label = "报告编号："
+        pieces: List[Tuple[str, Optional[str]]] = []
+        if has_type and has_no:
+            pieces.extend(
+                [
+                    ("\t", None),
+                    ("试验类型：", None),
+                    (test_type or "", None),
+                    ("\t", None),
+                    (no_label, None),
+                    (report_no or "", None),
+                ]
+            )
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            ElpReportGenerator._set_header_tab_stops(paragraph, section, center=True, right=True)
+        elif has_type:
+            pieces.append(("试验类型：", None))
+            pieces.append((test_type or "", None))
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            paragraph.paragraph_format.tab_stops.clear_all()
+        else:
+            pieces.append((no_label, None))
+            pieces.append((report_no or "", None))
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            paragraph.paragraph_format.tab_stops.clear_all()
+        write_runs(paragraph, pieces)
+        ElpReportGenerator._clear_header_first_indent(paragraph)
 
     # ------------------------------------------------------------------ early tables
 
@@ -195,6 +291,24 @@ class ElpReportGenerator:
         for table in doc.tables:
             blob = "".join(cell_text(cell) for row in table.rows[:2] for cell in unique_cells(row))
             if all(n in blob for n in needles):
+                return table
+        return None
+
+    def _table_by_first_label(self, doc: Document, label: str) -> Optional[Table]:
+        for table in doc.tables:
+            if not table.rows:
+                continue
+            cells = unique_cells(table.rows[0])
+            if cells and cell_text(cells[0]) == label:
+                return table
+        return None
+
+    def _table_with_first_row(self, doc: Document, needle: str) -> Optional[Table]:
+        for table in doc.tables:
+            if not table.rows:
+                continue
+            blob = "".join(cell_text(cell) for cell in unique_cells(table.rows[0]))
+            if needle in blob:
                 return table
         return None
 
@@ -244,8 +358,8 @@ class ElpReportGenerator:
     ) -> None:
         profile = profile_from_state(state)
         lab_addr = (profile.lab_address_cn or "").strip() or DEFAULT_LAB_ADDRESS_CN
-        lab = self._table_by_labels(doc, "名称", "E-mail")
-        if lab is not None and cell_text(unique_cells(lab.rows[0])[0]) == "名称":
+        lab = self._table_by_first_label(doc, "名称")
+        if lab is not None:
             mapping = {
                 "名称": LAB_NAME_CN,
                 "地址": lab_addr,
@@ -255,7 +369,7 @@ class ElpReportGenerator:
                 "E-mail": "/",
             }
             self._fill_kv_table(lab, mapping)
-        maker = self._table_by_labels(doc, "制造商", "邮编")
+        maker = self._table_by_first_label(doc, "制造商")
         if maker is not None:
             producer = fields.get("生产商") or fields.get("申请公司") or state.applicant_name
             addr = (
@@ -274,8 +388,7 @@ class ElpReportGenerator:
                 },
             )
 
-    @staticmethod
-    def _fill_kv_table(table: Table, mapping: Dict[str, str]) -> None:
+    def _fill_kv_table(self, table: Table, mapping: Dict[str, str]) -> None:
         for row in table.rows:
             cells = unique_cells(row)
             if len(cells) < 2:
@@ -283,7 +396,7 @@ class ElpReportGenerator:
             label = cell_text(cells[0])
             for key, val in mapping.items():
                 if label.startswith(key):
-                    set_blue_portion(cells[1], val)
+                    self._write_blue(cells[1], val)
                     break
 
     def _fill_sample_photos(self, doc: Document, project_path: Optional[str]) -> None:
@@ -330,9 +443,9 @@ class ElpReportGenerator:
     def _fill_plan_chapter6(
         self, doc: Document, plan: ElpPlan, nodes: Sequence[TestNode]
     ) -> None:
-        basic = self._table_by_labels(doc, "电子电器组件种类", "工作类型")
-        if basic is not None:
-            self._fill_basic_ticks(basic, plan)
+        basic = self._table_with_first_row(doc, "电子电器组件种类")
+        if basic is not None and plan.basic_info_rows:
+            replace_table_from_grid(basic, plan.basic_info_rows)
         modes = None
         klass = None
         for table in doc.tables:
@@ -343,7 +456,7 @@ class ElpReportGenerator:
             elif "产品功能分类" in blob and klass is None:
                 klass = table
         if klass is not None and plan.function_class_rows:
-            self._replace_function_class(klass, plan.function_class_rows)
+            replace_table_from_grid(klass, plan.function_class_rows)
         if modes is not None and plan.work_mode_defs:
             self._fill_work_mode_defs(modes, plan)
         monitor = self._table_by_labels(doc, "功能描述", "可接受范围")
@@ -352,57 +465,6 @@ class ElpReportGenerator:
         states = self._table_by_labels(doc, "功能状态", "定义描述")
         if states is not None and plan.function_states:
             self._fill_function_states(states, plan.function_states)
-
-    def _fill_basic_ticks(self, table: Table, plan: ElpPlan) -> None:
-        i = 0
-        rows = table.rows
-        while i < len(rows):
-            cells = unique_cells(rows[i])
-            label = cell_text(cells[0]) if cells else ""
-            if label in plan.basic_ticks and i + 1 < len(rows):
-                headers = unique_cells(rows[i])
-                ticks = unique_cells(rows[i + 1])
-                wanted = set(plan.basic_ticks[label])
-                for idx in range(1, min(len(headers), len(ticks))):
-                    option = cell_text(headers[idx])
-                    set_blue_portion(ticks[idx], "√" if option in wanted else "")
-                i += 2
-                continue
-            if label == "更多相关信息描述" and i + 1 < len(rows):
-                headers = unique_cells(rows[i])
-                values = unique_cells(rows[i + 1])
-                for idx in range(1, min(len(headers), len(values))):
-                    key = cell_text(headers[idx])
-                    if key in plan.extra_info:
-                        set_blue_portion(values[idx], plan.extra_info[key])
-                i += 2
-                continue
-            i += 1
-
-    def _replace_function_class(self, table: Table, pdf_rows: Sequence[Sequence[str]]) -> None:
-        # Keep header rows 0-1 and trailing 备注 row if present.
-        note_idx = None
-        for idx, row in enumerate(table.rows):
-            if "备注" in cell_text(unique_cells(row)[0]):
-                note_idx = idx
-                break
-        data_start = 2
-        data_end = note_idx if note_idx is not None else len(table.rows)
-        pdf_data = [row for row in pdf_rows[2:] if row and not "".join(row).startswith("备注")]
-        while (data_end - data_start) > len(pdf_data) and data_end - 1 > data_start:
-            delete_table_row(table, data_end - 1)
-            data_end -= 1
-        while (data_end - data_start) < len(pdf_data):
-            clone_table_row(table, data_start)
-            data_end += 1
-        for offset, pdf_row in enumerate(pdf_data):
-            cells = unique_cells(table.rows[data_start + offset])
-            for idx, cell in enumerate(cells):
-                value = pdf_row[idx] if idx < len(pdf_row) else ""
-                if idx == 0:
-                    force_black_text(cell, value)
-                else:
-                    set_blue_portion(cell, value) or force_blue_text(cell, value)
 
     def _fill_work_mode_defs(self, table: Table, plan: ElpPlan) -> None:
         by_mode = {normalize_mode(m): d for m, d in plan.work_mode_defs}
@@ -518,7 +580,7 @@ class ElpReportGenerator:
         blocks = self._collect_test_blocks(doc)
         if not blocks:
             return
-        prototype = deepcopy(blocks[0].elements)
+        prototype = self._slim_block_elements(deepcopy(blocks[0].elements))
         used = set()
         ordered: List[Tuple[TestNode, List, bool, str]] = []
         for leg, node in pairs:
@@ -605,6 +667,23 @@ class ElpReportGenerator:
             block.test_name = self._block_name(doc, block)
             blocks.append(block)
         return blocks
+
+    @staticmethod
+    def _slim_block_elements(elements: Sequence) -> List:
+        """Heading + detail table + one photo table (and its spacers)."""
+        slim: List = []
+        tables = 0
+        for el in elements:
+            if el.tag == qn("w:tbl"):
+                tables += 1
+                if tables > 2:
+                    continue
+                slim.append(el)
+                continue
+            if tables > 2:
+                continue
+            slim.append(el)
+        return slim
 
     def _block_name(self, doc: Document, block: _TestBlock) -> str:
         if block.heading_el is not None:
@@ -718,6 +797,7 @@ class ElpReportGenerator:
         self._fill_photo_tables(
             photo_tables,
             node,
+            doc=doc,
             leg_name=leg_name,
             project_path=project_path,
             remote_root=remote_root,
@@ -750,31 +830,54 @@ class ElpReportGenerator:
         if len(eq_rows) < 2:
             return
         data_idx = eq_rows[1:]
-        while len(data_idx) < max(len(items), 1):
-            clone_table_row(table, data_idx[-1])
-            data_idx.append(len(table.rows) - 1)
+        needed = len(items)
+        while len(data_idx) < needed:
+            src_i = data_idx[-1]
+            insert_cloned_row_after(table, src_i)
+            data_idx.append(src_i + 1)
+        for row_i in reversed(data_idx[needed:]):
+            delete_table_row(table, row_i)
+        data_idx = data_idx[:needed]
         for offset, row_i in enumerate(data_idx):
             cells = unique_cells(table.rows[row_i])
             if len(cells) < 6:
                 continue
-            if offset < len(items):
-                eq = items[offset]
-                vals = [
-                    (eq.name or "").replace("\n", "") or "/",
-                    eq.model or "/",
-                    eq.code or "/",
-                    (eq.valid_date or "").strip() or "/",
-                ]
-            else:
-                vals = ["/", "/", "/", "/"]
+            eq = items[offset]
+            vals = [
+                (eq.name or "").replace("\n", "") or "/",
+                eq.model or "/",
+                eq.code or "/",
+                (eq.valid_date or "").strip() or "/",
+            ]
             for col, val in enumerate(vals, start=2):
                 self._write_blue(cells[col], val)
+
+    @staticmethod
+    def _photo_table_slot_count(table: Table) -> int:
+        n = 0
+        for cap_row in (2, 4, 6, 8):
+            if cap_row >= len(table.rows):
+                continue
+            n += len(unique_cells(table.rows[cap_row]))
+        return n
+
+    def _ensure_photo_tables(
+        self, tables: List[Table], needed: int, doc: Document
+    ) -> List[Table]:
+        if needed <= 0 or not tables:
+            return list(tables)
+        live = list(tables)
+        proto = deepcopy(live[0]._tbl)
+        while len(live) < needed:
+            live.append(insert_cloned_table_after(live[-1], doc, proto))
+        return live
 
     def _fill_photo_tables(
         self,
         tables: Sequence[Table],
         node: TestNode,
         *,
+        doc: Document,
         leg_name: str,
         project_path: Optional[str],
         remote_root: Optional[str],
@@ -784,29 +887,63 @@ class ElpReportGenerator:
         photos = self._collect_photos(
             node, leg_name, project_path, remote_root, pattern_dir
         )
-        slots = []
-        for table in tables:
+        live = list(tables)
+        if photos and live:
+            slots = self._photo_table_slot_count(live[0]) or 8
+            needed = (len(photos) + slots - 1) // slots
+            live = self._ensure_photo_tables(live, needed, doc)
+        used = 0
+        for table in live:
             title_cells = unique_cells(table.rows[0]) if table.rows else []
             if title_cells and not matched:
                 name = (node.test_name or "").strip()
                 force_black_text(title_cells[0], f"{name} 相关图片：")
+            pairs: List[Tuple[int, int, List[Tuple]]] = []
             for cap_row in (2, 4, 6, 8):
                 if cap_row >= len(table.rows):
                     continue
                 img_row = cap_row - 1
                 cap_cells = unique_cells(table.rows[cap_row])
                 img_cells = unique_cells(table.rows[img_row])
+                slots = []
                 for col, cap_cell in enumerate(cap_cells):
                     img_cell = img_cells[col] if col < len(img_cells) else cap_cell
                     slots.append((cap_cell, img_cell))
-        for i, (cap_cell, img_cell) in enumerate(slots):
-            remove_drawings(img_cell)
-            if i < len(photos):
-                path = photos[i]
-                set_photo_caption(cap_cell, i + 1, caption_from_stem(path.stem))
-                self._put_picture(img_cell, path)
-            else:
-                set_photo_caption(cap_cell, i + 1, "/")
+                pairs.append((img_row, cap_row, slots))
+            last_used_pair = -1
+            last_pair_used = 0
+            filled_here = 0
+            for pair_i, (_img_row, _cap_row, slots) in enumerate(pairs):
+                pair_used = 0
+                for cap_cell, img_cell in slots:
+                    remove_drawings(img_cell)
+                    if used < len(photos):
+                        path = photos[used]
+                        set_photo_caption(
+                            cap_cell, used + 1, caption_from_stem(path.stem)
+                        )
+                        self._put_picture(img_cell, path)
+                        used += 1
+                        filled_here += 1
+                        pair_used += 1
+                    else:
+                        force_black_text(cap_cell, "")
+                        force_black_text(img_cell, "")
+                if pair_used:
+                    last_used_pair = pair_i
+                    last_pair_used = pair_used
+            if filled_here == 0:
+                delete_table(table)
+                continue
+            for pair_i in range(len(pairs) - 1, last_used_pair, -1):
+                img_row, cap_row, _slots = pairs[pair_i]
+                delete_table_row(table, cap_row)
+                delete_table_row(table, img_row)
+            if last_used_pair >= 0 and last_pair_used == 1:
+                img_row, cap_row, slots = pairs[last_used_pair]
+                if len(slots) > 1:
+                    delete_row_cell(table.rows[img_row], -1)
+                    delete_row_cell(table.rows[cap_row], -1)
 
     def _collect_photos(
         self,
@@ -826,11 +963,40 @@ class ElpReportGenerator:
                 leg_name,
                 node.test_name,
                 order=getattr(node, "photo_album_order", None) or None,
+                photo_file_order=getattr(node, "photo_file_order", None) or None,
                 temps=self._export_temps,
             ):
                 photos.append(item.path)
         photos.extend(self._pattern_photos(node.test_name or "", pattern_dir))
         return photos
+
+    def _prefetch_export_photos(
+        self,
+        pairs: Sequence[Tuple],
+        project_path: Optional[str],
+        remote_root: Optional[str],
+        pattern_dir: Optional[Path],
+    ) -> None:
+        from src.generators.embed_cache import prefetch_embed_paths
+        from src.io.test_photos import list_sample_info_photos
+
+        paths: List[Path] = []
+        if project_path:
+            try:
+                paths.extend(list_sample_info_photos(Path(project_path)))
+            except OSError:
+                pass
+        for leg, node in pairs:
+            paths.extend(
+                self._collect_photos(
+                    node,
+                    leg.leg_name,
+                    project_path,
+                    remote_root,
+                    pattern_dir,
+                )
+            )
+        prefetch_embed_paths(paths)
 
     @staticmethod
     def _pattern_photos(test_name: str, pattern_dir: Optional[Path]) -> List[Path]:

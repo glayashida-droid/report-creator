@@ -44,7 +44,6 @@ from src.io.project_assets import (
     reconcile_divergent_album_names,
     rename_all_merged_in_album,
     rename_merged_photo,
-    renumber_merged_photos,
     resolve_photo_path,
     resolve_spare_folder_to_open,
     thumbnail_for_photo,
@@ -59,9 +58,9 @@ from src.io.test_photos import (
     create_album,
     create_template_albums,
     delete_album,
-    infer_numbered_prefix,
     is_usable_test_name,
     remap_album_order,
+    remap_photo_file_order,
     rename_album,
     album_dir,
 )
@@ -911,6 +910,7 @@ class PhotoAlbumRow(QFrame):
         project_id: str,
         parent=None,
         remote_root: Optional[Path] = None,
+        node_data=None,
     ):
         super().__init__(parent)
         self.project_root = Path(project_root)
@@ -919,6 +919,7 @@ class PhotoAlbumRow(QFrame):
         self.test_name = test_name
         self.album_name = album_name
         self.project_id = project_id
+        self.node_data = node_data
         self._is_spare = album_name == SPARE_ALBUM_NAME
         self._popup = None
         self.setObjectName("photoAlbumRow")
@@ -1039,6 +1040,7 @@ class PhotoAlbumRow(QFrame):
                 self.leg_name,
                 self.test_name,
                 self.album_name,
+                order=self._preferred_photo_names(),
             )
         for photo in photos:
             self.gallery.add_photo(photo, self.project_root)
@@ -1098,6 +1100,13 @@ class PhotoAlbumRow(QFrame):
         else:
             written = copy_into_album(self.folder(), images, choice)
         invalidate_thumbs_for_files(self.project_root, written)
+        before = [Path(rel).name for rel in self.gallery.ordered_rels()]
+        merged = list(before)
+        for path in written:
+            name = path.name
+            if name not in merged:
+                merged.append(name)
+        self._persist_photo_names(merged)
         self.reload()
         self.changed.emit(False)
 
@@ -1136,7 +1145,7 @@ class PhotoAlbumRow(QFrame):
         if not prefix:
             return
         try:
-            rename_all_merged_in_album(
+            new_rels = rename_all_merged_in_album(
                 self.project_root,
                 self.remote_root,
                 self.leg_name,
@@ -1147,6 +1156,7 @@ class PhotoAlbumRow(QFrame):
         except PhotoError as exc:
             QMessageBox.warning(self, "提示", str(exc))
             return
+        self._persist_photo_names([Path(rel).name for rel in new_rels])
         self.reload()
         self.changed.emit(False)
 
@@ -1194,6 +1204,9 @@ class PhotoAlbumRow(QFrame):
 
         def _refresh():
             self.reload()
+            names = [Path(rel).name for rel in self.gallery.ordered_rels()]
+            if names and self._preferred_photo_names() is not None:
+                self._persist_photo_names(names)
             self.changed.emit(False)
 
         dialog.photosReceived.connect(_refresh)
@@ -1243,10 +1256,16 @@ class PhotoAlbumRow(QFrame):
         text, ok = QInputDialog.getText(self, "重命名照片", "新的文件名：", text=current)
         if not ok:
             return
+        visual = [Path(item).name for item in self.gallery.ordered_rels()]
         try:
-            rename_merged_photo(self.project_root, self.remote_root, rel, text)
+            new_rel = rename_merged_photo(self.project_root, self.remote_root, rel, text)
         except PhotoError as exc:
             QMessageBox.warning(self, "提示", str(exc))
+            self._on_thumb_renamed()
+            return
+        new_name = Path(new_rel).name
+        if new_name != current:
+            self._persist_photo_names(remap_album_order(visual, current, new_name))
         self._on_thumb_renamed()
 
     def _delete_photo(self, rel: str):
@@ -1255,6 +1274,8 @@ class PhotoAlbumRow(QFrame):
         except PhotoError as exc:
             QMessageBox.warning(self, "提示", str(exc))
             return
+        remaining = [Path(item).name for item in self.gallery.ordered_rels() if item != rel]
+        self._persist_photo_names(remaining)
         self._on_thumb_removed()
 
     def _download_photo(self, rel: str):
@@ -1286,36 +1307,37 @@ class PhotoAlbumRow(QFrame):
     def _write_photo_order(self, items: List[str]):
         if self._is_spare or not items:
             return
-        disk = [
-            photo.relative_path
-            for photo in list_merged_photos(
-                self.project_root,
-                self.remote_root,
-                self.leg_name,
-                self.test_name,
-                self.album_name,
-            )
-        ]
-        if items == disk:
+        names = [Path(rel).name for rel in items]
+        current = self._preferred_photo_names()
+        if current is not None and current == names:
             return
-        prefix = infer_numbered_prefix([Path(rel).name for rel in items]) or self.album_name
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            renumber_merged_photos(
-                self.project_root,
-                self.remote_root,
-                self.leg_name,
-                self.test_name,
-                self.album_name,
-                items,
-                prefix,
-            )
-        except PhotoError as exc:
-            QMessageBox.warning(self, "提示", str(exc))
-            return
-        finally:
-            QApplication.restoreOverrideCursor()
+        self._persist_photo_names(names)
         QTimer.singleShot(0, self._finish_photo_reorder)
+
+    def _preferred_photo_names(self) -> Optional[List[str]]:
+        if self._is_spare or self.node_data is None:
+            return None
+        orders = getattr(self.node_data, "photo_file_order", None) or {}
+        names = orders.get(self.album_name) or []
+        return list(names) if names else None
+
+    def _persist_photo_names(self, names: List[str]) -> None:
+        if self._is_spare or self.node_data is None:
+            return
+        cleaned: List[str] = []
+        seen = set()
+        for raw in names:
+            name = Path(raw).name
+            if not name or name in seen:
+                continue
+            cleaned.append(name)
+            seen.add(name)
+        orders = dict(getattr(self.node_data, "photo_file_order", None) or {})
+        if cleaned:
+            orders[self.album_name] = cleaned
+        else:
+            orders.pop(self.album_name, None)
+        self.node_data.photo_file_order = orders
 
     def _finish_photo_reorder(self):
         self.reload()
@@ -1486,6 +1508,19 @@ class TestPhotosPanel(QWidget):
 
     def current_album_order(self) -> List[str]:
         return [row.album_name for row in self._formal_row_widgets()]
+
+    def current_photo_file_order(self) -> dict:
+        stored = {}
+        if self.node_data is not None:
+            stored = dict(getattr(self.node_data, "photo_file_order", None) or {})
+        live = {row.album_name for row in self._formal_row_widgets()}
+        for row in self._formal_row_widgets():
+            names = [Path(rel).name for rel in row.gallery.ordered_rels()]
+            if names:
+                stored[row.album_name] = names
+            else:
+                stored.pop(row.album_name, None)
+        return {key: value for key, value in stored.items() if key in live}
 
     def _reorder_album(self, album_name: str, insert_at: int) -> None:
         if album_name == SPARE_ALBUM_NAME:
@@ -1679,6 +1714,7 @@ class TestPhotosPanel(QWidget):
             self.project_id,
             self.rows_host,
             remote_root=self.remote_root,
+            node_data=None if name == SPARE_ALBUM_NAME else self.node_data,
         )
         row.changed.connect(self._on_row_changed)
         if not row.is_spare:
@@ -1703,6 +1739,12 @@ class TestPhotosPanel(QWidget):
         else:
             # Lock current on-screen position (chip already shows new_name).
             self._write_order(self.current_album_order())
+        if self.node_data is not None:
+            self.node_data.photo_file_order = remap_photo_file_order(
+                getattr(self.node_data, "photo_file_order", None),
+                old_name,
+                new_name,
+            )
         self._reload_preserve_scroll()
         self.changed.emit()
 
@@ -1710,6 +1752,10 @@ class TestPhotosPanel(QWidget):
         order = self._preferred_order()
         if order is not None:
             self._write_order([n for n in order if n != album_name])
+        if self.node_data is not None:
+            orders = dict(getattr(self.node_data, "photo_file_order", None) or {})
+            orders.pop(album_name, None)
+            self.node_data.photo_file_order = orders
         self._reload_preserve_scroll()
         self.changed.emit()
 

@@ -77,6 +77,27 @@ def test_structure_mirror_skips_files_over_size_threshold():
         assert (dest / "3.测试组" / "Leg1-振动" / "数据表附件" / "tiny.xlsx").read_bytes() == b"tiny"
 
 
+def test_structure_mirror_copies_oversized_elp_plan_pdf():
+    from src.io.project_mirror import STRUCTURE_MIRROR_MAX_FILE_BYTES
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "src"
+        dest = Path(tmp) / "dest"
+        sample = src / "1.接样组"
+        sample.mkdir(parents=True)
+        plan_name = "P166-xxx-ELP测试计划-20260713.pdf"
+        (sample / plan_name).write_bytes(b"x" * (STRUCTURE_MIRROR_MAX_FILE_BYTES + 1))
+        (sample / "报价单-电性能.pdf").write_bytes(
+            b"q" * (STRUCTURE_MIRROR_MAX_FILE_BYTES + 1)
+        )
+
+        assert incremental_copy(src, dest) is True
+        copied = dest / "1.接样组" / plan_name
+        assert copied.is_file()
+        assert copied.stat().st_size == STRUCTURE_MIRROR_MAX_FILE_BYTES + 1
+        assert not (dest / "1.接样组" / "报价单-电性能.pdf").exists()
+
+
 def test_list_saved_projects():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -108,5 +129,6 @@ if __name__ == "__main__":
     test_incremental_copy_can_cancel()
     test_structure_mirror_skips_images_keeps_dirs_copies_light_xlsx()
     test_structure_mirror_skips_files_over_size_threshold()
+    test_structure_mirror_copies_oversized_elp_plan_pdf()
     test_list_saved_projects()
     print("test_project_mirror: ok")

@@ -16,6 +16,7 @@ from src.io.project_mirror import (
 )
 from src.io.test_photos import IMAGE_EXTS
 from src.models.project_state import ProjectState
+from src.parsers.elp_plan import is_elp_plan_attachment
 
 PathLike = Union[str, Path]
 PROJECT_STATE_NAME = "project_state.json"
@@ -255,7 +256,12 @@ def remote_diverged_from_pending(
 
 
 def is_purge_candidate(path: Path) -> bool:
-    """True for nightly-purgeable local files (images, xlsx, or oversized)."""
+    """True for nightly-purgeable local files (images, xlsx, or oversized).
+
+    ELP test-plan PDFs stay on the local mirror so export can OCR them offline.
+    """
+    if is_elp_plan_attachment(path):
+        return False
     if path.suffix.lower() in _PURGE_EXTS:
         return True
     try:

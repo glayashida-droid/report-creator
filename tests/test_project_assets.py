@@ -93,6 +93,33 @@ def test_merged_photos_cloud_only_local_only_and_local_wins(tmp_path: Path):
     assert resolve_photo_path(local, remote, both.relative_path) == both.read_path
 
 
+def test_list_merged_photos_respects_preferred_filename_order(tmp_path: Path):
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    _png(_album(local) / "试验前-001.png")
+    _png(_album(local) / "试验前-002.png")
+    _png(_album(local) / "样品12345.png")
+    merged = list_merged_photos(local, remote, LEG, TEST, "试验前")
+    assert [Path(p.relative_path).name for p in merged] == [
+        "样品12345.png",
+        "试验前-001.png",
+        "试验前-002.png",
+    ]
+    ordered = list_merged_photos(
+        local,
+        remote,
+        LEG,
+        TEST,
+        "试验前",
+        order=["试验前-001.png", "样品12345.png", "试验前-002.png"],
+    )
+    assert [Path(p.relative_path).name for p in ordered] == [
+        "试验前-001.png",
+        "样品12345.png",
+        "试验前-002.png",
+    ]
+
+
 def test_reconcile_renames_divergent_remote_so_four_photos_show(tmp_path: Path):
     """Local 001/002 + remote 001/005 (001 differs) → remote 001 becomes 003."""
     local = tmp_path / "local"

@@ -23,6 +23,7 @@ class PhotoScraper:
         max_width_inches: float = 2.95,
         data_width_inches: float = 5.5,
         order=None,
+        photo_file_order=None,
     ):
         temps = []
         try:
@@ -32,6 +33,7 @@ class PhotoScraper:
                 leg_name,
                 test_name,
                 order=order,
+                photo_file_order=photo_file_order,
                 temps=temps,
             )
             if not exported:

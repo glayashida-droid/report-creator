@@ -6,8 +6,11 @@ from src.parsers.elp_plan import (
     elp_names_match,
     extract_plan_number_from_text,
     find_elp_plan_pdf,
+    is_elp_plan_attachment,
+    is_elp_plan_filename,
     lookup_work_mode,
     parse_elp_plan,
+    resolve_elp_plan_pdf,
     tesseract_cmd,
 )
 
@@ -50,6 +53,27 @@ def test_find_elp_plan_pdf_prefers_named_file(tmp_path: Path):
     (sample / "other.pdf").write_bytes(b"%PDF")
     assert find_elp_plan_pdf(tmp_path) == target
     assert find_elp_plan_pdf(None) is None
+    assert is_elp_plan_filename(target.name)
+    assert not is_elp_plan_filename("报价单-电性能.pdf")
+    assert is_elp_plan_attachment(target)
+    assert not is_elp_plan_attachment(sample / "报价单-电性能.pdf")
+
+
+def test_resolve_elp_plan_pdf_falls_back_to_source(tmp_path: Path):
+    local = tmp_path / "local"
+    source = tmp_path / "source"
+    (local / "1.接样组").mkdir(parents=True)
+    (source / "1.接样组").mkdir(parents=True)
+    (source / "1.接样组" / "报价单-电性能.pdf").write_bytes(b"%PDF")
+    remote_plan = source / "1.接样组" / "P166-ELP测试计划.pdf"
+    remote_plan.write_bytes(b"%PDF-source")
+    assert resolve_elp_plan_pdf(local, source) == remote_plan
+
+    local_plan = local / "1.接样组" / "local-ELP测试计划.pdf"
+    local_plan.write_bytes(b"%PDF-local")
+    assert resolve_elp_plan_pdf(local, source) == local_plan
+    assert resolve_elp_plan_pdf(None, source) == remote_plan
+    assert resolve_elp_plan_pdf(None, None) is None
 
 
 def test_parse_example_elp_plan_without_ocr():
@@ -69,6 +93,9 @@ def test_parse_example_elp_plan_without_ocr():
     assert len(plan.monitor_rows) >= 2
     assert plan.monitor_rows[0][1]
     assert any(name.startswith("功能状态A") for name, _desc in plan.function_states)
+    assert plan.basic_info_rows
+    assert plan.basic_info_rows[0][0].startswith("电子电器组件种类")
+    assert any(row and row[0].startswith("mode 1.1") for row in plan.function_class_rows)
 
 
 def test_find_elp_plan_in_example_project():

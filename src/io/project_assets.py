@@ -9,7 +9,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import List, Mapping, Optional, Sequence, Tuple, Union
 
 from PIL import Image
 
@@ -23,7 +23,9 @@ from src.io.test_photos import (
     _rename_path,
     album_dir,
     apply_album_order,
+    apply_photo_order,
     canonical_image_suffix,
+    photo_order_for_album,
     is_image_file,
     is_usable_test_name,
     numbered_name,
@@ -317,6 +319,7 @@ def _merge_photos_in_album(
     leg_name: str,
     test_name: str,
     album_name: str,
+    order: Optional[Sequence[str]] = None,
 ) -> List[MergedPhoto]:
     album = (album_name or "").strip()
     if not album:
@@ -336,7 +339,7 @@ def _merge_photos_in_album(
         names.update(_list_image_names(remote_folder))
 
     out: List[MergedPhoto] = []
-    for name in sorted(names, key=lambda n: n.casefold()):
+    for name in apply_photo_order(names, order):
         rel = _album_relative(leg_name, test_name, album, name)
         local_file = local_folder / name if local_folder is not None else None
         remote_file = remote_folder / name if remote_folder is not None else None
@@ -365,6 +368,7 @@ def list_merged_photos(
     leg_name: str,
     test_name: str,
     album_name: str,
+    order: Optional[Sequence[str]] = None,
 ) -> List[MergedPhoto]:
     """Merge album photos: local wins; remote-only → is_cloud_only.
 
@@ -374,7 +378,7 @@ def list_merged_photos(
     if not album or album == SPARE_DIR_NAME:
         return []
     return _merge_photos_in_album(
-        local_root, remote_root, leg_name, test_name, album
+        local_root, remote_root, leg_name, test_name, album, order=order
     )
 
 
@@ -894,6 +898,7 @@ def iter_merged_export_photos(
     test_name: str,
     order: Optional[Sequence[str]] = None,
     *,
+    photo_file_order: Optional[Mapping[str, Sequence[str]]] = None,
     temps: Optional[List[Path]] = None,
 ) -> List[ExportPhoto]:
     """Album-ordered embed paths via merge view; cloud-only materializes to temp.
@@ -904,7 +909,12 @@ def iter_merged_export_photos(
     out: List[ExportPhoto] = []
     for album in list_merged_albums(local_root, remote_root, leg_name, test_name, order=order):
         for photo in list_merged_photos(
-            local_root, remote_root, leg_name, test_name, album
+            local_root,
+            remote_root,
+            leg_name,
+            test_name,
+            album,
+            order=photo_order_for_album(photo_file_order, album),
         ):
             if photo.is_cloud_only:
                 path = original_view_path(local_root, remote_root, photo.relative_path)

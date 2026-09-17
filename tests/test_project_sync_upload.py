@@ -105,3 +105,20 @@ def test_sync_upload_then_purge_and_upload_failure_keeps_local(tmp_path: Path, m
     failed = sync_project_to_remote(local, bad_remote)
     assert failed.failed
     assert photo2.is_file()
+
+
+def test_purge_keeps_oversized_elp_plan_pdf(tmp_path: Path):
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    sample = local / "1.接样组"
+    sample.mkdir(parents=True)
+    plan = sample / "P166-ELP测试计划.pdf"
+    plan.write_bytes(b"x" * (STRUCTURE_MIRROR_MAX_FILE_BYTES + 1))
+    rel = plan.relative_to(local).as_posix()
+    remote_plan = remote / rel
+    remote_plan.parent.mkdir(parents=True, exist_ok=True)
+    remote_plan.write_bytes(plan.read_bytes())
+
+    purged = purge_verified_uploads(local, remote, [rel])
+    assert purged == []
+    assert plan.is_file()

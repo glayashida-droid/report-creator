@@ -710,8 +710,19 @@ class WordGenerator:
     def _prepare_embed_stream(source: "Path | bytes", width_in: float) -> io.BytesIO:
         """Downscale test photos to width_in×EMBED_PPI (never upscale), JPEG encode.
 
-        Standard-library condition images are embedded elsewhere without this path.
+        Path sources reuse the process-wide embed cache. Byte sources skip it so
+        tests can feed raw buffers. Standard-library condition images are
+        embedded elsewhere without this path.
         """
+        if not isinstance(source, (bytes, bytearray)):
+            from src.generators.embed_cache import embed_stream_for
+
+            return embed_stream_for(Path(source), width_in)
+        return WordGenerator._encode_embed_stream(source, width_in)
+
+    @staticmethod
+    def _encode_embed_stream(source: "Path | bytes", width_in: float) -> io.BytesIO:
+        """Uncached JPEG embed encode. Used by the cache and by byte-input tests."""
         from PIL import Image
 
         if isinstance(source, (bytes, bytearray)):
@@ -1355,6 +1366,7 @@ class WordGenerator:
                 leg.leg_name,
                 node.test_name,
                 order=getattr(node, "photo_album_order", None) or None,
+                photo_file_order=getattr(node, "photo_file_order", None) or None,
                 remote_root=Path(remote_root) if remote_root else None,
             )
 
@@ -1631,6 +1643,7 @@ class WordGenerator:
         leg_name: str,
         test_name: str,
         order=None,
+        photo_file_order=None,
         remote_root: Optional[Path] = None,
     ):
         temps = getattr(self, "_export_temps", None)
@@ -1643,6 +1656,7 @@ class WordGenerator:
             leg_name,
             test_name,
             order=order,
+            photo_file_order=photo_file_order,
             temps=temps,
         )
         if not exported:

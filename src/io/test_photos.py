@@ -7,7 +7,7 @@ import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from PIL import Image
 
@@ -123,6 +123,59 @@ def apply_album_order(
     return out
 
 
+def apply_photo_order(
+    names: Sequence[str], preferred: Optional[Sequence[str]] = None
+) -> List[str]:
+    """Order album filenames by preferred names; extras keep filename sort at the end."""
+    present = [n for n in names if n]
+    if not preferred:
+        return sorted(present, key=lambda n: n.casefold())
+    present_set = set(present)
+    lookup = {n.casefold(): n for n in present}
+    seen: set[str] = set()
+    out: List[str] = []
+    for name in preferred:
+        text = (name or "").strip()
+        if not text:
+            continue
+        actual = text if text in present_set else lookup.get(text.casefold())
+        if not actual or actual in seen:
+            continue
+        out.append(actual)
+        seen.add(actual)
+    rest = [n for n in present if n not in seen]
+    rest.sort(key=lambda n: n.casefold())
+    out.extend(rest)
+    return out
+
+
+def photo_order_for_album(
+    photo_file_order: Optional[Mapping[str, Sequence[str]]], album: str
+) -> Optional[List[str]]:
+    if not photo_file_order:
+        return None
+    key = (album or "").strip()
+    names = photo_file_order.get(key) or photo_file_order.get(album)
+    if not names:
+        return None
+    out = [str(n).strip() for n in names if str(n).strip()]
+    return out or None
+
+
+def remap_photo_file_order(
+    orders: Optional[Mapping[str, Sequence[str]]], old_album: str, new_album: str
+) -> dict:
+    """Keep per-album filename lists when a photo folder is renamed."""
+    out = {str(k): list(v) for k, v in (orders or {}).items()}
+    old = (old_album or "").strip()
+    new = (new_album or "").strip()
+    if old in out:
+        names = out.pop(old)
+        if new:
+            out[new] = list(names)
+    return out
+
+
 def uses_data_photo_layout(album: str) -> bool:
     """Large single-column embed; locked to the default 「数据」 folder only."""
     return (album or "").strip() == "数据"
@@ -147,13 +200,19 @@ def list_albums(
     return apply_album_order(names, order)
 
 
-def list_photos(project_root: Path, leg_name: str, test_name: str, album_name: str) -> List[Path]:
+def list_photos(
+    project_root: Path,
+    leg_name: str,
+    test_name: str,
+    album_name: str,
+    order: Optional[Sequence[str]] = None,
+) -> List[Path]:
     folder = album_dir(project_root, leg_name, test_name, album_name)
     if not folder.is_dir():
         return []
     photos = [p for p in folder.iterdir() if is_image_file(p)]
-    photos.sort(key=lambda p: p.name.casefold())
-    return photos
+    by_name = {p.name: p for p in photos}
+    return [by_name[name] for name in apply_photo_order(by_name, order)]
 
 
 def iter_export_photos(
@@ -163,6 +222,7 @@ def iter_export_photos(
     order: Optional[Sequence[str]] = None,
     remote_root: Optional[Path] = None,
     temps: Optional[List[Path]] = None,
+    photo_file_order: Optional[Mapping[str, Sequence[str]]] = None,
 ) -> List[Path]:
     """Export-ready photo paths via merge view (local + optional remote)."""
     from src.io.project_assets import iter_merged_export_photos
@@ -175,6 +235,7 @@ def iter_export_photos(
             leg_name,
             test_name,
             order=order,
+            photo_file_order=photo_file_order,
             temps=temps,
         )
     ]

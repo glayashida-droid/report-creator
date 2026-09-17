@@ -67,12 +67,40 @@ class ElpPlan:
     plan_no: str = ""
     basic_ticks: Dict[str, List[str]] = field(default_factory=dict)
     extra_info: Dict[str, str] = field(default_factory=dict)
+    basic_info_rows: List[List[str]] = field(default_factory=list)
     work_mode_defs: List[Tuple[str, str]] = field(default_factory=list)
     work_mode_notes: str = ""
     function_class_rows: List[List[str]] = field(default_factory=list)
     monitor_rows: List[Tuple[str, str, str]] = field(default_factory=list)
     function_states: List[Tuple[str, str]] = field(default_factory=list)
     test_work_modes: Dict[str, str] = field(default_factory=dict)
+
+
+def elp_plan_filename_score(name: str) -> int:
+    """Rank a PDF filename as an ELP test plan. Zero means not a plan by name."""
+    if not name or "报价单" in name:
+        return 0
+    score = 0
+    upper = name.upper()
+    if "ELP" in upper:
+        score += 3
+    if "测试计划" in name:
+        score += 2
+    return score
+
+
+def is_elp_plan_filename(name: str) -> bool:
+    return elp_plan_filename_score(name) > 0
+
+
+def is_elp_plan_attachment(path: Path) -> bool:
+    """True for an ELP test-plan PDF living under 1.接样组 (filename only)."""
+    candidate = Path(path)
+    if candidate.suffix.lower() != ".pdf":
+        return False
+    if SAMPLE_DIR_NAME not in candidate.parts:
+        return False
+    return is_elp_plan_filename(candidate.name)
 
 
 def find_elp_plan_pdf(project_path: Optional[Path]) -> Optional[Path]:
@@ -91,17 +119,9 @@ def find_elp_plan_pdf(project_path: Optional[Path]) -> Optional[Path]:
     ]
     ranked: List[Tuple[int, str, Path]] = []
     for path in pdfs:
-        name = path.name
-        if "报价单" in name:
-            continue
-        score = 0
-        upper = name.upper()
-        if "ELP" in upper:
-            score += 3
-        if "测试计划" in name:
-            score += 2
+        score = elp_plan_filename_score(path.name)
         if score:
-            ranked.append((score, name, path))
+            ranked.append((score, path.name, path))
     if ranked:
         ranked.sort(key=lambda item: (-item[0], item[1]))
         return ranked[0][2]
@@ -109,6 +129,19 @@ def find_elp_plan_pdf(project_path: Optional[Path]) -> Optional[Path]:
         if _pdf_looks_like_elp(path):
             return path
     return None
+
+
+def resolve_elp_plan_pdf(
+    local_path: Optional[Path],
+    source_path: Optional[Path] = None,
+) -> Optional[Path]:
+    """Prefer the local mirror copy; fall back to the source project folder."""
+    found = find_elp_plan_pdf(local_path)
+    if found is not None:
+        return found
+    if source_path is None or source_path == local_path:
+        return None
+    return find_elp_plan_pdf(source_path)
 
 
 def _pdf_looks_like_elp(path: Path) -> bool:
@@ -220,24 +253,41 @@ def parse_elp_plan(pdf_path: Optional[Path], *, ocr_cover: bool = True) -> ElpPl
             plan.plan_no = ocr_elp_plan_number(path)
         return plan
 
+    from concurrent.futures import ThreadPoolExecutor
+
+    ocr_no = ""
     tables: List[List[List[str]]] = []
     header_text = ""
     notes_chunks: List[str] = []
-    with pdfplumber.open(str(path)) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text() or ""
-            if not header_text:
-                header_text = text
-            if "备注" in text and "mode 3.1" in text.replace(" ", "").casefold():
-                notes_chunks.append(text)
-            for raw in page.extract_tables() or []:
-                tables.append(_clean_table(raw))
+
+    def _extract_tables() -> Tuple[str, List[str], List[List[List[str]]]]:
+        header = ""
+        notes: List[str] = []
+        found: List[List[List[str]]] = []
+        with pdfplumber.open(str(path)) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text() or ""
+                if not header:
+                    header = text
+                if "备注" in text and "mode 3.1" in text.replace(" ", "").casefold():
+                    notes.append(text)
+                for raw in page.extract_tables() or []:
+                    found.append(_clean_table(raw))
+        return header, notes, found
+
+    if ocr_cover:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            ocr_fut = pool.submit(ocr_elp_plan_number, path)
+            header_text, notes_chunks, tables = _extract_tables()
+            ocr_no = ocr_fut.result() or ""
+    else:
+        header_text, notes_chunks, tables = _extract_tables()
 
     _fill_from_header(plan, header_text)
     _fill_from_tables(plan, tables)
     plan.work_mode_notes = _extract_work_mode_notes(notes_chunks)
     if ocr_cover and not plan.plan_no:
-        plan.plan_no = ocr_elp_plan_number(path)
+        plan.plan_no = ocr_no
     return plan
 
 
@@ -269,6 +319,7 @@ def _fill_from_tables(plan: ElpPlan, tables: Sequence[Sequence[Sequence[str]]]) 
             continue
         first = _row_join(table[0])
         if first.startswith("电子电器组件种类"):
+            plan.basic_info_rows = [list(row) for row in table]
             _parse_basic_info(plan, table)
         elif "吉利零部件号" in first and "硬件版本" in first:
             _parse_hw_sw(plan, table)

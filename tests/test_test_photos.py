@@ -8,6 +8,7 @@ from PIL import Image
 from src.io.test_photos import (
     PhotoError,
     apply_album_order,
+    apply_photo_order,
     collect_drop_images,
     copy_into_album,
     copy_into_album_keep_names,
@@ -22,6 +23,7 @@ from src.io.test_photos import (
     next_sequence,
     numbered_name,
     remap_album_order,
+    remap_photo_file_order,
     rename_album,
     rename_all_in_album,
     rename_photo,
@@ -726,6 +728,40 @@ def test_rename_photo_reloads_gallery_after_error(tmp_path, monkeypatch):
     assert row.gallery.item(0).text() == "123.png"
 
 
+def test_rename_photo_keeps_visual_position(tmp_path, monkeypatch):
+    import sys
+
+    from PySide6.QtWidgets import QApplication
+
+    from src.io.test_photos import create_album
+    from src.models.project_state import TestNode
+    from src.ui.test_photos_panel import PHOTO_REL_ROLE, PhotoAlbumRow
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    album = create_album(tmp_path, "Leg 1", "高温试验", "试验前")
+    _png(album / "试验前-001.png")
+    _png(album / "试验前-002.png")
+    _png(album / "试验前-003.png")
+    node = TestNode(test_name="高温试验")
+    row = PhotoAlbumRow(
+        tmp_path, "Leg 1", "高温试验", "试验前", "P1", node_data=node
+    )
+    monkeypatch.setattr(
+        "src.ui.test_photos_panel.QInputDialog.getText",
+        lambda *a, **k: ("样品12345.png", True),
+    )
+    middle = row.gallery.item(1)
+    assert middle is not None
+    row._rename_photo(middle.data(PHOTO_REL_ROLE))
+    names = [row.gallery.item(i).text() for i in range(row.gallery.count())]
+    assert names == ["试验前-001.png", "样品12345.png", "试验前-003.png"]
+    assert (album / "样品12345.png").exists()
+    assert not (album / "试验前-002.png").exists()
+    assert node.photo_file_order["试验前"] == names
+
+
 def test_photo_thumb_cloud_tooltip_allows_rename(tmp_path):
     import sys
 
@@ -758,6 +794,7 @@ def test_photo_album_row_reorder_rewrites_sequence(tmp_path):
     from PySide6.QtWidgets import QApplication
 
     from src.io.test_photos import create_album
+    from src.models.project_state import TestNode
     from src.ui.test_photos_panel import PhotoAlbumRow
 
     app = QApplication.instance()
@@ -766,14 +803,23 @@ def test_photo_album_row_reorder_rewrites_sequence(tmp_path):
     album = create_album(tmp_path, "Leg 1", "高温试验", "试验前")
     _png(album / "试验前-001.png", "red")
     _png(album / "试验前-002.png", "blue")
-    row = PhotoAlbumRow(tmp_path, "Leg 1", "高温试验", "试验前", "P1")
+    node = TestNode(test_name="高温试验")
+    row = PhotoAlbumRow(
+        tmp_path, "Leg 1", "高温试验", "试验前", "P1", node_data=node
+    )
     rels = row.gallery.ordered_rels()
     assert len(rels) == 2
     row._apply_photo_reorder(rels[0], 2)
     with Image.open(album / "试验前-001.png") as img:
-        assert img.getpixel((0, 0))[2] >= 200
-    with Image.open(album / "试验前-002.png") as img:
         assert img.getpixel((0, 0))[0] >= 200
+    with Image.open(album / "试验前-002.png") as img:
+        assert img.getpixel((0, 0))[2] >= 200
+    assert node.photo_file_order["试验前"] == ["试验前-002.png", "试验前-001.png"]
+    row.reload()
+    assert [Path(rel).name for rel in row.gallery.ordered_rels()] == [
+        "试验前-002.png",
+        "试验前-001.png",
+    ]
 
 
 def test_photo_thumb_live_move_commits_visual_order(tmp_path):
@@ -782,6 +828,7 @@ def test_photo_thumb_live_move_commits_visual_order(tmp_path):
     from PySide6.QtWidgets import QApplication
 
     from src.io.test_photos import create_album
+    from src.models.project_state import TestNode
     from src.ui.test_photos_panel import PhotoAlbumRow
 
     app = QApplication.instance()
@@ -790,7 +837,10 @@ def test_photo_thumb_live_move_commits_visual_order(tmp_path):
     album = create_album(tmp_path, "Leg 1", "高温试验", "试验前")
     _png(album / "试验前-001.png", "red")
     _png(album / "试验前-002.png", "blue")
-    row = PhotoAlbumRow(tmp_path, "Leg 1", "高温试验", "试验前", "P1")
+    node = TestNode(test_name="高温试验")
+    row = PhotoAlbumRow(
+        tmp_path, "Leg 1", "高温试验", "试验前", "P1", node_data=node
+    )
     gallery = row.gallery
     rels = gallery.ordered_rels()
     assert len(rels) == 2
@@ -798,9 +848,15 @@ def test_photo_thumb_live_move_commits_visual_order(tmp_path):
     gallery._visual_order = [rels[1], rels[0]]
     gallery._end_reorder()
     with Image.open(album / "试验前-001.png") as img:
-        assert img.getpixel((0, 0))[2] >= 200
-    with Image.open(album / "试验前-002.png") as img:
         assert img.getpixel((0, 0))[0] >= 200
+    with Image.open(album / "试验前-002.png") as img:
+        assert img.getpixel((0, 0))[2] >= 200
+    assert node.photo_file_order["试验前"] == ["试验前-002.png", "试验前-001.png"]
+    row.reload()
+    assert [Path(rel).name for rel in row.gallery.ordered_rels()] == [
+        "试验前-002.png",
+        "试验前-001.png",
+    ]
 
 
 def test_apply_album_order_and_export_respects_preferred():
@@ -816,6 +872,22 @@ def test_apply_album_order_and_export_respects_preferred():
         "试验后888",
         "数据",
     ]
+    assert apply_photo_order(["c.png", "a.png", "b.png"], None) == [
+        "a.png",
+        "b.png",
+        "c.png",
+    ]
+    assert apply_photo_order(
+        ["试验前-001.png", "试验前-002.png", "样品12345.png"],
+        ["试验前-001.png", "样品12345.png", "试验前-002.png"],
+    ) == ["试验前-001.png", "样品12345.png", "试验前-002.png"]
+    assert apply_photo_order(
+        ["b.png", "a.png", "c.png"],
+        ["c.png", "gone.png", "a.png"],
+    ) == ["c.png", "a.png", "b.png"]
+    assert remap_photo_file_order(
+        {"试验前": ["a.png"], "数据": ["b.png"]}, "试验前", "外观"
+    ) == {"外观": ["a.png"], "数据": ["b.png"]}
     assert uses_data_photo_layout("数据")
     assert uses_data_photo_layout(" 数据 ")
     assert not uses_data_photo_layout("数据表附件")
@@ -831,6 +903,18 @@ def test_apply_album_order_and_export_respects_preferred():
         assert list_albums(root, LEG, "高温试验", order=order) == order
         exported = [p.parent.name for p in iter_export_photos(root, LEG, "高温试验", order=order)]
         assert exported == ["试验后888", "试验前", "数据"]
+        file_order = {
+            "试验前": ["试验前-001.png"],
+            "数据": ["数据-001.png"],
+            "试验后888": ["试验后888-001.png"],
+        }
+        exported_files = [
+            p.name
+            for p in iter_export_photos(
+                root, LEG, "高温试验", order=order, photo_file_order=file_order
+            )
+        ]
+        assert exported_files == ["试验后888-001.png", "试验前-001.png", "数据-001.png"]
 
 
 def test_photo_album_order_roundtrips_in_project_json():
@@ -846,6 +930,9 @@ def test_photo_album_order_roundtrips_in_project_json():
                     TestNode(
                         test_name="高温试验",
                         photo_album_order=["试验后888", "数据", "试验前"],
+                        photo_file_order={
+                            "试验前": ["样品12345.jpg", "试验前-001.jpg"],
+                        },
                     )
                 ],
             )
@@ -860,6 +947,9 @@ def test_photo_album_order_roundtrips_in_project_json():
         "数据",
         "试验前",
     ]
+    assert loaded.legs[0].nodes[0].photo_file_order == {
+        "试验前": ["样品12345.jpg", "试验前-001.jpg"],
+    }
 
 
 if __name__ == "__main__":

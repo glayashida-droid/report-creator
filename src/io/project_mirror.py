@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from src.io.test_photos import IMAGE_EXTS
+from src.parsers.elp_plan import is_elp_plan_attachment
 
 SKIP_FILE_NAMES = {".DS_Store", "Thumbs.db", "project_state.json"}
 SKIP_DIR_NAMES = {".DS_Store"}
@@ -48,9 +49,14 @@ def is_structure_mirror_skipped(
     *,
     max_bytes: int = STRUCTURE_MIRROR_MAX_FILE_BYTES,
 ) -> bool:
-    """True when structure mirror should not copy this file (image or oversized)."""
+    """True when structure mirror should not copy this file (image or oversized).
+
+    ELP test-plan PDFs under 1.接样组 are copied even when they exceed max_bytes.
+    """
     if path.suffix.lower() in IMAGE_EXTS:
         return True
+    if is_elp_plan_attachment(path):
+        return False
     try:
         return path.stat().st_size > max_bytes
     except OSError:
@@ -83,7 +89,8 @@ def incremental_copy(
 
     By default skips IMAGE_EXTS originals and files larger than
     STRUCTURE_MIRROR_MAX_FILE_BYTES, while still creating every walked
-    directory so the local skeleton remains. Always skips junk, ``~$``,
+    directory so the local skeleton remains. ELP test-plan PDFs under
+    ``1.接样组`` are copied even when oversized. Always skips junk, ``~$``,
     and never overwrites local project_state.json from the source tree.
 
     Returns False if cancelled mid-copy.

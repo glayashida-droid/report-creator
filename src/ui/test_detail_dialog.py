@@ -3258,6 +3258,7 @@ class TestDetailDialog(QDialog):
                 order = self.photos_panel.current_album_order()
                 if order:
                     self.node_data.photo_album_order = list(order)
+                self.node_data.photo_file_order = self.photos_panel.current_photo_file_order()
             self.accept()
             return
         for row in range(primary.rowCount()):
@@ -3313,4 +3314,5 @@ class TestDetailDialog(QDialog):
             order = self.photos_panel.current_album_order()
             if order:
                 self.node_data.photo_album_order = list(order)
+            self.node_data.photo_file_order = self.photos_panel.current_photo_file_order()
         self.accept()
