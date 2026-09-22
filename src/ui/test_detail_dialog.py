@@ -385,12 +385,13 @@ def _image_link_text(index, total):
 class DrawerSection(QFrame):
     """Collapsible drawer: header stays visible, body toggles."""
 
-    def __init__(self, title, parent=None, wrap_title=False, primary=False):
+    def __init__(self, title, parent=None, wrap_title=False, primary=False, on_expand=None):
         super().__init__(parent)
         self.setObjectName("drawerSection")
         self._title = title
         self._expanded = True
         self._wrap_title = wrap_title
+        self._on_expand = on_expand
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -479,7 +480,10 @@ class DrawerSection(QFrame):
         self.set_expanded(not self._expanded)
 
     def set_expanded(self, expanded):
-        self._expanded = bool(expanded)
+        expanded = bool(expanded)
+        if expanded and not self._expanded and self._on_expand is not None:
+            self._on_expand()
+        self._expanded = expanded
         self.body.setVisible(self._expanded)
         self.lbl_arrow.setText("▼" if self._expanded else "▶")
         if self._expanded:
@@ -505,7 +509,15 @@ class DrawerSection(QFrame):
 
 
 class TestDetailDialog(QDialog):
-    def __init__(self, node_data: TestNode, standards: list, equipments: list, parent=None):
+    def __init__(
+        self,
+        node_data: TestNode,
+        standards: list,
+        equipments: list,
+        parent=None,
+        *,
+        catalogs_pending: bool = False,
+    ):
         super().__init__(parent)
         self.node_data = node_data
         self.standards = standards or []
@@ -544,6 +556,19 @@ class TestDetailDialog(QDialog):
         self._data_table_preview_cache = {}
         self._data_table_preview_tables = {}
         self._data_table_limit_export_checks: dict[str, QCheckBox] = {}
+        self._std_table_ready = False
+        self._std_table_filling = False
+        self._eq_table_ready = False
+        self._eq_table_filling = False
+        self._eq_pick = []
+        self._catalogs_pending = bool(catalogs_pending)
+        self._samples_loaded = False
+        self._std_fill_rows = []
+        self._std_fill_at = 0
+        self._std_fill_gen = 0
+        self._eq_fill_rows = []
+        self._eq_fill_at = 0
+        self._eq_fill_gen = 0
 
         self.proj_start_date = None
         self.proj_end_date = None
@@ -713,11 +738,11 @@ class TestDetailDialog(QDialog):
                     chk.setCheckState(Qt.Unchecked)
         finally:
             table.blockSignals(False)
-        if table is self.std_table:
+        if table is self._std_table:
             self._std_pick_order = []
             self._forget_all_key_params()
             self._refresh_std_summary()
-        elif table is self.eq_table:
+        elif table is self._eq_table:
             self._refresh_eq_summary()
 
     def _make_group(self, title):
@@ -793,7 +818,9 @@ class TestDetailDialog(QDialog):
         self._sync_top_bar_heights()
         layout.addWidget(date_group)
 
-        self.drawer_std = DrawerSection("测试标准", primary=True)
+        self.drawer_std = DrawerSection(
+            "测试标准", primary=True, on_expand=self._ensure_standards_table
+        )
         std_layout = self.drawer_std.body_layout
         std_layout.addWidget(QLabel("可多选，点击行或勾选，顺序按勾选先后"))
 
@@ -802,19 +829,19 @@ class TestDetailDialog(QDialog):
         self.txt_std_search.textChanged.connect(self._filter_standards)
         std_layout.addWidget(self.txt_std_search)
 
-        self.std_table = self._make_table(["", "标准号", "章节号", "试验名称"], 180)
-        self.std_table.setSelectionMode(QAbstractItemView.NoSelection)
-        self.std_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
-        self.std_table.setColumnWidth(0, 32)
-        self.std_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.std_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.std_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
-        self.std_table.itemChanged.connect(self._on_std_item_changed)
-        self.std_table.cellClicked.connect(self._on_std_cell_clicked)
+        self._std_table = self._make_table(["", "标准号", "章节号", "试验名称"], 180)
+        self._std_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self._std_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self._std_table.setColumnWidth(0, 32)
+        self._std_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self._std_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self._std_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self._std_table.itemChanged.connect(self._on_std_item_changed)
+        self._std_table.cellClicked.connect(self._on_std_cell_clicked)
         self._std_clear_btn = self._install_header_clear_button(
-            self.std_table, lambda: self._clear_multiselect(self.std_table)
+            self._std_table, lambda: self._clear_multiselect(self._std_table)
         )
-        std_layout.addWidget(self.std_table)
+        std_layout.addWidget(self._std_table)
 
         method_row = QHBoxLayout()
         method_row.setContentsMargins(0, 2, 0, 2)
@@ -848,7 +875,9 @@ class TestDetailDialog(QDialog):
         std_layout.addWidget(self.result_desc_table)
         layout.addWidget(self.drawer_std)
 
-        self.drawer_eq = DrawerSection("测试设备", primary=True)
+        self.drawer_eq = DrawerSection(
+            "测试设备", primary=True, on_expand=self._ensure_equipment_table
+        )
         eq_layout = self.drawer_eq.body_layout
         eq_layout.addWidget(QLabel("可多选，点击行或勾选"))
 
@@ -857,27 +886,27 @@ class TestDetailDialog(QDialog):
         self.txt_eq_search.textChanged.connect(self._filter_equipments)
         eq_layout.addWidget(self.txt_eq_search)
 
-        self.eq_table = self._make_table(["", "设备编号", "设备名称", "型号", "校准有效期"], 200)
-        self.eq_table.setSelectionMode(QAbstractItemView.NoSelection)
-        self.eq_table.setMouseTracking(True)
-        self.eq_table.viewport().setMouseTracking(True)
-        self.eq_table.viewport().installEventFilter(self)
-        self.eq_table.setItemDelegateForColumn(2, ExpiredNameDelegate(self.eq_table))
-        eq_header_view = self.eq_table.horizontalHeader()
+        self._eq_table = self._make_table(["", "设备编号", "设备名称", "型号", "校准有效期"], 200)
+        self._eq_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self._eq_table.setMouseTracking(True)
+        self._eq_table.viewport().setMouseTracking(True)
+        self._eq_table.viewport().installEventFilter(self)
+        self._eq_table.setItemDelegateForColumn(2, ExpiredNameDelegate(self._eq_table))
+        eq_header_view = self._eq_table.horizontalHeader()
         eq_header_view.setStretchLastSection(False)
         eq_header_view.setSectionResizeMode(0, QHeaderView.Fixed)
-        self.eq_table.setColumnWidth(0, 32)
+        self._eq_table.setColumnWidth(0, 32)
         eq_header_view.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         eq_header_view.setSectionResizeMode(2, QHeaderView.Stretch)
         eq_header_view.setSectionResizeMode(3, QHeaderView.Stretch)
         eq_header_view.setSectionResizeMode(4, QHeaderView.Fixed)
-        self.eq_table.setColumnWidth(4, 116)
-        self.eq_table.itemChanged.connect(self._on_eq_item_changed)
-        self.eq_table.cellClicked.connect(self._on_eq_cell_clicked)
+        self._eq_table.setColumnWidth(4, 116)
+        self._eq_table.itemChanged.connect(self._on_eq_item_changed)
+        self._eq_table.cellClicked.connect(self._on_eq_cell_clicked)
         self._eq_clear_btn = self._install_header_clear_button(
-            self.eq_table, lambda: self._clear_multiselect(self.eq_table)
+            self._eq_table, lambda: self._clear_multiselect(self._eq_table)
         )
-        eq_layout.addWidget(self.eq_table)
+        eq_layout.addWidget(self._eq_table)
         self._eq_expired_tip = FollowTip("已过期", self)
         layout.addWidget(self.drawer_eq)
 
@@ -966,7 +995,9 @@ class TestDetailDialog(QDialog):
             project_state=self._project_state,
             form_scroll=self._form_scroll,
             node_data=self.node_data,
+            defer_load=True,
         )
+        self.drawer_photos._on_expand = self.photos_panel.ensure_loaded
         self.photos_panel.changed.connect(self._refresh_photo_summary)
         self.drawer_photos.body_layout.addWidget(self.photos_panel)
         layout.addWidget(self.drawer_photos)
@@ -990,8 +1021,6 @@ class TestDetailDialog(QDialog):
         btn_layout.addWidget(btn_cancel)
         outer.addLayout(btn_layout)
 
-        self._fill_standards()
-        self._fill_equipments()
         self._schedule_result_header_sync()
         self._refresh_import_from_prev_button()
 
@@ -1411,38 +1440,51 @@ class TestDetailDialog(QDialog):
                 row_data.get("sample_id") or "",
                 results_by_key=results_by_key,
             )
-        self._apply_result_descs_to_tables()
+        # Do not stamp standard 结果描述 onto existing rows. A key missing from
+        # the snapshot (newly checked, or unchecked then checked again) is filled
+        # inside add_sample_row from that standard's current 结果描述.
         self._schedule_result_header_sync()
         self._refresh_sample_summary()
 
-    def _fill_standards(self):
-        self.std_table.blockSignals(True)
-        self.std_table.setRowCount(0)
-        for std in self.standards:
+    def _standard_fill_rows(self):
+        rows = []
+        for std in self.standards or []:
             std_no = _cell_text(std.get("标准号"))
             chapter = _cell_text(std.get("章节号"))
             test_name = _cell_text(std.get("试验名称"))
             if not (std_no or chapter or test_name):
                 continue
-            row = self.std_table.rowCount()
-            self.std_table.insertRow(row)
+            rows.append((std, std_no, chapter, test_name))
+        return rows
+
+    def _write_standard_rows(self, rows, start, end):
+        for row in range(start, end):
+            std, std_no, chapter, test_name = rows[row]
             chk = QTableWidgetItem()
             chk.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
             chk.setCheckState(Qt.Unchecked)
             chk.setData(Qt.UserRole, std)
-            self.std_table.setItem(row, 0, chk)
-            self.std_table.setItem(row, 1, QTableWidgetItem(std_no))
-            self.std_table.setItem(row, 2, QTableWidgetItem(chapter))
-            self.std_table.setItem(row, 3, QTableWidgetItem(test_name))
-        self.std_table.blockSignals(False)
-        self._refresh_std_summary()
+            self._std_table.setItem(row, 0, chk)
+            self._std_table.setItem(row, 1, QTableWidgetItem(std_no))
+            self._std_table.setItem(row, 2, QTableWidgetItem(chapter))
+            self._std_table.setItem(row, 3, QTableWidgetItem(test_name))
 
-    def _fill_equipments(self):
-        self.eq_table.blockSignals(True)
-        self.eq_table.setRowCount(0)
+    def _fill_standards(self):
+        rows = self._standard_fill_rows()
+        self._std_table.blockSignals(True)
+        self._std_table.setUpdatesEnabled(False)
+        try:
+            self._std_table.setRowCount(len(rows))
+            self._write_standard_rows(rows, 0, len(rows))
+        finally:
+            self._std_table.setUpdatesEnabled(True)
+            self._std_table.blockSignals(False)
+
+    def _equipment_fill_rows(self):
+        rows = []
         use_en = self._is_edit_en()
         end = self._test_end_date()
-        for eq in self.equipments:
+        for eq in self.equipments or []:
             code = equipment_display_code(eq)
             name_cn = _cell_text(eq.get("设备名称"))
             name_en = _cell_text(eq.get("Equipment"))
@@ -1451,38 +1493,201 @@ class TestDetailDialog(QDialog):
             cal = _equipment_report_valid_date(eq, end)
             if not (code or name_cn or name_en):
                 continue
-            row = self.eq_table.rowCount()
-            self.eq_table.insertRow(row)
+            rows.append((eq, code, name, model, cal))
+        return rows
+
+    def _write_equipment_rows(self, rows, start, end):
+        for row in range(start, end):
+            eq, code, name, model, cal = rows[row]
             chk = QTableWidgetItem()
             if _equipment_cal_start(eq).isValid():
                 chk.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
                 chk.setCheckState(Qt.Unchecked)
             else:
-                # 校准时间为空：禁止选用
                 chk.setFlags(Qt.ItemIsEnabled)
                 chk.setCheckState(Qt.Unchecked)
             chk.setData(Qt.UserRole, eq)
-            self.eq_table.setItem(row, 0, chk)
-            self.eq_table.setItem(row, 1, QTableWidgetItem(code))
-            self.eq_table.setItem(row, 2, QTableWidgetItem(name))
-            self.eq_table.setItem(row, 3, QTableWidgetItem(model))
-            self.eq_table.setItem(row, 4, QTableWidgetItem(cal))
-        self.eq_table.blockSignals(False)
+            self._eq_table.setItem(row, 0, chk)
+            self._eq_table.setItem(row, 1, QTableWidgetItem(code))
+            self._eq_table.setItem(row, 2, QTableWidgetItem(name))
+            self._eq_table.setItem(row, 3, QTableWidgetItem(model))
+            self._eq_table.setItem(row, 4, QTableWidgetItem(cal))
+
+    def _fill_equipments(self):
+        rows = self._equipment_fill_rows()
+        self._eq_table.blockSignals(True)
+        self._eq_table.setUpdatesEnabled(False)
+        try:
+            self._eq_table.setRowCount(len(rows))
+            self._write_equipment_rows(rows, 0, len(rows))
+        finally:
+            self._eq_table.setUpdatesEnabled(True)
+            self._eq_table.blockSignals(False)
         self._refresh_eq_expiry()
+
+    @property
+    def std_table(self):
+        if not self._std_table_ready:
+            self._std_fill_gen += 1
+            self._std_table_filling = False
+            self._ensure_standards_table(immediate=True)
+        return self._std_table
+
+    @property
+    def eq_table(self):
+        if not self._eq_table_ready:
+            self._eq_fill_gen += 1
+            self._eq_table_filling = False
+            self._ensure_equipment_table(immediate=True)
+        return self._eq_table
+
+    def _ensure_standards_table(self, *, immediate=False):
+        if self._std_table_ready or self._std_table_filling or not hasattr(self, "_std_table"):
+            return
+        rows = self._standard_fill_rows()
+        if immediate or len(rows) <= 36:
+            self._std_table_filling = True
+            try:
+                self._fill_standards()
+                self._finish_standards_table()
+            finally:
+                self._std_table_filling = False
+            return
+        self._std_fill_rows = rows
+        self._std_fill_at = 0
+        self._std_fill_gen += 1
+        generation = self._std_fill_gen
+        self._std_table_filling = True
+        self._std_table.blockSignals(True)
+        self._std_table.setUpdatesEnabled(False)
+        self._std_table.setRowCount(len(rows))
+        QTimer.singleShot(0, lambda gen=generation: self._fill_standards_batch(gen))
+
+    def _fill_standards_batch(self, generation):
+        if generation != self._std_fill_gen or self._std_table_ready or not self._std_table_filling:
+            return
+        end = min(self._std_fill_at + 36, len(self._std_fill_rows))
+        self._write_standard_rows(self._std_fill_rows, self._std_fill_at, end)
+        self._std_fill_at = end
+        if self._std_fill_at < len(self._std_fill_rows):
+            QTimer.singleShot(0, lambda gen=generation: self._fill_standards_batch(gen))
+            return
+        self._std_table.setUpdatesEnabled(True)
+        self._std_table.blockSignals(False)
+        self._finish_standards_table()
+        self._std_table_filling = False
+
+    def _finish_standards_table(self):
+        self._apply_standard_checks()
+        self._std_table_ready = True
+        query = self.txt_std_search.text() if hasattr(self, "txt_std_search") else ""
+        if query:
+            self._filter_standards(query)
+
+    def _ensure_equipment_table(self, *, immediate=False):
+        if self._eq_table_ready or self._eq_table_filling or not hasattr(self, "_eq_table"):
+            return
+        rows = self._equipment_fill_rows()
+        if immediate or len(rows) <= 36:
+            self._eq_table_filling = True
+            try:
+                self._fill_equipments()
+                self._finish_equipment_table()
+            finally:
+                self._eq_table_filling = False
+            return
+        self._eq_fill_rows = rows
+        self._eq_fill_at = 0
+        self._eq_fill_gen += 1
+        generation = self._eq_fill_gen
+        self._eq_table_filling = True
+        self._eq_table.blockSignals(True)
+        self._eq_table.setUpdatesEnabled(False)
+        self._eq_table.setRowCount(len(rows))
+        QTimer.singleShot(0, lambda gen=generation: self._fill_equipments_batch(gen))
+
+    def _fill_equipments_batch(self, generation):
+        if generation != self._eq_fill_gen or self._eq_table_ready or not self._eq_table_filling:
+            return
+        end = min(self._eq_fill_at + 36, len(self._eq_fill_rows))
+        self._write_equipment_rows(self._eq_fill_rows, self._eq_fill_at, end)
+        self._eq_fill_at = end
+        if self._eq_fill_at < len(self._eq_fill_rows):
+            QTimer.singleShot(0, lambda gen=generation: self._fill_equipments_batch(gen))
+            return
+        self._eq_table.setUpdatesEnabled(True)
+        self._eq_table.blockSignals(False)
+        self._refresh_eq_expiry()
+        self._finish_equipment_table()
+        self._eq_table_filling = False
+
+    def _finish_equipment_table(self):
+        self._apply_equipment_checks()
+        self._eq_table_ready = True
         self._refresh_eq_summary()
+        query = self.txt_eq_search.text() if hasattr(self, "txt_eq_search") else ""
+        if query:
+            self._filter_equipments(query)
+
+    def _apply_standard_checks(self):
+        wanted = set(self._std_pick_order)
+        self._std_updating = True
+        self._std_table.blockSignals(True)
+        try:
+            first = None
+            for row in range(self._std_table.rowCount()):
+                chk = self._std_table.item(row, 0)
+                if chk is None:
+                    continue
+                key = self._std_ref_key(chk.data(Qt.UserRole) or {})
+                if key in wanted:
+                    chk.setCheckState(Qt.Checked)
+                    if first is None:
+                        first = chk
+                else:
+                    chk.setCheckState(Qt.Unchecked)
+            if first is not None:
+                self._std_table.scrollToItem(first)
+        finally:
+            self._std_table.blockSignals(False)
+            self._std_updating = False
+
+    def _apply_equipment_checks(self):
+        saved = list(self.node_data.equipments or [])
+        legacy = self.node_data.equipment_name or ""
+        self._eq_table.blockSignals(True)
+        try:
+            for row in range(self._eq_table.rowCount()):
+                chk = self._eq_table.item(row, 0)
+                data = chk.data(Qt.UserRole) if chk else {}
+                code = _cell_text((data or {}).get("设备编号"))
+                name = _cell_text((data or {}).get("设备名称"))
+                can_select = _equipment_cal_start(data).isValid()
+                checked = can_select and equipment_should_restore(
+                    code,
+                    name,
+                    saved,
+                    legacy,
+                    match_codes=equipment_match_codes(data),
+                )
+                if chk is not None:
+                    chk.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+        finally:
+            self._eq_table.blockSignals(False)
+        self._refresh_eq_expiry()
 
     def _filter_standards(self, query=""):
-        for row in range(self.std_table.rowCount()):
-            std_no = self.std_table.item(row, 1).text() if self.std_table.item(row, 1) else ""
-            chapter = self.std_table.item(row, 2).text() if self.std_table.item(row, 2) else ""
-            name = self.std_table.item(row, 3).text() if self.std_table.item(row, 3) else ""
-            self.std_table.setRowHidden(row, not _matches_query(query, std_no, chapter, name))
+        for row in range(self._std_table.rowCount()):
+            std_no = self._std_table.item(row, 1).text() if self._std_table.item(row, 1) else ""
+            chapter = self._std_table.item(row, 2).text() if self._std_table.item(row, 2) else ""
+            name = self._std_table.item(row, 3).text() if self._std_table.item(row, 3) else ""
+            self._std_table.setRowHidden(row, not _matches_query(query, std_no, chapter, name))
 
     def _filter_equipments(self, query=""):
-        for row in range(self.eq_table.rowCount()):
-            code = self.eq_table.item(row, 1).text() if self.eq_table.item(row, 1) else ""
-            name = self.eq_table.item(row, 2).text() if self.eq_table.item(row, 2) else ""
-            self.eq_table.setRowHidden(row, not _matches_query(query, code, name))
+        for row in range(self._eq_table.rowCount()):
+            code = self._eq_table.item(row, 1).text() if self._eq_table.item(row, 1) else ""
+            name = self._eq_table.item(row, 2).text() if self._eq_table.item(row, 2) else ""
+            self._eq_table.setRowHidden(row, not _matches_query(query, code, name))
 
     @staticmethod
     def _std_ref_key(std):
@@ -1512,7 +1717,7 @@ class TestDetailDialog(QDialog):
     def _on_std_cell_clicked(self, row, col):
         if col == 0:
             return
-        chk = self.std_table.item(row, 0)
+        chk = self._std_table.item(row, 0)
         if chk is None:
             return
         chk.setCheckState(Qt.Unchecked if chk.checkState() == Qt.Checked else Qt.Checked)
@@ -1523,12 +1728,19 @@ class TestDetailDialog(QDialog):
         self._collect_result_edits()
         self._collect_key_param_edits()
         by_key = {}
-        for row in range(self.std_table.rowCount()):
-            chk = self.std_table.item(row, 0)
-            if chk is None or chk.checkState() != Qt.Checked:
-                continue
-            data = chk.data(Qt.UserRole) or {}
-            by_key[self._std_ref_key(data)] = data
+        if self._std_table_ready:
+            for row in range(self._std_table.rowCount()):
+                chk = self._std_table.item(row, 0)
+                if chk is None or chk.checkState() != Qt.Checked:
+                    continue
+                data = chk.data(Qt.UserRole) or {}
+                by_key[self._std_ref_key(data)] = data
+        else:
+            wanted_keys = set(self._std_pick_order)
+            for rec in self.standards or []:
+                key = self._std_ref_key(rec)
+                if key in wanted_keys and key not in by_key:
+                    by_key[key] = rec
         picked = []
         for key in self._std_pick_order:
             data = by_key.get(key)
@@ -1930,12 +2142,15 @@ class TestDetailDialog(QDialog):
                 ) or ""
             editor.setPlainText(text)
             self.result_desc_table.setCellWidget(row, 1, editor)
-            editor.textChanged.connect(self._on_result_desc_edited)
+            editor.textChanged.connect(
+                lambda _text="", k=key: self._apply_result_desc_to_key(k)
+            )
             self.result_desc_table.setRowHeight(row, 56)
         rows = self.result_desc_table.rowCount()
         self.result_desc_table.setFixedHeight(min(56 * rows + 36, 220) if rows else 80)
 
     def _on_result_desc_edited(self):
+        """Backward-compatible: push every standard's current 结果描述 to its rows."""
         self._apply_result_descs_to_tables()
 
     def _result_desc_for_key(self, key):
@@ -1992,10 +2207,14 @@ class TestDetailDialog(QDialog):
         attr = "result_desc_en" if self._is_edit_en() else "result_desc"
         return _cell_text(getattr(self.node_data, attr, None))
 
-    def _apply_result_descs_to_tables(self):
+    def _apply_result_desc_to_key(self, key):
+        """Push one standard's current 结果描述 onto that standard's sample rows."""
+        if key is None:
+            return
+        text = self._result_desc_for_key(key)
         for slot in self._sample_table_slots:
-            key = slot.get("key")
-            text = self._result_desc_for_key(key) if key is not None else ""
+            if slot.get("key") != key:
+                continue
             table = slot.get("table")
             if table is None:
                 continue
@@ -2004,6 +2223,10 @@ class TestDetailDialog(QDialog):
                 if widget is not None:
                     widget.setText(text)
                     widget.setCursorPosition(0)
+
+    def _apply_result_descs_to_tables(self):
+        for slot in self._sample_table_slots:
+            self._apply_result_desc_to_key(slot.get("key"))
 
     def _apply_result_desc_to_rows(self, text):
         """Legacy helper: apply one text to the primary sample table."""
@@ -2021,15 +2244,15 @@ class TestDetailDialog(QDialog):
         if item and item.column() == 0:
             data = item.data(Qt.UserRole) or {}
             if item.checkState() == Qt.Checked and not _equipment_cal_start(data).isValid():
-                self.eq_table.blockSignals(True)
+                self._eq_table.blockSignals(True)
                 item.setCheckState(Qt.Unchecked)
-                self.eq_table.blockSignals(False)
+                self._eq_table.blockSignals(False)
             self._refresh_eq_summary()
 
     def _on_eq_cell_clicked(self, row, col):
         if col == 0:
             return
-        chk = self.eq_table.item(row, 0)
+        chk = self._eq_table.item(row, 0)
         if chk is None:
             return
         data = chk.data(Qt.UserRole) or {}
@@ -2046,26 +2269,26 @@ class TestDetailDialog(QDialog):
         return end if end is not None else QDate()
 
     def _refresh_eq_expiry(self):
-        if not hasattr(self, "eq_table"):
+        if not hasattr(self, "_eq_table"):
             return
         end = self._test_end_date()
-        self.eq_table.blockSignals(True)
+        self._eq_table.blockSignals(True)
         try:
-            for row in range(self.eq_table.rowCount()):
-                chk = self.eq_table.item(row, 0)
+            for row in range(self._eq_table.rowCount()):
+                chk = self._eq_table.item(row, 0)
                 data = (chk.data(Qt.UserRole) if chk else None) or {}
                 expired = _is_equipment_expired(data.get("计划校准时间"), end)
                 prev_cycle = _is_previous_cal_cycle(data.get("校准时间"), end)
-                name_item = self.eq_table.item(row, 2)
+                name_item = self._eq_table.item(row, 2)
                 if name_item is not None:
                     name_item.setData(_EQ_EXPIRED_ROLE, expired)
                     name_item.setData(_EQ_PREV_CYCLE_ROLE, prev_cycle and not expired)
-                cal_item = self.eq_table.item(row, 4)
+                cal_item = self._eq_table.item(row, 4)
                 if cal_item is not None:
                     cal_item.setText(_equipment_report_valid_date(data, end))
         finally:
-            self.eq_table.blockSignals(False)
-        self.eq_table.viewport().update()
+            self._eq_table.blockSignals(False)
+        self._eq_table.viewport().update()
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Backspace, Qt.Key_Delete):
@@ -2073,7 +2296,7 @@ class TestDetailDialog(QDialog):
             if date_edit is not None:
                 self._clear_node_date(date_edit)
                 return True
-        viewport = self.eq_table.viewport() if hasattr(self, "eq_table") else None
+        viewport = self._eq_table.viewport() if hasattr(self, "_eq_table") else None
         if obj is viewport:
             etype = event.type()
             if etype == QEvent.MouseMove:
@@ -2091,11 +2314,11 @@ class TestDetailDialog(QDialog):
         return None
 
     def _update_eq_expired_tip(self, pos):
-        item = self.eq_table.itemAt(pos)
+        item = self._eq_table.itemAt(pos)
         if item is None:
             self._hide_eq_expired_tip()
             return
-        name_item = self.eq_table.item(item.row(), 2)
+        name_item = self._eq_table.item(item.row(), 2)
         if name_item is None:
             self._hide_eq_expired_tip()
             return
@@ -2140,18 +2363,30 @@ class TestDetailDialog(QDialog):
         summary = f"已选 {len(selected)} 台：{preview}{extra}"
         self.drawer_eq.set_summary(summary, tooltip="\n".join(labels))
 
+    def _equipment_from_record(self, data):
+        end = self._test_end_date()
+        return TestEquipment(
+            name=_cell_text(data.get("设备名称")),
+            name_en=_cell_text(data.get("Equipment")),
+            code=equipment_display_code(data),
+            model=_cell_text(data.get("型号")),
+            valid_date=_equipment_report_valid_date(data, end),
+        )
+
     def _selected_equipments(self):
+        if not self._eq_table_ready:
+            return [self._equipment_from_record(eq) for eq in self._eq_pick]
         picked = []
         end = self._test_end_date()
-        for row in range(self.eq_table.rowCount()):
-            chk = self.eq_table.item(row, 0)
+        for row in range(self._eq_table.rowCount()):
+            chk = self._eq_table.item(row, 0)
             if chk is None or chk.checkState() != Qt.Checked:
                 continue
             data = chk.data(Qt.UserRole) or {}
             if not _equipment_cal_start(data).isValid():
                 continue
-            code_item = self.eq_table.item(row, 1)
-            cal_item = self.eq_table.item(row, 4)
+            code_item = self._eq_table.item(row, 1)
+            cal_item = self._eq_table.item(row, 4)
             picked.append(TestEquipment(
                 name=_cell_text(data.get("设备名称")),
                 name_en=_cell_text(data.get("Equipment")),
@@ -2439,6 +2674,59 @@ class TestDetailDialog(QDialog):
         else:
             self.drawer_photos.set_summary(f"{albums} 夹 / {photos} 张")
 
+    def _load_saved_samples(self):
+        if self._samples_loaded:
+            return
+        self._samples_loaded = True
+        # Standards restore rebuilds sample tables; fill rows afterward.
+        # Saved per-sample 结果描述 stays. A legacy row with no per-standard
+        # results still borrows each standard's 结果描述 when several are checked.
+        multi = len(self._sample_table_slots) > 1
+        for s in self.node_data.samples:
+            legacy_by_key = {}
+            if not (s.standard_results or []):
+                for slot in self._sample_table_slots:
+                    key = slot.get("key")
+                    if key is None:
+                        continue
+                    entry = {"result": s.result}
+                    if not multi:
+                        entry["result_desc"] = s.result_desc
+                    legacy_by_key[key] = entry
+            self.add_sample_row(
+                s.sample_id,
+                s.result,
+                result_desc=None if multi else s.result_desc,
+                results_by_key=legacy_by_key or None,
+                standard_results=s.standard_results or None,
+            )
+        self._refresh_sample_summary()
+
+    def apply_catalogs(self, standards, equipments, error=""):
+        """Attach workbook rows after a background read. Safe if the dialog is open."""
+        self.standards = list(standards or [])
+        self.equipments = list(equipments or [])
+        self._catalogs_pending = False
+        self._std_fill_gen += 1
+        self._eq_fill_gen += 1
+        self._std_table_ready = False
+        self._std_table_filling = False
+        self._eq_table_ready = False
+        self._eq_table_filling = False
+        if error:
+            QMessageBox.warning(self, "提示", error)
+        self._restore_standards()
+        self._restore_equipments()
+        if self.node_data.env_condition:
+            self.txt_env_condition.setText(self.node_data.env_condition)
+        if self.node_data.test_method:
+            self.txt_std_method.setText(self.node_data.test_method)
+        self._load_saved_samples()
+        if self.drawer_std._expanded:
+            self._ensure_standards_table()
+        if self.drawer_eq._expanded:
+            self._ensure_equipment_table()
+
     def load_data(self):
         if self.node_data.start_date:
             parsed = QDate.fromString(self.node_data.start_date, "yyyy-MM-dd")
@@ -2468,34 +2756,20 @@ class TestDetailDialog(QDialog):
             self.date_start.setDate(lo)
 
         self._on_node_dates_changed()
-        self._restore_standards()
-        self._restore_equipments()
+        if self._catalogs_pending:
+            self.drawer_std.set_summary("正在读取标准库…")
+            self.drawer_eq.set_summary("正在读取设备清单…")
+        else:
+            self._restore_standards()
+            self._restore_equipments()
         if self.node_data.env_condition:
             self.txt_env_condition.setText(self.node_data.env_condition)
         if self.node_data.test_method:
             self.txt_std_method.setText(self.node_data.test_method)
         self._restore_selected_to()
 
-        # Standards restore rebuilds sample tables; fill rows afterward.
-        for s in self.node_data.samples:
-            legacy_by_key = {}
-            if not (s.standard_results or []):
-                for slot in self._sample_table_slots:
-                    key = slot.get("key")
-                    if key is not None:
-                        legacy_by_key[key] = {
-                            "result": s.result,
-                            "result_desc": s.result_desc,
-                        }
-            self.add_sample_row(
-                s.sample_id,
-                s.result,
-                result_desc=s.result_desc,
-                results_by_key=legacy_by_key or None,
-                standard_results=s.standard_results or None,
-            )
-        self._apply_result_descs_to_tables()
-        self._refresh_sample_summary()
+        if not self._catalogs_pending:
+            self._load_saved_samples()
         self._sync_data_tables_from_disk()
         self._refresh_data_table_list()
         self._sync_data_table_button()
@@ -3017,10 +3291,10 @@ class TestDetailDialog(QDialog):
     def _find_std_row(self, want: TestStandard, used):
         want_key = want.ref_key()
         fallback = None
-        for row in range(self.std_table.rowCount()):
+        for row in range(self._std_table.rowCount()):
             if row in used:
                 continue
-            chk = self.std_table.item(row, 0)
+            chk = self._std_table.item(row, 0)
             data = (chk.data(Qt.UserRole) if chk else None) or {}
             key = self._std_ref_key(data)
             if key == want_key:
@@ -3043,25 +3317,15 @@ class TestDetailDialog(QDialog):
 
         used = set()
         order = []
-        self._std_updating = True
-        self.std_table.blockSignals(True)
-        try:
-            for want in wanted:
-                row = self._find_std_row(want, used)
-                if row is None:
-                    continue
-                used.add(row)
-                chk = self.std_table.item(row, 0)
-                if chk is None:
-                    continue
-                chk.setCheckState(Qt.Checked)
-                order.append(self._std_ref_key(chk.data(Qt.UserRole) or {}))
-                if len(order) == 1:
-                    self.std_table.scrollToItem(chk)
-            self._std_pick_order = order
-        finally:
-            self.std_table.blockSignals(False)
-            self._std_updating = False
+        for want in wanted:
+            index, rec = self._catalog_record_for_saved(want, used)
+            if rec is None:
+                continue
+            used.add(index)
+            order.append(self._std_ref_key(rec))
+        self._std_pick_order = order
+        if self._std_table_ready:
+            self._apply_standard_checks()
         for want in wanted:
             key = want.ref_key()
             if want.standard_desc:
@@ -3085,27 +3349,51 @@ class TestDetailDialog(QDialog):
                 self._key_param_confirmed[key] = bool(want.key_params_confirmed)
         self._refresh_std_summary()
 
+    def _catalog_record_for_saved(self, want, used):
+        want_key = want.ref_key()
+        fallback = None
+        for index, rec in enumerate(self.standards or []):
+            if index in used:
+                continue
+            std_no = _cell_text(rec.get("标准号"))
+            chapter = _cell_text(rec.get("章节号"))
+            test_name = _cell_text(rec.get("试验名称"))
+            if not (std_no or chapter or test_name):
+                continue
+            key = (std_no, chapter)
+            if key == want_key:
+                return index, rec
+            if want.chapter:
+                continue
+            if std_no == (want.standard_id or "") and fallback is None:
+                fallback = (index, rec)
+        if fallback is None:
+            return None, None
+        return fallback
+
     def _restore_equipments(self):
         saved = list(self.node_data.equipments or [])
         legacy = self.node_data.equipment_name or ""
-        self.eq_table.blockSignals(True)
-        for row in range(self.eq_table.rowCount()):
-            chk = self.eq_table.item(row, 0)
-            data = chk.data(Qt.UserRole) if chk else {}
-            code = _cell_text((data or {}).get("设备编号"))
-            name = _cell_text((data or {}).get("设备名称"))
-            can_select = _equipment_cal_start(data).isValid()
+        picked = []
+        for eq in self.equipments or []:
+            code = _cell_text(eq.get("设备编号"))
+            name = _cell_text(eq.get("设备名称"))
+            name_en = _cell_text(eq.get("Equipment"))
+            if not (code or name or name_en):
+                continue
+            can_select = _equipment_cal_start(eq).isValid()
             checked = can_select and equipment_should_restore(
                 code,
                 name,
                 saved,
                 legacy,
-                match_codes=equipment_match_codes(data),
+                match_codes=equipment_match_codes(eq),
             )
-            if chk is not None:
-                chk.setCheckState(Qt.Checked if checked else Qt.Unchecked)
-        self.eq_table.blockSignals(False)
-        self._refresh_eq_expiry()
+            if checked:
+                picked.append(eq)
+        self._eq_pick = picked
+        if self._eq_table_ready:
+            self._apply_equipment_checks()
         self._refresh_eq_summary()
 
     @staticmethod

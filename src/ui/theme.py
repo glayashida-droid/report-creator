@@ -643,7 +643,9 @@ QTextEdit:focus {{
     border: 1px solid {CYAN};
 }}
 
-QDateEdit::drop-down, QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {{
+QDateEdit::drop-down {{
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
     border: none;
     width: 22px;
     background: transparent;
@@ -1449,8 +1451,17 @@ class _BlankDateCalendarFilter:
 
 
 def polish_date_edit_calendar(date_edit, *, blank_opens_at_default_year: bool = False):
-    """Style calendar arrows; optionally open blank fields at DEFAULT_PROJECT_YEAR."""
+    """Style calendar arrows; optionally open blank fields at DEFAULT_PROJECT_YEAR.
+
+    With a calendar popup, Qt hit-tests the field as a combo box. Those
+    sub-controls reuse the spin-box up/down values, so a click on the blank
+    strip beside the arrow stepped the current section. NoButtons leaves the
+    arrow in place and stops that step.
+    """
     from PySide6.QtCore import QDate
+    from PySide6.QtWidgets import QAbstractSpinBox
+
+    date_edit.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
 
     calendar = date_edit.calendarWidget()
     if calendar is None:

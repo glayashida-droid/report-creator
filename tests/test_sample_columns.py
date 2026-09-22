@@ -66,6 +66,28 @@ def _single_column_sheet_with_styled_empty_trailing_column():
     return sheet
 
 
+def test_parse_sheet2_joins_newline_part_numbers_in_one_column():
+    """同一单元格里换行分开的左右件号都属于这一列，不能只留第一行。"""
+    wb = Workbook()
+    sheet = wb.active
+    rows = [
+        ("样品序号", "001"),
+        ("样品名称", "第二排座椅安全带总成"),
+        ("零件号", "LH：6608585460\nRH：6608585459"),
+        ("Part No.", "LH：6608585460\nRH：6608585459"),
+    ]
+    for i, row in enumerate(rows, start=1):
+        for j, val in enumerate(row):
+            sheet.cell(i, j + 1, val)
+
+    cols_cn, cols_en, labels = parse_application_sheet2_columns(sheet)
+
+    assert labels == ["001"]
+    assert len(cols_cn) == 1
+    assert cols_cn[0]["零件号"] == "LH：6608585460/RH：6608585459"
+    assert cols_en[0]["零件号"] == "LH：6608585460/RH：6608585459"
+
+
 def test_parse_sheet2_ignores_trailing_empty_column():
     sheet = _single_column_sheet_with_styled_empty_trailing_column()
     cols_cn, cols_en, labels = parse_application_sheet2_columns(sheet)

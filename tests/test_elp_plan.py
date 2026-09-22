@@ -41,6 +41,8 @@ def test_caption_from_stem_strips_picture_index():
 def test_extract_plan_number_from_cover_text():
     raw = "P166-ELP-TP (副仪表板开关组)-2026-0001"
     assert extract_plan_number_from_text(raw) == "P166-ELP-TP(副仪表板开关组)-2026-0001"
+    plain = "ELP测试计划编号 L946-A1-ELP-TP-2026-0045"
+    assert extract_plan_number_from_text(plain) == "L946-A1-ELP-TP-2026-0045"
     assert extract_plan_number_from_text("no plan here") == ""
 
 
@@ -96,6 +98,21 @@ def test_parse_example_elp_plan_without_ocr():
     assert plan.basic_info_rows
     assert plan.basic_info_rows[0][0].startswith("电子电器组件种类")
     assert any(row and row[0].startswith("mode 1.1") for row in plan.function_class_rows)
+    assert set(plan.chapter6_images) >= {
+        "basic",
+        "function_class",
+        "work_modes",
+        "monitor",
+        "states",
+    }
+    for blob in plan.chapter6_images.values():
+        assert blob.startswith(b"\x89PNG")
+    from PIL import Image
+    import io
+
+    with Image.open(io.BytesIO(plan.chapter6_images["work_modes"])) as im:
+        # 300 dpi, table plus the 备注 block under it.
+        assert im.size[1] > 780
 
 
 def test_find_elp_plan_in_example_project():
@@ -105,6 +122,48 @@ def test_find_elp_plan_in_example_project():
     assert found is not None
     assert found.suffix.lower() == ".pdf"
     assert "ELP" in found.name.upper() or "测试计划" in found.name
+
+
+def _left_rule_pixels(blob: bytes) -> int:
+    import io
+
+    from PIL import Image
+
+    with Image.open(io.BytesIO(blob)) as im:
+        gray = im.convert("L")
+        width, height = gray.size
+        pixels = gray.load()
+        dark = 0
+        for y in range(height // 5, 4 * height // 5, 2):
+            for x in range(min(28, width)):
+                if pixels[x, y] < 80:
+                    dark += 1
+        return dark
+
+
+def test_text_cover_plan_number_without_ocr():
+    sample = repo_root() / "data" / "A2260774870101" / "1.接样组"
+    if not sample.is_dir():
+        return
+    matches = [
+        path
+        for path in sample.glob("*.pdf")
+        if "ELP" in path.name.upper() and "报价" not in path.name
+    ]
+    if not matches:
+        return
+    plan = parse_elp_plan(matches[0], ocr_cover=False)
+    assert plan.plan_no == "L946-A1-ELP-TP-2026-0045"
+    assert set(plan.chapter6_images) >= {
+        "basic",
+        "function_class",
+        "work_modes",
+        "monitor",
+        "states",
+    }
+    # Outer left rule must be inside the crop (6.4 / 6.5 used to start past it).
+    for key in ("monitor", "states"):
+        assert _left_rule_pixels(plan.chapter6_images[key]) > 30
 
 
 def test_ocr_example_cover_fills_plan_number():

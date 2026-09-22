@@ -17,6 +17,7 @@ def main():
     window = MainWindow()
     apply_app_icon(app, window)
     window.show()
+    window.present_startup_cover()
     sys.exit(app.exec())
 
 if __name__ == "__main__":

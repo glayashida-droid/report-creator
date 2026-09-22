@@ -1409,6 +1409,7 @@ class TestPhotosPanel(QWidget):
         project_state=None,
         form_scroll=None,
         node_data=None,
+        defer_load=False,
     ):
         super().__init__(parent)
         self.project_root = Path(project_root) if project_root else None
@@ -1467,7 +1468,9 @@ class TestPhotosPanel(QWidget):
         self._drop_indicator.hide()
         layout.addWidget(self.rows_host)
 
-        self.reload()
+        self._loaded = False
+        if not defer_load:
+            self.reload()
 
     def _preferred_order(self) -> Optional[List[str]]:
         if self.node_data is None:
@@ -1663,7 +1666,13 @@ class TestPhotosPanel(QWidget):
         if bar is not None:
             QTimer.singleShot(0, lambda: bar.setValue(min(pos, bar.maximum())))
 
+    def ensure_loaded(self) -> None:
+        if self._loaded:
+            return
+        self.reload()
+
     def reload(self):
+        self._loaded = True
         while self.rows_layout.count():
             item = self.rows_layout.takeAt(0)
             widget = item.widget()

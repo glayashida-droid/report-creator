@@ -55,6 +55,7 @@ from src.io.user_prefs import (
     parse_intranet_year,
     save_board_intranet_year,
 )
+from src.runtime_priority import run_in_background
 from src.ui.theme import BG_HOVER, BG_INPUT, CYAN, OVERDUE, TEXT
 
 
@@ -210,6 +211,25 @@ def _draw_chunk(painter, fm, rect: QRect, x: int, chunk: str, fg: QColor, bg):
     return x + width
 
 
+class BoardRowsWorker(QThread):
+    """Scan saved projects off the UI thread so opening the board can stay instant."""
+
+    loaded = Signal(object, object)
+
+    def __init__(self, data_root: Optional[Path], parent=None):
+        super().__init__(parent)
+        self._data_root = data_root
+
+    def run(self) -> None:
+        run_in_background()
+        when = date.today()
+        try:
+            rows = list_board_rows(self._data_root, today=when)
+        except Exception:
+            rows = []
+        self.loaded.emit(rows, when)
+
+
 class ProjectBoardPage(QWidget):
     leave_requested = Signal()
 
@@ -225,6 +245,10 @@ class ProjectBoardPage(QWidget):
         self._lookup_timer = QTimer(self)
         self._lookup_timer.setSingleShot(True)
         self._lookup_timer.timeout.connect(self._on_intranet_lookup_timeout)
+        self._cached_rows = None
+        self._cached_today = None
+        self._preload_gen = 0
+        self._preload_worker = None
         self._build()
 
     def _build(self):
@@ -399,9 +423,56 @@ class ProjectBoardPage(QWidget):
             f"在 {year}年 下未找到项目 {self._lookup_project_id} 对应的公盘目录。",
         )
 
+    def invalidate_cache(self) -> None:
+        """Drop a preloaded snapshot so the next reload reads disk again."""
+        self._preload_gen += 1
+        self._cached_rows = None
+        self._cached_today = None
+
+    def preload(self) -> None:
+        """Fill the row cache in the background. Safe to call more than once."""
+        if self._cached_rows is not None:
+            return
+        worker = self._preload_worker
+        if worker is not None and worker.isRunning():
+            return
+        gen = self._preload_gen
+        worker = BoardRowsWorker(self._data_root, self)
+        worker.loaded.connect(
+            lambda rows, when, g=gen: self._accept_preload(g, rows, when)
+        )
+        self._preload_worker = worker
+        worker.setPriority(QThread.IdlePriority)
+        worker.start()
+
+    def _accept_preload(self, generation: int, rows, when) -> None:
+        if generation != self._preload_gen:
+            return
+        self._cached_rows = list(rows or [])
+        self._cached_today = when
+
+    def _remember_rows(self) -> None:
+        self._preload_gen += 1
+        self._cached_rows = self._rows
+        self._cached_today = self._today
+
+    def reload_from_cache(self) -> None:
+        """Paint the idle snapshot when it is still for today. Otherwise scan."""
+        when = date.today()
+        if self._cached_rows is not None and self._cached_today == when:
+            self._today = when
+            self._rows = self._cached_rows
+            self._apply_filter()
+            return
+        self.reload(today=when)
+
     def reload(self, *, today: Optional[date] = None) -> None:
-        self._today = today or date.today()
-        self._rows = list_board_rows(self._data_root, today=self._today)
+        when = today or date.today()
+        self._today = when
+        self._rows = list_board_rows(self._data_root, today=when)
+        self._preload_gen += 1
+        self._cached_rows = self._rows
+        self._cached_today = when
         self._apply_filter()
 
     def visible_rows(self) -> List[BoardRow]:
@@ -469,6 +540,7 @@ class ProjectBoardPage(QWidget):
                 row if row.json_path != path else replace(row, project_sample_qty=qty)
                 for row in self._rows
             ]
+            self._remember_rows()
             return
 
         leg_raw = item.data(COL_QTY, _QTY_LEG_ROLE)
@@ -489,6 +561,7 @@ class ProjectBoardPage(QWidget):
             else replace(row, sample_qty=qty)
             for row in self._rows
         ]
+        self._remember_rows()
 
     def _sync_group_arrow(self, item: QTreeWidgetItem) -> None:
         if item.parent() is not None:

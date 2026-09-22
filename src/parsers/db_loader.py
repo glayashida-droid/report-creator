@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Sequence, Tuple
+import threading
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -158,6 +159,7 @@ class BaseDataLoader:
         self._equipment_path = equipment_path
         self.standards_connected = False
         self.equipment_connected = False
+        self._load_lock = threading.Lock()
         if not network_mode:
             self._standards_path = standards_path or os.path.join(db_folder, "标准库.xlsx")
             self._equipment_path = equipment_path or os.path.join(
@@ -186,6 +188,22 @@ class BaseDataLoader:
         equipment_path: str | None,
         equipment_ok: bool,
     ) -> None:
+        with self._load_lock:
+            self._apply_network_probe(
+                standards_path=standards_path,
+                standards_ok=standards_ok,
+                equipment_path=equipment_path,
+                equipment_ok=equipment_ok,
+            )
+
+    def _apply_network_probe(
+        self,
+        *,
+        standards_path: str | None,
+        standards_ok: bool,
+        equipment_path: str | None,
+        equipment_ok: bool,
+    ) -> None:
         if standards_path != self._standards_path:
             self.standards_df = None
             self._standard_images = None
@@ -198,7 +216,33 @@ class BaseDataLoader:
         self.standards_connected = bool(standards_ok and standards_path)
         self.equipment_connected = bool(equipment_ok and equipment_path)
 
+    def peek_standards(self) -> Optional[List[Dict[str, Any]]]:
+        """Return cached standards without reading Excel. None if cold or busy."""
+        if not self._load_lock.acquire(blocking=False):
+            return None
+        try:
+            if self.standards_df is None:
+                return None
+            return self._materialize_standards_locked()
+        finally:
+            self._load_lock.release()
+
+    def peek_equipments(self) -> Optional[List[Dict[str, Any]]]:
+        """Return cached equipment without reading Excel. None if cold or busy."""
+        if not self._load_lock.acquire(blocking=False):
+            return None
+        try:
+            if self.equipments_df is None:
+                return None
+            return self.equipments_df.to_dict("records")
+        finally:
+            self._load_lock.release()
+
     def load_standards(self) -> List[Dict[str, Any]]:
+        with self._load_lock:
+            return self._load_standards_locked()
+
+    def _load_standards_locked(self) -> List[Dict[str, Any]]:
         if not self.is_standards_ready or not self._standards_path:
             raise FileNotFoundError("标准库尚未就绪")
         path = self._standards_path
@@ -214,6 +258,9 @@ class BaseDataLoader:
             self._standard_images = load_xlsx_row_images(path)
             self._standards_mtime = mtime
 
+        return self._materialize_standards_locked()
+
+    def _materialize_standards_locked(self) -> List[Dict[str, Any]]:
         records = self.standards_df.to_dict("records")
         images = self._standard_images or {}
         for index, rec in enumerate(records):
@@ -221,6 +268,10 @@ class BaseDataLoader:
         return records
 
     def load_equipments(self) -> List[Dict[str, Any]]:
+        with self._load_lock:
+            return self._load_equipments_locked()
+
+    def _load_equipments_locked(self) -> List[Dict[str, Any]]:
         if not self.is_equipment_ready or not self._equipment_path:
             raise FileNotFoundError("设备清单尚未就绪")
         path = self._equipment_path

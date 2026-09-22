@@ -721,6 +721,7 @@ class GanttChartWidget(QWidget):
         self._project_state = state
         self._view = GanttViewState(state)
         self._zoom_index = DEFAULT_ZOOM_INDEX
+        self._content_stamp = None
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         root = QHBoxLayout(self)
@@ -763,16 +764,43 @@ class GanttChartWidget(QWidget):
 
     @state.setter
     def state(self, value: ProjectState) -> None:
+        same = value is self._project_state
         self._project_state = value
         self._view.project_state = value
+        if same:
+            return
         self._view.extra_future_days = 0
+        self._content_stamp = None
 
     @property
     def canvas(self):
         """Backward-compatible alias used by tests."""
         return self.timeline
 
+    def _schedule_stamp(self):
+        state = self._project_state
+        parts = [state.test_start_date or "", state.test_end_date or "", self._zoom_index]
+        for leg in state.legs or []:
+            parts.append(leg.leg_id or "")
+            parts.append(leg.leg_name or "")
+            for node in leg.nodes or []:
+                parts.append(
+                    (
+                        id(node),
+                        node.test_name or "",
+                        getattr(node, "test_name_en", "") or "",
+                        node.start_date or "",
+                        node.end_date or "",
+                    )
+                )
+        return tuple(parts)
+
     def refresh(self) -> None:
+        stamp = self._schedule_stamp()
+        if stamp == self._content_stamp:
+            QTimer.singleShot(0, self._finalize_layout)
+            return
+        self._content_stamp = stamp
         self._view.zoom_index = self._zoom_index
         self._view.refresh()
         QTimer.singleShot(0, self._finalize_layout)

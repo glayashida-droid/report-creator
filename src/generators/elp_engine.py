@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import io
 from copy import deepcopy
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Emu, Inches, Pt
 from docx.table import Table
@@ -16,10 +18,10 @@ from src.generators.elp_docx import (
     BLACK_VAL,
     cell_has_blue,
     cell_text,
-    clone_table_row,
     delete_row_cell,
     delete_table,
     delete_table_row,
+    fill_result_slot,
     force_black_text,
     force_blue_text,
     insert_cloned_row_after,
@@ -28,7 +30,6 @@ from src.generators.elp_docx import (
     paint_blue_runs_black,
     paragraph_style_name,
     remove_drawings,
-    replace_table_from_grid,
     run_has_drawing,
     set_blue_portion,
     set_photo_caption,
@@ -41,10 +42,14 @@ from src.generators.elp_docx import (
 from src.generators.word_engine import PHOTO_WIDTH_IN, WordGenerator
 from src.generators.word_fields import finalize_exported_fields
 from src.io.network_sources import elp_data_pattern_directory
-from src.io.special_rules import DEFAULT_LAB_ADDRESS_CN, profile_from_state
 from src.io.test_photos import is_image_file, list_sample_info_photos
 from src.models.project_state import ProjectState, TestEquipment, TestNode
 from src.parsers.elp_plan import (
+    CHAPTER6_BASIC,
+    CHAPTER6_FUNCTION_CLASS,
+    CHAPTER6_MONITOR,
+    CHAPTER6_STATES,
+    CHAPTER6_WORK_MODES,
     ElpPlan,
     caption_from_stem,
     elp_names_match,
@@ -54,6 +59,7 @@ from src.parsers.elp_plan import (
 LAB_NAME_CN = "上海华测品正检测技术有限公司"
 LAB_PHONE = "021-31073300"
 LAB_ZIP = "201114"
+ELP_LAB_ADDRESS_CN = "上海市闵行区新骏环路 777 号"
 DIFF_DEFAULT = "测试计划中的测试方式及相关条件与标准无差异"
 
 
@@ -63,10 +69,19 @@ class ElpExportFields:
         rated_voltage: str = "",
         sample_source: str = "",
         plan_no: str = "",
+        manufacturer_address: str = "",
     ):
         self.rated_voltage = (rated_voltage or "").strip()
         self.sample_source = (sample_source or "").strip()
         self.plan_no = (plan_no or "").strip()
+        self.manufacturer_address = (manufacturer_address or "").strip()
+
+
+def manufacturer_address_prompt(fields: Dict[str, str], state: ProjectState) -> Optional[str]:
+    """Applicant address to confirm, or None when the form already has 生产商地址."""
+    if (fields.get("生产商地址") or "").strip():
+        return None
+    return (fields.get("申请公司地址") or state.applicant_address or "").strip()
 
 
 class _TestBlock:
@@ -111,7 +126,7 @@ class ElpReportGenerator:
             self._fill_cover(doc, state, fields, extras, plan)
             self._fill_headers(doc, fields.get("试验类型") or "", report_no)
             self._fill_object_table(doc, state, fields, extras, plan, nodes)
-            self._fill_lab_and_maker(doc, state, fields)
+            self._fill_lab_and_maker(doc, state, fields, extras)
             self._prefetch_export_photos(
                 pairs,
                 project_path,
@@ -354,15 +369,17 @@ class ElpReportGenerator:
                     break
 
     def _fill_lab_and_maker(
-        self, doc: Document, state: ProjectState, fields: Dict[str, str]
+        self,
+        doc: Document,
+        state: ProjectState,
+        fields: Dict[str, str],
+        extras: ElpExportFields,
     ) -> None:
-        profile = profile_from_state(state)
-        lab_addr = (profile.lab_address_cn or "").strip() or DEFAULT_LAB_ADDRESS_CN
         lab = self._table_by_first_label(doc, "名称")
         if lab is not None:
             mapping = {
                 "名称": LAB_NAME_CN,
-                "地址": lab_addr,
+                "地址": ELP_LAB_ADDRESS_CN,
                 "电话": LAB_PHONE,
                 "传真": "/",
                 "邮编": LAB_ZIP,
@@ -372,11 +389,8 @@ class ElpReportGenerator:
         maker = self._table_by_first_label(doc, "制造商")
         if maker is not None:
             producer = fields.get("生产商") or fields.get("申请公司") or state.applicant_name
-            addr = (
-                fields.get("生产商地址")
-                or fields.get("申请公司地址")
-                or state.applicant_address
-            )
+            parsed = (fields.get("生产商地址") or "").strip()
+            addr = parsed or (extras.manufacturer_address or "").strip()
             self._fill_kv_table(
                 maker,
                 {
@@ -443,69 +457,46 @@ class ElpReportGenerator:
     def _fill_plan_chapter6(
         self, doc: Document, plan: ElpPlan, nodes: Sequence[TestNode]
     ) -> None:
-        basic = self._table_with_first_row(doc, "电子电器组件种类")
-        if basic is not None and plan.basic_info_rows:
-            replace_table_from_grid(basic, plan.basic_info_rows)
+        images = plan.chapter6_images or {}
+        if not images:
+            return
         modes = None
         klass = None
-        for table in doc.tables:
+        for table in list(doc.tables):
             head = cell_text(unique_cells(table.rows[0])[0]) if table.rows else ""
             blob = "".join(cell_text(c) for r in table.rows[:2] for c in unique_cells(r))
             if head == "工作模式" and "定义描述" in blob and modes is None:
                 modes = table
             elif "产品功能分类" in blob and klass is None:
                 klass = table
-        if klass is not None and plan.function_class_rows:
-            replace_table_from_grid(klass, plan.function_class_rows)
-        if modes is not None and plan.work_mode_defs:
-            self._fill_work_mode_defs(modes, plan)
-        monitor = self._table_by_labels(doc, "功能描述", "可接受范围")
-        if monitor is not None and plan.monitor_rows:
-            self._replace_simple_rows(monitor, plan.monitor_rows, 3)
-        states = self._table_by_labels(doc, "功能状态", "定义描述")
-        if states is not None and plan.function_states:
-            self._fill_function_states(states, plan.function_states)
+        slots = (
+            (CHAPTER6_BASIC, self._table_with_first_row(doc, "电子电器组件种类")),
+            (CHAPTER6_FUNCTION_CLASS, klass),
+            (CHAPTER6_WORK_MODES, modes),
+            (CHAPTER6_MONITOR, self._table_by_labels(doc, "功能描述", "可接受范围")),
+            (CHAPTER6_STATES, self._table_by_labels(doc, "功能状态", "定义描述")),
+        )
+        for key, table in slots:
+            blob = images.get(key)
+            if table is not None and blob:
+                self._replace_table_with_picture(doc, table, blob)
 
-    def _fill_work_mode_defs(self, table: Table, plan: ElpPlan) -> None:
-        by_mode = {normalize_mode(m): d for m, d in plan.work_mode_defs}
-        for row in table.rows[1:]:
-            cells = unique_cells(row)
-            if len(cells) < 2:
-                continue
-            key = normalize_mode(cell_text(cells[0]))
-            if key in by_mode:
-                set_blue_portion(cells[1], by_mode[key])
-        if plan.work_mode_notes:
-            last = unique_cells(table.rows[-1])
-            if last and "备注" not in cell_text(last[0]):
-                clone_table_row(table, len(table.rows) - 1)
-                cells = unique_cells(table.rows[-1])
-                force_black_text(cells[0], "备注")
-                force_blue_text(cells[1] if len(cells) > 1 else cells[0], plan.work_mode_notes)
+    def _replace_table_with_picture(self, doc: Document, table: Table, blob: bytes) -> None:
+        new_p = OxmlElement("w:p")
+        table._tbl.addnext(new_p)
+        paragraph = wrap_paragraph(new_p, doc)
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        paragraph.paragraph_format.space_before = Pt(0)
+        paragraph.paragraph_format.space_after = Pt(6)
+        run = paragraph.add_run()
+        run.add_picture(io.BytesIO(blob), width=Emu(self._body_content_width(doc)))
+        delete_table(table)
 
-    def _replace_simple_rows(
-        self, table: Table, rows: Sequence[Tuple[str, str, str]], cols: int
-    ) -> None:
-        while len(table.rows) - 1 > len(rows) and len(table.rows) > 2:
-            delete_table_row(table, len(table.rows) - 1)
-        while len(table.rows) - 1 < len(rows):
-            clone_table_row(table, 1)
-        for idx, values in enumerate(rows):
-            cells = unique_cells(table.rows[idx + 1])
-            for col in range(min(cols, len(cells))):
-                force_blue_text(cells[col], values[col] if col < len(values) else "")
-
-    def _fill_function_states(
-        self, table: Table, states: Sequence[Tuple[str, str]]
-    ) -> None:
-        by_name = {name: desc for name, desc in states}
-        for row in table.rows[1:]:
-            cells = unique_cells(row)
-            if len(cells) < 2:
-                continue
-            name = cell_text(cells[0])
-            if name in by_name:
-                set_blue_portion(cells[1], by_name[name])
+    @staticmethod
+    def _body_content_width(doc: Document) -> int:
+        section = doc.sections[0]
+        width = int(section.page_width - section.left_margin - section.right_margin)
+        return width if width > 0 else int(Inches(6.3))
 
     def _fill_summary_table(self, doc: Document, nodes: Sequence[TestNode]) -> None:
         table = self._table_by_labels(doc, "试验项目", "试验标准", "结果判定")
@@ -780,7 +771,7 @@ class ElpReportGenerator:
                     else:
                         force_black_text(value_cell, eval_req)
             elif "试验结果" in label:
-                self._write_blue(value_cell, result_text)
+                fill_result_slot(value_cell, result_text)
             elif "结果判定" in label:
                 self._write_blue(value_cell, conclusion)
             elif label.startswith("备注"):
@@ -1078,6 +1069,3 @@ def _node_conclusion_zh(node: TestNode) -> str:
     engine._report_language = "中文"
     return WordGenerator._node_conclusion(engine, node)
 
-
-def normalize_mode(text: str) -> str:
-    return (text or "").replace(" ", "").casefold()

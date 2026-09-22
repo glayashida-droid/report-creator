@@ -4,7 +4,8 @@ import re
 import shutil
 import subprocess
 import threading
-from datetime import datetime, time, timedelta
+import time
+from datetime import datetime, time as datetime_time, timedelta
 from typing import Optional
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -14,13 +15,14 @@ from PySide6.QtWidgets import (
     QLineEdit, QPushButton, QGroupBox, QSplitter, QComboBox, QMessageBox,
     QDateEdit, QFileDialog, QFormLayout, QScrollArea, QSizePolicy, QFrame,
     QInputDialog, QButtonGroup, QToolButton, QDialog, QCheckBox,
-    QStackedWidget, QStyle, QStyleOptionButton,
+    QStackedWidget, QStyle, QStyleOptionButton, QProgressBar,
 )
 from PySide6.QtCore import Qt, QDate, QThread, Signal, QEvent, QObject, QSize, QTimer
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
+from src.runtime_priority import run_in_background
 from src.models.project_state import ProjectState
 from src.ui.test_photos_panel import warn_duplicate_test_names
 from src.application_ingest import apply_application_data
@@ -96,7 +98,11 @@ from src.ui.save_success_dialog import SaveSuccessDialog
 from src.ui.candidate_pool import CandidatePoolList
 from src.ui.app_icon import load_app_icon
 from src.ui.theme import (
+    BG,
+    BG_INPUT,
     CYAN,
+    OVERDUE,
+    TEXT,
     TEXT_DIM,
     polish_date_edit_calendar,
     plus_icon,
@@ -195,6 +201,7 @@ class NetworkProbeWorker(QThread):
         self._config = config
 
     def run(self):
+        run_in_background()
         try:
             self.finished.emit(
                 isolated_probe_network_sources(
@@ -303,7 +310,144 @@ class ElpExportPrepWorker(QThread):
         return self.plan
 
 
-APP_VERSION = "1.4.0"
+class _MountWorker(QThread):
+    """Ask Finder to mount SMB shares without blocking the UI thread."""
+
+    def __init__(self, config: NetworkSourcesConfig, parent=None):
+        super().__init__(parent)
+        self._config = config
+
+    def run(self):
+        run_in_background()
+        try:
+            attempt_mount_network_shares(self._config)
+        except Exception:
+            pass
+
+
+class ImportWarmWorker(QThread):
+    """Import heavy export modules off the UI thread, one at a time."""
+
+    def __init__(self, names: list, parent=None):
+        super().__init__(parent)
+        self._names = list(names)
+
+    def run(self):
+        for name in self._names:
+            if self.isInterruptionRequested():
+                return
+            try:
+                __import__(name)
+            except Exception:
+                pass
+            time.sleep(0.02)
+
+
+class CatalogWarmWorker(QThread):
+    """Read standards and equipment workbooks off the UI thread."""
+
+    ready = Signal(object, object, str)
+
+    def __init__(self, loader, parent=None):
+        super().__init__(parent)
+        self._loader = loader
+
+    def run(self):
+        loader = self._loader
+        standards = []
+        equipments = []
+        error = ""
+        if loader.is_standards_ready:
+            try:
+                standards = loader.load_standards()
+            except DuplicateStandardError as exc:
+                error = duplicate_standard_message(exc)
+            except Exception:
+                standards = []
+        if self.isInterruptionRequested():
+            self.ready.emit(standards, equipments, error)
+            return
+        time.sleep(0.05)
+        if loader.is_equipment_ready:
+            try:
+                equipments = loader.load_equipments()
+            except Exception:
+                equipments = []
+        self.ready.emit(standards, equipments, error)
+
+
+_STARTUP_COVER_MS = 5000
+_STARTUP_COVER_LINES = (
+    "💻程序加载中🦽",
+    "💽公盘连接就绪",
+    "📝模板加载就绪",
+    "\U0001f469\U0001f3fc\u200d\U0001f9b0欢迎使用Report Creator",
+)
+
+
+class StartupCover(QDialog):
+    """Five-second cover while startup reads finish behind it."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Report Creator")
+        self.setModal(True)
+        self.setWindowModality(Qt.ApplicationModal)
+        self.setWindowFlag(Qt.WindowCloseButtonHint, False)
+        self.setFixedSize(560, 176)
+        self.setStyleSheet(
+            f"QDialog {{ background-color: {BG}; border: 1px solid {OVERDUE}; }}"
+            f"QLabel {{ color: {CYAN}; background: transparent; border: none;"
+            f" font-size: 18px; }}"
+            f"QProgressBar {{ background-color: {BG_INPUT}; color: {TEXT};"
+            f" border: 1px solid {OVERDUE}; border-radius: 9px; text-align: center; }}"
+            f"QProgressBar::chunk {{ background-color: {CYAN}; border-radius: 8px; }}"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 22, 22, 22)
+        layout.setSpacing(16)
+        self._label = QLabel(_STARTUP_COVER_LINES[0])
+        self._label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self._label)
+        self._bar = QProgressBar()
+        self._bar.setRange(0, _STARTUP_COVER_MS)
+        self._bar.setValue(0)
+        self._bar.setTextVisible(False)
+        self._bar.setFixedHeight(18)
+        layout.addWidget(self._bar)
+        self._started = time.monotonic()
+        self._last_line_at = None
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(40)
+
+    def _tick(self):
+        elapsed = int((time.monotonic() - self._started) * 1000)
+        shown = min(elapsed, _STARTUP_COVER_MS)
+        self._bar.setValue(shown)
+        if elapsed >= _STARTUP_COVER_MS:
+            index = len(_STARTUP_COVER_LINES) - 1
+        else:
+            index = min(
+                shown * len(_STARTUP_COVER_LINES) // _STARTUP_COVER_MS,
+                len(_STARTUP_COVER_LINES) - 1,
+            )
+        self._label.setText(_STARTUP_COVER_LINES[index])
+        if index == len(_STARTUP_COVER_LINES) - 1 and self._last_line_at is None:
+            self._last_line_at = time.monotonic()
+        if (
+            self._last_line_at is not None
+            and elapsed >= _STARTUP_COVER_MS
+            and (time.monotonic() - self._last_line_at) >= 1.25
+        ):
+            self._timer.stop()
+            self.accept()
+
+    def reject(self):
+        return
+
+
+APP_VERSION = "1.4.1"
 # Calendar popup floor. Dates before this are treated as "no end date"
 # because QDateEdit may clamp the blank sentinel to 1752-09-14.
 _EARLIEST_REAL_YEAR = 1990
@@ -451,6 +595,15 @@ class MainWindow(QMainWindow):
         self._tester_prompt_pending = not bool(saved_tester)
         self._sync_worker = None  # type: Optional[NightlySyncWorker]
         self._elp_prep_worker = None  # type: Optional[ElpExportPrepWorker]
+        self._catalog_warm_worker = None  # type: Optional[CatalogWarmWorker]
+        self._import_worker = None  # type: Optional[ImportWarmWorker]
+        self._mount_worker = None  # type: Optional[_MountWorker]
+        self._hold_tester_prompt = False
+        self._catalog_waiters = []
+        self._catalog_warm_wanted = False
+        self._catalog_warm_finished = False
+        self._catalog_error = ""
+        self._combo_warmed = False
         self._nightly_sync_timer = QTimer(self)
         self._nightly_sync_timer.setInterval(30_000)
         self._nightly_sync_timer.timeout.connect(self._on_nightly_sync_tick)
@@ -888,17 +1041,131 @@ class MainWindow(QMainWindow):
         if not self._network_startup_started:
             self._network_startup_started = True
             QTimer.singleShot(0, self._start_deferred_network_connect)
+        if self._hold_tester_prompt:
+            return
         if self._tester_prompt_pending:
             self._tester_prompt_pending = False
             QTimer.singleShot(0, self._prompt_tester_name)
         elif self._session_tester_name:
             QTimer.singleShot(0, self._ensure_usage_tracker)
 
+    def present_startup_cover(self):
+        """Block the main window for five seconds while the remaining prep runs."""
+        self._hold_tester_prompt = True
+        self._start_startup_prep()
+        cover = StartupCover(self)
+        cover.exec()
+        self._hold_tester_prompt = False
+        if self._tester_prompt_pending:
+            self._tester_prompt_pending = False
+            QTimer.singleShot(0, self._prompt_tester_name)
+        elif self._session_tester_name:
+            QTimer.singleShot(0, self._ensure_usage_tracker)
+
+    def _start_startup_prep(self):
+        """Read catalogs, import export modules, and scan the board during the cover."""
+        self._start_import_warmup()
+        if not self._combo_warmed:
+            self._combo_warmed = True
+            self._warm_combo_popup()
+        if getattr(self, "_board_page", None) is not None:
+            self._board_page.preload()
+        self._catalog_warm_wanted = True
+        self._warm_catalogs()
+
     def _start_deferred_network_connect(self):
-        """Mount then probe after the first paint so SMB cannot delay the window."""
-        attempt_mount_network_shares(self._network_config)
-        self._start_network_probe()
-        self._schedule_network_probe()
+        """Mount SMB off the UI thread, then probe once that attempt returns."""
+        worker = _MountWorker(self._network_config, self)
+        worker.setPriority(QThread.LowPriority)
+        worker.finished.connect(self._start_network_probe)
+        worker.finished.connect(self._schedule_network_probe)
+        self._mount_worker = worker
+        worker.start()
+
+    def _start_import_warmup(self):
+        worker = self._import_worker
+        if worker is not None:
+            return
+        worker = ImportWarmWorker(
+            [
+                "docx",
+                "pdfplumber",
+                "src.generators.word_engine",
+                "src.generators.elp_engine",
+                "src.parsers.elp_plan",
+            ],
+            self,
+        )
+        self._import_worker = worker
+        worker.start()
+
+    def _warm_combo_popup(self):
+        """Build one hidden combo view so later dropdowns skip first-use style setup."""
+        combo = QComboBox(self)
+        combo.addItem("")
+        combo.hide()
+        view = combo.view()
+        combo.style().polish(combo)
+        if view is not None:
+            view.style().polish(view)
+        combo.deleteLater()
+
+    def request_catalogs(self, dialog):
+        """Fill a detail dialog when the workbook read finishes. Never reads on the UI thread."""
+        self._catalog_waiters.append(dialog)
+        self._catalog_warm_wanted = True
+        self._warm_catalogs()
+
+    def _warm_catalogs(self):
+        loader = self.leg_graph.db_loader
+        worker = self._catalog_warm_worker
+        if worker is not None and worker.isRunning():
+            return
+        if self._catalog_warm_finished:
+            if self._catalog_waiters:
+                self._flush_catalog_waiters()
+            return
+        if not (loader.is_standards_ready or loader.is_equipment_ready):
+            return
+        need_std = loader.is_standards_ready and loader.standards_df is None
+        need_eq = loader.is_equipment_ready and loader.equipments_df is None
+        if not need_std and not need_eq:
+            if self._catalog_waiters:
+                self._flush_catalog_waiters()
+            else:
+                self._catalog_warm_finished = True
+            return
+        if not self._catalog_warm_wanted and not self._catalog_waiters:
+            return
+        worker = CatalogWarmWorker(loader, self)
+        worker.ready.connect(self._on_catalog_ready)
+        self._catalog_warm_worker = worker
+        worker.start()
+
+    def _flush_catalog_waiters(self):
+        loader = self.leg_graph.db_loader
+        standards = loader.peek_standards()
+        equipments = loader.peek_equipments()
+        error = "" if standards is not None or equipments is not None else self._catalog_error
+        self._on_catalog_ready(standards or [], equipments or [], error)
+
+    def _on_catalog_ready(self, standards, equipments, error):
+        self._catalog_warm_finished = True
+        self._catalog_error = error or ""
+        waiters = self._catalog_waiters
+        self._catalog_waiters = []
+        for dialog in waiters:
+            try:
+                dialog.apply_catalogs(standards or [], equipments or [], error or "")
+            except RuntimeError:
+                pass
+
+    def _refresh_board_cache(self):
+        page = getattr(self, "_board_page", None)
+        if page is None:
+            return
+        page.invalidate_cache()
+        page.preload()
 
     def _prompt_tester_name(self, *, mount_project: bool = False) -> bool:
         """Ask for tester name on first launch, or when the title is clicked."""
@@ -967,7 +1234,7 @@ class MainWindow(QMainWindow):
 
     def _schedule_usage_midnight(self):
         now = datetime.now()
-        nxt = datetime.combine(now.date() + timedelta(days=1), time.min)
+        nxt = datetime.combine(now.date() + timedelta(days=1), datetime_time.min)
         delay_ms = max(int((nxt - now).total_seconds() * 1000), 1000)
         self._usage_midnight.start(delay_ms)
 
@@ -1027,7 +1294,7 @@ class MainWindow(QMainWindow):
         return True
 
     def _show_project_board(self):
-        self._board_page.reload()
+        self._board_page.reload_from_cache()
         self._stack.setCurrentWidget(self._board_page)
 
     def _hide_project_board(self):
@@ -1559,6 +1826,8 @@ class MainWindow(QMainWindow):
         self._start_mirror(project_path, local_path)
         self._is_dirty = False
         self._on_export_mode_changed()
+        self.leg_graph.preload_gantt()
+        self._refresh_board_cache()
 
     def _find_sample_files(self, project_path: Path):
         """Locate 申请单 Excel (by project id) and 报价单 PDF under 1.接样组."""
@@ -1974,6 +2243,7 @@ class MainWindow(QMainWindow):
         if self._network_probe_worker is not None and self._network_probe_worker.isRunning():
             return
         worker = NetworkProbeWorker(self._network_config, self)
+        worker.setPriority(QThread.LowPriority)
         worker.finished.connect(self._on_network_probe_done)
         self._network_probe_worker = worker
         worker.start()
@@ -2029,6 +2299,8 @@ class MainWindow(QMainWindow):
             _templates_tooltip(result, cfg) or (result.templates_error or "模板未连接")
         )
         self._schedule_network_probe()
+        self._catalog_warm_wanted = bool(result.standards_ok or result.equipment_ok)
+        self._warm_catalogs()
         if self.state.project_id:
             self._refresh_remote_json_status()
         self._flush_usage()
@@ -2186,6 +2458,8 @@ class MainWindow(QMainWindow):
         self.leg_graph.state = self.state
         self.leg_graph.reload_from_state()
         self._on_export_mode_changed()
+        self.leg_graph.preload_gantt()
+        self._refresh_board_cache()
 
     # ---------- save / load state / export ----------
 
@@ -2203,6 +2477,7 @@ class MainWindow(QMainWindow):
         self.state.project_path = str(self._local_path)
         if not self._persist_project_json():
             return False
+        self._refresh_board_cache()
         self._is_dirty = False
         self._refresh_remote_json_status()
         if show_success and self._json_save_kind == "full":
@@ -2539,6 +2814,7 @@ class MainWindow(QMainWindow):
         self.leg_graph.state = self.state
         self.leg_graph.reload_from_state()
         self.leg_graph.notify_pool_changed()
+        self.leg_graph.preload_gantt()
         self._mark_dirty()
 
     def export_report(self):
@@ -2620,7 +2896,15 @@ class MainWindow(QMainWindow):
 
                 worker = self._elp_prep_worker
                 elp_plan = worker.wait_plan() if worker is not None else ElpPlan()
-                dialog = ElpExportDialog(plan_no=elp_plan.plan_no, parent=self)
+                from src.generators.elp_engine import manufacturer_address_prompt
+
+                dialog = ElpExportDialog(
+                    plan_no=elp_plan.plan_no,
+                    manufacturer_address=manufacturer_address_prompt(
+                        self.state.overview_field_map("中文"), self.state
+                    ),
+                    parent=self,
+                )
                 if dialog.exec() != QDialog.Accepted:
                     return
                 elp_extras = dialog.fields()
@@ -2786,4 +3070,5 @@ if __name__ == "__main__":
     window = MainWindow()
     apply_app_icon(app, window)
     window.show()
+    window.present_startup_cover()
     sys.exit(app.exec())

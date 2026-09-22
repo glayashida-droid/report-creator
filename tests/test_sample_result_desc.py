@@ -96,6 +96,68 @@ def test_per_sample_result_desc_editable_and_persisted():
     assert dlg.node_data.samples[0].result_desc == custom
     assert dlg.node_data.samples[1].result_desc == desc
 
+    reopened = TestDetailDialog(dlg.node_data, standards, [])
+    assert reopened.table.cellWidget(0, 2).text() == custom
+    assert reopened.table.cellWidget(1, 2).text() == desc
+    reopened._refresh_std_summary()
+    assert reopened.table.cellWidget(0, 2).text() == custom
+    assert reopened.table.cellWidget(1, 2).text() == desc
+    reopened.close()
+
+
+def test_recheck_standard_refills_sample_result_desc():
+    _app()
+    desc = "标准结果描述"
+    standards = [
+        {
+            "标准号": "STD-2b",
+            "章节号": "2.3",
+            "试验名称": "高温",
+            "结果描述": desc,
+        }
+    ]
+    dlg = TestDetailDialog(TestNode(test_name="高温"), standards, [])
+    _check_first_standard(dlg)
+    dlg.add_sample_row("A01", TestResult.PASS)
+    dlg.table.cellWidget(0, 2).setText("样品单独修改")
+
+    chk = dlg.std_table.item(0, 0)
+    chk.setCheckState(Qt.Unchecked)
+    chk.setCheckState(Qt.Checked)
+
+    assert dlg.table.cellWidget(0, 2).text() == desc
+    dlg.close()
+
+
+def test_editing_one_standard_result_desc_leaves_other_samples():
+    _app()
+    standards = [
+        {
+            "标准号": "S1",
+            "章节号": "1",
+            "试验名称": "机械冲击试验",
+            "结果描述": "冲击描述",
+        },
+        {
+            "标准号": "S2",
+            "章节号": "2",
+            "试验名称": "湿热老化试验",
+            "结果描述": "湿热描述",
+        },
+    ]
+    dlg = TestDetailDialog(TestNode(test_name="组合"), standards, [])
+    _check_standards(dlg, 0, 1)
+    dlg.add_sample_row("A01", TestResult.PASS)
+    custom = "冲击样品单独修改"
+    dlg._sample_table_slots[0]["table"].cellWidget(0, 2).setText(custom)
+
+    editor = dlg.result_desc_table.cellWidget(1, 1)
+    editor.setPlainText("湿热改过")
+
+    assert dlg._sample_table_slots[0]["table"].cellWidget(0, 2).text() == custom
+    assert dlg._sample_table_slots[1]["table"].cellWidget(0, 2).text() == "湿热改过"
+    dlg.close()
+
 
 def test_standard_result_desc_edit_still_overwrites_all_sample_rows():
     _app()
@@ -410,7 +472,12 @@ def test_sample_result_desc_follows_edit_language():
     dlg = TestDetailDialog(node, standards, [], host)
     desc_w = dlg.table.cellWidget(0, 2)
     assert desc_w is not None
-    assert desc_w.text() == desc_en
+    assert desc_w.text() == desc_zh
+
+    chk = dlg.std_table.item(0, 0)
+    chk.setCheckState(Qt.Unchecked)
+    chk.setCheckState(Qt.Checked)
+    assert dlg.table.cellWidget(0, 2).text() == desc_en
     dlg.close()
 
 

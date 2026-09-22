@@ -124,6 +124,29 @@ def write_runs(paragraph, pieces: Sequence[tuple[str, Optional[str]]]) -> None:
             set_run_color(run, color)
 
 
+def clear_first_line_indent(paragraph) -> None:
+    """Drop 首行缩进 so filled lines start at the left edge of the cell."""
+    pPr = paragraph._p.find(qn("w:pPr"))
+    if pPr is None:
+        return
+    ind = pPr.find(qn("w:ind"))
+    if ind is None:
+        return
+    for attr in (qn("w:firstLine"), qn("w:firstLineChars")):
+        if attr in ind.attrib:
+            del ind.attrib[attr]
+    if not ind.attrib:
+        pPr.remove(ind)
+
+
+def fill_result_slot(cell, text: str) -> None:
+    """Write 试验结果 and clear the template's first-line indent."""
+    if not set_blue_portion(cell, text):
+        force_black_text(cell, text)
+    for paragraph in cell.paragraphs:
+        clear_first_line_indent(paragraph)
+
+
 def set_blue_portion(cell, text: str) -> bool:
     """Replace template-blue runs with filled text (black). Leave all-black cells."""
     blue_runs = []

@@ -493,7 +493,10 @@ def _sample_value_cell_has_content(val: str) -> bool:
 
 
 def _raw_sample_row_values_by_column(row) -> List[str]:
-    """Sheet2 一行按列对齐的取值（col 1..n 各一个单元格，不跨列去重）。"""
+    """Sheet2 一行按列对齐的取值（col 1..n 各一个单元格，不跨列去重）。
+
+    同一单元格内换行分隔的多个值仍属于这一列，用 ``/`` 拼回，避免只留下第一行。
+    """
     values: List[str] = []
     for col_idx in range(1, len(row)):
         val = _cell_str(row[col_idx]) if col_idx < len(row) else ""
@@ -504,7 +507,7 @@ def _raw_sample_row_values_by_column(row) -> List[str]:
             values.append((val or "").strip())
             continue
         pieces = _expand_multiline_cell_values(val)
-        values.append(pieces[0] if pieces else "")
+        values.append("/".join(pieces))
     return values
 
 

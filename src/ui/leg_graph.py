@@ -9,7 +9,6 @@ from PySide6.QtCore import Qt, Signal, QTimer, QPoint
 from PySide6.QtGui import QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent, QResizeEvent
 
 from src.models.project_state import TestLeg, TestNode
-from src.parsers.db_loader import DuplicateStandardError, duplicate_standard_message
 from src.generators.original_record import (
     export_node_original_record,
     original_record_data_from_node,
@@ -192,17 +191,23 @@ class TestNodeWidget(QFrame):
             return
 
         try:
-            standards = self.db_loader.load_standards()
-        except DuplicateStandardError as exc:
-            QMessageBox.warning(self, "提示", duplicate_standard_message(exc))
-            return
-
+            standards = self.db_loader.peek_standards()
+            equipments = self.db_loader.peek_equipments()
+        except Exception:
+            standards = None
+            equipments = None
+        pending = standards is None or equipments is None
         dialog = TestDetailDialog(
             self.node_data,
-            standards,
-            self.db_loader.load_equipments(),
-            self
+            [] if pending else standards,
+            [] if pending else equipments,
+            self,
+            catalogs_pending=pending,
         )
+        if pending:
+            host = self.window()
+            if hasattr(host, "request_catalogs"):
+                host.request_catalogs(dialog)
         if dialog.exec():
             old_cn = self._committed_name
             old_en = self._committed_name_en
@@ -868,6 +873,12 @@ class LegGraphArea(QWidget):
     def _enter_gantt_mode(self) -> None:
         self.gantt_chart.refresh()
         self.gantt_chart.warn_if_overlaps()
+
+    def preload_gantt(self) -> None:
+        """Lay out the hidden Gantt so the first toggle only switches pages."""
+        if self.is_gantt_mode():
+            return
+        self.gantt_chart.refresh()
 
     def toggle_view_mode(self) -> None:
         self.set_gantt_mode(not self.is_gantt_mode())

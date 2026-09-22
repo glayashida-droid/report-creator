@@ -239,15 +239,86 @@ def test_sample_info_dir_created_with_album(tmp_path: Path):
     assert folder.is_dir()
 
 
+def test_export_dialog_prefills_manufacturer_address_only_when_missing():
+    import sys
+
+    from PySide6.QtWidgets import QApplication
+
+    from src.ui.elp_export_dialog import ElpExportDialog
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    hidden = ElpExportDialog(plan_no="P-1")
+    assert hidden.txt_manufacturer_address is None
+    assert hidden.fields().manufacturer_address == ""
+    shown = ElpExportDialog(plan_no="P-1", manufacturer_address="申请方地址")
+    assert shown.txt_manufacturer_address is not None
+    assert shown.txt_manufacturer_address.text() == "申请方地址"
+    shown.txt_manufacturer_address.setText("手动地址")
+    assert shown.fields().manufacturer_address == "手动地址"
+    hidden.deleteLater()
+    shown.deleteLater()
+    QApplication.processEvents()
+
+
 def test_elp_export_fields_trim_values():
     fields = ElpExportFields(
         rated_voltage=" 12V ",
         sample_source=" 送样 ",
         plan_no="  P166-ELP-TP(副仪表板开关组)-2026-0001  ",
+        manufacturer_address="  上海市嘉定工业区北和公路 1000 号  ",
     )
     assert fields.rated_voltage == "12V"
     assert fields.sample_source == "送样"
     assert fields.plan_no == "P166-ELP-TP(副仪表板开关组)-2026-0001"
+    assert fields.manufacturer_address == "上海市嘉定工业区北和公路 1000 号"
+
+
+def test_elp_lab_address_is_fixed_and_maker_address_is_confirmed(tmp_path: Path):
+    from docx import Document
+
+    from src.generators.elp_engine import ELP_LAB_ADDRESS_CN, manufacturer_address_prompt
+
+    blank = tmp_path / "blank.docx"
+    Document().save(blank)
+    doc = Document()
+    lab = doc.add_table(2, 2)
+    lab.cell(0, 0).text = "名称"
+    lab.cell(1, 0).text = "地址"
+    lab.cell(1, 1).text = "旧地址"
+    maker = doc.add_table(2, 2)
+    maker.cell(0, 0).text = "制造商"
+    maker.cell(0, 1).text = "旧名称"
+    maker.cell(1, 0).text = "地址"
+    maker.cell(1, 1).text = "旧地址"
+    state = ProjectState(applicant_name="申请方", applicant_address="申请方地址")
+    fields = {
+        "生产商": "南京奥托立夫汽车安全系统有限公司",
+        "申请公司": "申请方",
+        "申请公司地址": "申请方地址",
+    }
+    assert manufacturer_address_prompt(fields, state) == "申请方地址"
+    ElpReportGenerator(str(blank))._fill_lab_and_maker(
+        doc,
+        state,
+        fields,
+        ElpExportFields(manufacturer_address="我改过的生产商地址"),
+    )
+    assert cell_text(lab.cell(1, 1)) == ELP_LAB_ADDRESS_CN
+    assert "1351" not in cell_text(lab.cell(1, 1))
+    assert cell_text(maker.cell(1, 1)) == "我改过的生产商地址"
+    assert cell_text(maker.cell(0, 1)) == "南京奥托立夫汽车安全系统有限公司"
+
+    parsed = {**fields, "生产商地址": "申请单上的生产商地址"}
+    assert manufacturer_address_prompt(parsed, state) is None
+    ElpReportGenerator(str(blank))._fill_lab_and_maker(
+        doc,
+        state,
+        parsed,
+        ElpExportFields(manufacturer_address="确认框里的地址"),
+    )
+    assert cell_text(maker.cell(1, 1)) == "申请单上的生产商地址"
 
 
 def _state(project: Path) -> ProjectState:
@@ -453,8 +524,10 @@ def test_elp_engine_keeps_program_tests_and_fills_fields(tmp_path: Path):
                 if len(pair) >= 2:
                     maker_vals[cell_text(pair[0])] = cell_text(pair[1])
     assert lab_vals.get("名称") == "上海华测品正检测技术有限公司"
+    assert lab_vals.get("地址") == "上海市闵行区新骏环路 777 号"
     assert lab_vals.get("传真") == "/"
     assert maker_vals.get("制造商") == "吉利汽车"
+    assert maker_vals.get("地址") == ""
     assert maker_vals.get("电话") == "/"
 
     settings = doc.settings.element.xml
@@ -465,67 +538,80 @@ def test_elp_engine_keeps_program_tests_and_fills_fields(tmp_path: Path):
 def test_elp_engine_pastes_plan_tables(tmp_path: Path):
     if not TEMPLATE.is_file():
         return
+    import io
+
     from docx import Document
     from docx.oxml.ns import qn
+    from PIL import Image
 
-    from src.generators.elp_docx import grid_row_groups
-
-    groups = grid_row_groups(
-        [
-            ["工作模式", "功能描述", "产品功能分类", "", "", "车辆运行模式", "", "", ""],
-            ["", "", "A类", "B类", "C类", "Off", "Acc", "Start", "Run"],
-            ["mode 1.1", "产品无功能", "√", "", "", "√", "", "", ""],
-        ]
+    from src.parsers.elp_plan import (
+        CHAPTER6_BASIC,
+        CHAPTER6_FUNCTION_CLASS,
+        CHAPTER6_MONITOR,
+        CHAPTER6_STATES,
+        CHAPTER6_WORK_MODES,
     )
-    assert groups[0][0] == ("工作模式", 1, False)
-    assert groups[0][2] == ("产品功能分类", 3, False)
-    assert groups[2][0] == ("mode 1.1", 1, False)
-    assert groups[2][2] == ("√", 1, False)
+
+    def _png() -> bytes:
+        buf = io.BytesIO()
+        Image.new("RGB", (80, 40), (20, 40, 60)).save(buf, format="PNG")
+        return buf.getvalue()
 
     plan = ElpPlan(
-        basic_info_rows=[
-            ["电子电器组件种类", "P", "R", "A"],
-            ["", "", "", "√"],
-            ["工作类型", "连续型", "长时型", "短时型"],
-            ["", "√", "", ""],
-            ["封装尺寸（不含电缆）", "192.8*58.47*84.2（单位：mm）", "", ""],
-        ],
-        function_class_rows=[
-            ["工作模式", "功能描述", "产品功能分类", "", "", "车辆运行模式", "", "", ""],
-            ["", "", "A类", "B类", "C类", "Off", "Acc", "Start", "Run"],
-            ["mode 1.1", "产品无功能", "√", "", "", "√", "", "", ""],
-            ["Mode 2.2", "产品正常工作", "√", "", "", "", "√", "", ""],
-        ],
+        chapter6_images={
+            CHAPTER6_BASIC: _png(),
+            CHAPTER6_FUNCTION_CLASS: _png(),
+            CHAPTER6_WORK_MODES: _png(),
+            CHAPTER6_MONITOR: _png(),
+            CHAPTER6_STATES: _png(),
+        }
     )
     out = tmp_path / "elp-plan.docx"
     ElpReportGenerator(str(TEMPLATE)).generate(
         _state(tmp_path / "proj"),
         str(out),
         plan=plan,
+        pattern_dir=tmp_path / "no-patterns",
         report_no="A226074579110100001C",
     )
     doc = Document(str(out))
-    basic = None
-    klass = None
-    for table in doc.tables:
-        head = "".join(cell_text(c) for c in unique_cells(table.rows[0])) if table.rows else ""
-        blob = "".join(cell_text(c) for r in table.rows[:3] for c in unique_cells(r))
-        if "电子电器组件种类" in head:
-            basic = table
-        if "产品功能分类" in blob or "产品无功能" in blob:
-            klass = table
-    assert basic is not None
-    basic_text = "\n".join(cell_text(c) for r in basic.rows for c in unique_cells(r))
-    assert "封装尺寸" in basic_text
-    assert "192.8*58.47*84.2" in basic_text
-    ticks = [cell_text(c) for c in unique_cells(basic.rows[1])]
-    assert "√" in ticks
+    children = list(doc.element.body)
 
-    assert klass is not None
-    klass_text = "\n".join(cell_text(c) for r in klass.rows for c in unique_cells(r))
-    assert "产品无功能" in klass_text
-    assert "产品正常工作" in klass_text
-    assert "CAN总线通讯" not in klass_text
+    def _para_text(el) -> str:
+        return "".join(node.text or "" for node in el.iter(qn("w:t"))).strip()
+
+    followed_by_picture = []
+    for index, el in enumerate(children[:-1]):
+        if el.tag != qn("w:p"):
+            continue
+        text = _para_text(el)
+        if text not in {
+            "基本信息",
+            "产品功能重要性类别定义",
+            "工作模式定义",
+            "监控方式定义",
+            "产品功能状态定义",
+        }:
+            continue
+        window = children[index + 1 : index + 4]
+        has_picture = any(
+            item.tag == qn("w:p") and item.find(".//" + qn("w:drawing")) is not None
+            for item in window
+        )
+        followed_by_picture.append((text, has_picture))
+    assert ("基本信息", True) in followed_by_picture
+    for title in (
+        "产品功能重要性类别定义",
+        "工作模式定义",
+        "监控方式定义",
+        "产品功能状态定义",
+    ):
+        assert (title, True) in followed_by_picture
+    for table in doc.tables:
+        blob = "".join(cell_text(c) for row in table.rows[:2] for c in unique_cells(row))
+        assert "电子电器组件种类" not in blob
+        assert "产品功能分类" not in blob
+        assert "可接受范围" not in blob
 
     header = "".join(p.text or "" for p in doc.sections[0].header.paragraphs)
     assert "\t试验类型：ELP\t报告编号No：" in header
@@ -778,6 +864,39 @@ def test_elp_template_keeps_blue_slots():
     from docx import Document
 
     assert _blue_run_texts(Document(str(TEMPLATE)))
+
+
+def test_result_slot_drops_template_first_line_indent():
+    from docx import Document
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    from src.generators.elp_docx import cell_text, fill_result_slot, set_run_color
+
+    doc = Document()
+    cell = doc.add_table(1, 1).cell(0, 0)
+    first = cell.paragraphs[0]
+    first.add_run("1#：占位")
+    cell.add_paragraph("2#：")
+    cell.add_paragraph("3#：")
+    for paragraph in cell.paragraphs:
+        run = paragraph.runs[0]
+        set_run_color(run, "0000FF")
+        pPr = paragraph._p.get_or_add_pPr()
+        ind = OxmlElement("w:ind")
+        ind.set(qn("w:firstLineChars"), "200")
+        ind.set(qn("w:firstLine"), "360")
+        pPr.append(ind)
+
+    text = "A01：试验后，满足功能等级 A\nA02：试验后，满足功能等级 A"
+    fill_result_slot(cell, text)
+    assert cell_text(cell).startswith("A01：")
+    assert "A02：" in cell_text(cell)
+    for paragraph in cell.paragraphs:
+        pPr = paragraph._p.find(qn("w:pPr"))
+        ind = pPr.find(qn("w:ind")) if pPr is not None else None
+        assert ind is None or qn("w:firstLine") not in ind.attrib
+        assert ind is None or qn("w:firstLineChars") not in ind.attrib
 
 
 def test_set_blue_portion_writes_black():

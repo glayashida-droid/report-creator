@@ -12,10 +12,24 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 SAMPLE_DIR_NAME = "1.接样组"
+# P166-ELP-TP(副仪表板开关组)-2026-0001  or  L946-A1-ELP-TP-2026-0045
 PLAN_NO_RE = re.compile(
-    r"([A-Za-z0-9]+-ELP-TP\s*[（(][^)）]+[)）]\s*-\s*\d{4}\s*-\s*\d+)",
+    r"("
+    r"[A-Za-z0-9]+(?:[.\-][A-Za-z0-9]+)*"
+    r"-ELP-TP"
+    r"(?:\s*[（(][^)）]+[)）])?"
+    r"\s*-\s*\d{4}\s*-\s*\d+"
+    r")",
     re.IGNORECASE,
 )
+CHAPTER6_BASIC = "basic"
+CHAPTER6_FUNCTION_CLASS = "function_class"
+CHAPTER6_WORK_MODES = "work_modes"
+CHAPTER6_MONITOR = "monitor"
+CHAPTER6_STATES = "states"
+_CHAPTER6_IMAGE_DPI = 300
+_RULE_SNAP_PT = 8.0
+_CROP_PAD_PT = 3.0
 _HEADER_VEHICLE_RE = re.compile(r"([A-Za-z0-9]+)\s*车型")
 _PHOTO_INDEX_RE = re.compile(r"^图片\s*\d+\s*[:：]\s*")
 _SPACE_RE = re.compile(r"\s+")
@@ -74,6 +88,7 @@ class ElpPlan:
     monitor_rows: List[Tuple[str, str, str]] = field(default_factory=list)
     function_states: List[Tuple[str, str]] = field(default_factory=list)
     test_work_modes: Dict[str, str] = field(default_factory=dict)
+    chapter6_images: Dict[str, bytes] = field(default_factory=dict)
 
 
 def elp_plan_filename_score(name: str) -> int:
@@ -161,9 +176,9 @@ def _pdf_looks_like_elp(path: Path) -> bool:
 
 
 def extract_plan_number_from_text(text: str) -> str:
-    compact = re.sub(r"\s+", "", text or "")
-    spaced = text or ""
-    for blob in (spaced, compact):
+    normalized = (text or "").replace("－", "-").replace("–", "-").replace("—", "-")
+    compact = re.sub(r"\s+", "", normalized)
+    for blob in (normalized, compact):
         match = PLAN_NO_RE.search(blob)
         if match:
             return re.sub(r"\s+", "", match.group(1))
@@ -258,34 +273,43 @@ def parse_elp_plan(pdf_path: Optional[Path], *, ocr_cover: bool = True) -> ElpPl
     ocr_no = ""
     tables: List[List[List[str]]] = []
     header_text = ""
+    cover_text = ""
     notes_chunks: List[str] = []
+    images: Dict[str, bytes] = {}
 
-    def _extract_tables() -> Tuple[str, List[str], List[List[List[str]]]]:
+    def _extract_tables() -> Tuple[str, str, List[str], List[List[List[str]]], Dict[str, bytes]]:
         header = ""
+        cover = ""
         notes: List[str] = []
         found: List[List[List[str]]] = []
+        shots: Dict[str, bytes] = {}
         with pdfplumber.open(str(path)) as pdf:
-            for page in pdf.pages:
+            for index, page in enumerate(pdf.pages):
                 text = page.extract_text() or ""
+                if index == 0:
+                    cover = text
                 if not header:
                     header = text
                 if "备注" in text and "mode 3.1" in text.replace(" ", "").casefold():
                     notes.append(text)
                 for raw in page.extract_tables() or []:
                     found.append(_clean_table(raw))
-        return header, notes, found
+                _collect_chapter6_images(page, shots)
+        return cover, header, notes, found, shots
 
     if ocr_cover:
         with ThreadPoolExecutor(max_workers=2) as pool:
             ocr_fut = pool.submit(ocr_elp_plan_number, path)
-            header_text, notes_chunks, tables = _extract_tables()
+            cover_text, header_text, notes_chunks, tables, images = _extract_tables()
             ocr_no = ocr_fut.result() or ""
     else:
-        header_text, notes_chunks, tables = _extract_tables()
+        cover_text, header_text, notes_chunks, tables, images = _extract_tables()
 
     _fill_from_header(plan, header_text)
     _fill_from_tables(plan, tables)
     plan.work_mode_notes = _extract_work_mode_notes(notes_chunks)
+    plan.chapter6_images = images
+    plan.plan_no = extract_plan_number_from_text(cover_text)
     if ocr_cover and not plan.plan_no:
         plan.plan_no = ocr_no
     return plan
@@ -450,6 +474,162 @@ def _parse_function_states(plan: ElpPlan, table: Sequence[Sequence[str]]) -> Non
             rows.append((name, desc))
     if rows:
         plan.function_states = rows
+
+
+def _table_blob(table) -> str:
+    raw = table.extract() or []
+    return "".join(str(cell or "") for row in raw[:3] for cell in row)
+
+
+def _chapter6_image_key(blob: str) -> str:
+    text = blob or ""
+    if "GEELY" in text:
+        return ""
+    if "电子电器组件种类" in text:
+        return CHAPTER6_BASIC
+    if "产品功能分类" in text:
+        return CHAPTER6_FUNCTION_CLASS
+    if "功能状态" in text and "定义描述" in text:
+        return CHAPTER6_STATES
+    if "工作模式" in text and "定义描述" in text and "功能状态" not in text:
+        return CHAPTER6_WORK_MODES
+    if (
+        "功能描述" in text
+        and "可接受范围" in text
+        and "功能项" not in text
+        and "监控方式" not in text
+    ):
+        return CHAPTER6_MONITOR
+    return ""
+
+
+def _is_footer_line(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text or "")
+    if compact.startswith("GL."):
+        return True
+    return "共" in compact and "页" in compact and "测试计划" in compact
+
+
+def _work_mode_note_bottom(page, table_bottom: float, ceiling: float) -> float:
+    """Include the 备注 block that sits under the work-mode table, outside its border."""
+    words = [
+        word
+        for word in (page.extract_words() or [])
+        if word["top"] >= table_bottom - 2 and word["top"] < ceiling and word["top"] < page.height - 28
+    ]
+    if not words:
+        return table_bottom
+    lines: List[List[dict]] = []
+    for word in sorted(words, key=lambda item: (item["top"], item["x0"])):
+        if lines and abs(word["top"] - lines[-1][0]["top"]) <= 3:
+            lines[-1].append(word)
+        else:
+            lines.append([word])
+    started = False
+    last_bottom = table_bottom
+    prev_bottom = table_bottom
+    for line in lines:
+        text = "".join(word["text"] for word in line)
+        top = min(word["top"] for word in line)
+        bottom = max(word["bottom"] for word in line)
+        if _is_footer_line(text):
+            break
+        if not started:
+            if "备注" in text and top - table_bottom < 40:
+                started = True
+                last_bottom = bottom
+                prev_bottom = bottom
+            elif top - table_bottom > 36:
+                break
+            continue
+        if top - prev_bottom > 18:
+            break
+        if text.startswith("——") or text.startswith("3.") or "见下表" in text:
+            break
+        last_bottom = bottom
+        prev_bottom = bottom
+    if not started:
+        return table_bottom
+    return min(last_bottom + 3, ceiling - 2, page.height - 24)
+
+
+def _iter_rule_segments(page):
+    """Thin strokes pdfplumber stored as rects or lines."""
+    for rect in page.rects or []:
+        yield rect["x0"], rect["top"], rect["x1"], rect["bottom"]
+    for line in page.lines or []:
+        yield line["x0"], line["top"], line["x1"], line["bottom"]
+
+
+def _snap_bbox_to_rules(
+    page, bbox: Tuple[float, float, float, float]
+) -> Tuple[float, float, float, float]:
+    """Grow a detected table box out to ruling lines that sit just outside it.
+
+    pdfplumber's bbox often starts inside the outer border. On the seatbelt
+    plan the left rule is about 6pt left of the 6.4 / 6.5 cell box.
+    """
+    x0, top, x1, bottom = bbox
+    slack = _RULE_SNAP_PT
+    for rx0, rtop, rx1, rbottom in _iter_rule_segments(page):
+        width = rx1 - rx0
+        height = rbottom - rtop
+        if width < 2.5 and height > 4:
+            cx = (rx0 + rx1) / 2
+            if rbottom < top - 1 or rtop > bottom + 1:
+                continue
+            if x0 - slack <= cx <= x0 + 1:
+                x0 = min(x0, rx0)
+            elif x1 - 1 <= cx <= x1 + slack:
+                x1 = max(x1, rx1)
+        elif height < 2.5 and width > 4:
+            cy = (rtop + rbottom) / 2
+            if rx1 < x0 - 1 or rx0 > x1 + 1:
+                continue
+            if top - slack <= cy <= top + 1:
+                top = min(top, rtop)
+            elif bottom - 1 <= cy <= bottom + slack:
+                bottom = max(bottom, rbottom)
+    return x0, top, x1, bottom
+
+
+def _render_crop_png(page, bbox: Tuple[float, float, float, float]) -> bytes:
+    x0, top, x1, bottom = _snap_bbox_to_rules(page, bbox)
+    pad = _CROP_PAD_PT
+    box = (
+        max(0.0, x0 - pad),
+        max(0.0, top - pad),
+        min(page.width, x1 + pad),
+        min(page.height, bottom + pad),
+    )
+    if box[2] - box[0] < 8 or box[3] - box[1] < 8:
+        return b""
+    image = page.crop(box).to_image(resolution=_CHAPTER6_IMAGE_DPI)
+    buf = io.BytesIO()
+    image.original.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _collect_chapter6_images(page, shots: Dict[str, bytes]) -> None:
+    tables = page.find_tables() or []
+    matched = []
+    for table in tables:
+        key = _chapter6_image_key(_table_blob(table))
+        if not key or key in shots:
+            continue
+        matched.append((table, key))
+    for table, key in matched:
+        x0, top, x1, bottom = table.bbox
+        if key == CHAPTER6_WORK_MODES:
+            later = [other.bbox[1] for other in tables if other.bbox[1] > bottom + 2]
+            ceiling = min(later) if later else page.height - 20
+            bottom = _work_mode_note_bottom(page, bottom, ceiling)
+        try:
+            png = _render_crop_png(page, (x0, top, x1, bottom))
+        except Exception:
+            continue
+        if png:
+            shots[key] = png
 
 
 def _extract_work_mode_notes(chunks: Sequence[str]) -> str:

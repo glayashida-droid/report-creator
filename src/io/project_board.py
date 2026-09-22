@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -494,7 +495,19 @@ def _unique_join(values: Iterable[str], sep: str = "、") -> str:
     return sep.join(seen)
 
 
+_BOARD_LIST_LOCK = threading.Lock()
+
+
 def list_board_rows(
+    data_root: Optional[Path] = None,
+    *,
+    today: Optional[date] = None,
+) -> List[BoardRow]:
+    with _BOARD_LIST_LOCK:
+        return _list_board_rows_unlocked(data_root, today=today)
+
+
+def _list_board_rows_unlocked(
     data_root: Optional[Path] = None,
     *,
     today: Optional[date] = None,
