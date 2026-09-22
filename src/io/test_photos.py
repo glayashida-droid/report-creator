@@ -18,6 +18,9 @@ TEMPLATE_ALBUMS = ("试验前", "试验中", "数据", "试验后")
 IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 JPEG_EXTS = {".jpg", ".jpeg"}
 SPARE_DIR_NAME = "备用"
+NOTE_IMAGE_DIR = "备注图片"
+NOTE_TABLE_DIR = "备注表格"
+_NON_ALBUM_DIRS = frozenset({SPARE_DIR_NAME, NOTE_IMAGE_DIR, NOTE_TABLE_DIR})
 _NUMBERED_STEM = re.compile(r"^(.+)-(\d+)$")
 SPARE_ALBUM_NAME = SPARE_DIR_NAME  # alias — 试验目录下与数据表附件同级
 PLACEHOLDER_TEST_NAME = "请选择试验..."
@@ -195,7 +198,7 @@ def list_albums(
     names = [
         p.name
         for p in root.iterdir()
-        if p.is_dir() and not p.name.startswith(".") and p.name != SPARE_DIR_NAME
+        if p.is_dir() and not p.name.startswith(".") and p.name not in _NON_ALBUM_DIRS
     ]
     return apply_album_order(names, order)
 

@@ -16,6 +16,8 @@ from PIL import Image
 from src.io.data_tables import list_attachment_refs
 from src.io.test_photos import (
     IMAGE_EXTS,
+    NOTE_IMAGE_DIR,
+    NOTE_TABLE_DIR,
     SPARE_ALBUM_NAME,
     SPARE_DIR_NAME,
     TEST_GROUP_DIR,
@@ -307,7 +309,7 @@ def list_merged_albums(
         for child in folder.iterdir():
             if not child.is_dir() or child.name.startswith("."):
                 continue
-            if child.name == SPARE_DIR_NAME:
+            if child.name in {SPARE_DIR_NAME, NOTE_IMAGE_DIR, NOTE_TABLE_DIR}:
                 continue
             names.add(child.name)
     return apply_album_order(sorted(names), order)

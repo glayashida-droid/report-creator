@@ -28,12 +28,14 @@ from src.io.project_assets import (
     list_merged_attachment_refs,
     resolve_data_table_path,
 )
+from src.io.test_notes import list_merged_note_table_refs, list_note_image_paths
 from src.io.test_photos import uses_data_photo_layout
 from src.language_copy import (
     field_label,
     format_conclusion,
     has_chinese,
     language_text,
+    note_section_label,
     photo_caption,
     table_header_label,
 )
@@ -1348,6 +1350,15 @@ class WordGenerator:
             f"（8）{self._L('结论', 'Conclusion')}：{conclusion}",
             size=SIZE_BODY,
         )
+        self._insert_note_section(
+            doc,
+            anchor,
+            node,
+            project_path,
+            leg.leg_name,
+            remote_root=remote_root,
+            label=note_section_label(self._lang()),
+        )
 
         # Photos section on its own page
         self._add_page_break_before(doc, anchor)
@@ -1369,6 +1380,159 @@ class WordGenerator:
                 photo_file_order=getattr(node, "photo_file_order", None) or None,
                 remote_root=Path(remote_root) if remote_root else None,
             )
+
+    def _load_note_parts(
+        self,
+        node: TestNode,
+        project_path: Optional[str],
+        leg_name: str = "",
+        remote_root: Optional[str] = None,
+    ):
+        """Return (text blocks, image paths, table snapshots), or None when empty."""
+        text = (getattr(node, "note_text", None) or "").strip()
+        local = Path(project_path) if project_path else None
+        remote = Path(remote_root) if remote_root else None
+        images = list_note_image_paths(
+            local,
+            remote,
+            leg_name,
+            node.test_name,
+            order=getattr(node, "note_image_order", None) or None,
+        )
+        preferred = [
+            ref.relative_path
+            for ref in (getattr(node, "note_tables", None) or [])
+            if getattr(ref, "relative_path", "")
+        ]
+        refs = list_merged_note_table_refs(
+            local, remote, leg_name, node.test_name, preferred=preferred
+        )
+        loaded = []
+        for ref in refs:
+            try:
+                path = resolve_data_table_path(local, remote, ref.relative_path)
+                if path is None:
+                    continue
+                snap = read_preview_snapshot(path)
+            except Exception:
+                continue
+            snap = prepare_display_snapshot(snap, include_limit_row=False)
+            if snap.values:
+                loaded.append(snap)
+        blocks = [block.strip() for block in re.split(r"\n+", text) if block.strip()]
+        if not blocks and not images and not loaded:
+            return None
+        return blocks, images, loaded
+
+    def _insert_note_section(
+        self,
+        doc: Document,
+        anchor: Paragraph,
+        node: TestNode,
+        project_path: Optional[str],
+        leg_name: str = "",
+        remote_root: Optional[str] = None,
+        *,
+        label: Optional[str] = None,
+    ) -> bool:
+        """Text, then images, then tables. Returns False when the note is empty."""
+        parts = self._load_note_parts(node, project_path, leg_name, remote_root)
+        if parts is None:
+            return False
+        blocks, images, loaded = parts
+        if label:
+            self._add_para_before(doc, anchor, label, size=SIZE_BODY)
+        for block in blocks:
+            self._add_para_before(doc, anchor, block, size=SIZE_BODY)
+        if images and blocks:
+            self._add_para_before(doc, anchor, "", size=SIZE_BODY)
+        for index, path in enumerate(images):
+            try:
+                blob = path.read_bytes()
+            except OSError:
+                blob = b""
+            width = self._condition_image_width_in(blob) if blob else CONDITION_IMAGE_MAX_WIDTH_IN
+            self._add_picture_file_before(doc, anchor, path, width)
+            if index < len(images) - 1:
+                self._add_para_before(doc, anchor, "", size=SIZE_BODY)
+        for snap in loaded:
+            self._render_data_table_snapshot(
+                doc,
+                anchor,
+                snap,
+                title="",
+                sample_dxa=_WIDTHS_SAMPLE_RESULT[0],
+                total_dxa=_CONTENT_WIDTH_DXA,
+            )
+        return True
+
+    def append_note_to_cell(self, cell, blocks, images, loaded) -> None:
+        """Extra text lines, then images, then tables. Caller writes ``blocks[0]``."""
+        for block in blocks[1:]:
+            paragraph = cell.add_paragraph()
+            run = paragraph.add_run(block)
+            self._style_run(run, size=SIZE_BODY)
+            self._apply_tight_spacing(paragraph)
+        self._append_note_images_in_cell(cell, images, leading_blank=bool(blocks))
+        for snap in loaded:
+            if blocks or images:
+                spacer = cell.add_paragraph("")
+                self._apply_tight_spacing(spacer)
+            self._render_snapshot_in_cell(cell, snap)
+
+    def _append_note_images_in_cell(self, cell, paths: Sequence[Path], *, leading_blank: bool) -> None:
+        for index, path in enumerate(paths):
+            if leading_blank or index:
+                cell.add_paragraph("")
+            paragraph = cell.add_paragraph()
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            self._apply_tight_spacing(paragraph)
+            try:
+                blob = path.read_bytes()
+            except OSError:
+                blob = b""
+            width = self._condition_image_width_in(blob) if blob else CONDITION_IMAGE_MAX_WIDTH_IN
+            width = min(width, 4.6)
+            try:
+                stream = self._prepare_embed_stream(path, width)
+                run = paragraph.add_run()
+                run.add_picture(stream, width=Inches(width))
+            except Exception as exc:
+                paragraph.add_run(f"[无法插入图片: {path.name}]")
+                print(f"Failed to add note image {path}: {exc}")
+
+    def _render_snapshot_in_cell(self, cell, snap, *, total_dxa: int = 6000) -> None:
+        sample_dxa = min(_WIDTHS_SAMPLE_RESULT[0], max(800, total_dxa // 4))
+        max_content = self._max_data_table_content_cols(
+            sample_dxa=sample_dxa,
+            total_dxa=total_dxa,
+            min_content_dxa=500,
+        )
+        chunks = split_preview_snapshot_for_page(snap, max_content_cols=max_content)
+        for chunk in chunks:
+            rows = len(chunk.values)
+            cols = max((len(row) for row in chunk.values), default=1)
+            table = cell.add_table(rows, cols)
+            try:
+                table.style = "Table Grid"
+            except KeyError:
+                pass
+            widths = self._data_table_col_widths(
+                cols, sample_dxa=sample_dxa, total_dxa=total_dxa
+            )
+            self._set_col_widths(table, widths)
+            self._set_table_fixed_width(table, sum(widths))
+            self._apply_snapshot_merges(table, chunk)
+            slaves = self._merged_slave_cells(chunk)
+            for r_i, row in enumerate(chunk.values):
+                for c_i in range(cols):
+                    if (r_i, c_i) in slaves:
+                        continue
+                    val = row[c_i] if c_i < len(row) else ""
+                    self._set_cell_text(table.rows[r_i].cells[c_i], val)
+            n_header = infer_header_row_count(chunk)
+            for i in range(min(n_header, rows)):
+                self._set_row_as_tbl_header(table.rows[i])
 
     def _evaluation_text(self, node: TestNode) -> str:
         lang = self._lang()

@@ -28,6 +28,7 @@ from src.io.test_photos import (
     test_dir_key,
 )
 from src.io.data_tables import retarget_node_data_tables
+from src.io.test_notes import retarget_node_note_tables
 
 PLACEHOLDER_TEST = "请选择试验..."
 CUSTOM_TEST = CUSTOM_TEST_NAME
@@ -348,6 +349,7 @@ class TestNodeWidget(QFrame):
             self._warn_rename_failed(RENAME_CONFLICT_MESSAGE, old)
             return False
         retarget_node_data_tables(self.node_data, old_key, new_key)
+        retarget_node_note_tables(self.node_data, old_key, new_key)
         return True
 
     def _commit_test_name(self, name):

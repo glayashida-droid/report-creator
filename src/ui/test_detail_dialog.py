@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox, QFileDialog,
 )
 from src.ui.scroll_contain import ContainedTableWidget, ContainedTextEdit
+from src.ui.test_note_panel import TestNotePanel
 from PySide6.QtCore import Qt, QDate, Signal, QTimer, QEvent, QPoint, QObject
 from PySide6.QtGui import QColor, QCursor, QPainter, QPixmap
 from openpyxl.utils import range_boundaries
@@ -1002,11 +1003,27 @@ class TestDetailDialog(QDialog):
         self.drawer_photos.body_layout.addWidget(self.photos_panel)
         layout.addWidget(self.drawer_photos)
 
+        self.drawer_note = DrawerSection("备注/Note", primary=True)
+        remote_root = self._remote_root()
+        self.note_panel = TestNotePanel(
+            self.node_data,
+            project_root,
+            remote_root,
+            leg_name,
+            self.drawer_note,
+        )
+        self.drawer_note._on_expand = self.note_panel.ensure_loaded
+        self.note_panel.changed.connect(self._refresh_note_summary)
+        self.drawer_note.body_layout.addWidget(self.note_panel)
+        layout.addWidget(self.drawer_note)
+
         self.drawer_std.set_expanded(False)
         self.drawer_eq.set_expanded(False)
         self.drawer_sample.set_expanded(False)
         self.drawer_photos.set_expanded(False)
+        self.drawer_note.set_expanded(False)
         self._refresh_photo_summary()
+        self._refresh_note_summary()
 
         self._form_scroll.setWidget(host)
         outer.addWidget(self._form_scroll, stretch=1)
@@ -1128,6 +1145,9 @@ class TestDetailDialog(QDialog):
             standards=standards,
             tester_name=tester,
             data_tables=list(self._data_tables or []),
+            note_text=self.note_panel.text() if hasattr(self, "note_panel") else (self.node_data.note_text or ""),
+            note_tables=self.note_panel.table_refs() if hasattr(self, "note_panel") else list(self.node_data.note_tables or []),
+            note_image_order=self.note_panel.image_order() if hasattr(self, "note_panel") else list(self.node_data.note_image_order or []),
             project_path=str(self._project_root() or ""),
             remote_root=str(self._remote_root() or ""),
             leg_name=self._leg_name(),
@@ -2465,6 +2485,7 @@ class TestDetailDialog(QDialog):
             table.setCellWidget(row, 2, txt_desc)
 
             combo_res = QComboBox()
+            combo_res.setObjectName("sampleResultCombo")
             self._populate_result_combo(combo_res)
             row_result = result
             if slot_info and isinstance(slot_info.get("result"), TestResult):
@@ -2664,6 +2685,11 @@ class TestDetailDialog(QDialog):
         n = table.rowCount() if table is not None else 0
         if hasattr(self, "drawer_sample"):
             self.drawer_sample.set_summary(f"{n} 行" if n else "未添加")
+
+    def _refresh_note_summary(self):
+        if not hasattr(self, "note_panel"):
+            return
+        self.drawer_note.set_summary(self.note_panel.summary_text())
 
     def _refresh_photo_summary(self):
         if not hasattr(self, "photos_panel"):
@@ -3521,6 +3547,8 @@ class TestDetailDialog(QDialog):
     def save_and_close(self):
         if not self._apply_schedule_dates():
             return
+        if hasattr(self, "note_panel"):
+            self.note_panel.commit_to(self.node_data)
 
         self.node_data.commit_standard_selection(self._selected_standards())
         selected_keys = {s.ref_key() for s in self.node_data.resolved_standards()}

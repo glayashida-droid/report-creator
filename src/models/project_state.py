@@ -209,10 +209,36 @@ class TestNode(BaseModel):
     sample_qty: str = ""  # per-test qty on the personal project board
     samples: List[TestSample] = Field(default_factory=list)
     data_tables: List[DataTableRef] = Field(default_factory=list)
+    # Free-form note under the test conclusion. One body for every report language.
+    note_text: str = ""
+    note_tables: List[DataTableRef] = Field(default_factory=list)
+    note_image_order: List[str] = Field(default_factory=list)
     # Manual order of photo album folders under 3.测试组/{Leg名}-{试验名}/; empty → default sort.
     photo_album_order: List[str] = Field(default_factory=list)
     # Manual order of filenames inside each album; missing album → filename sort.
     photo_file_order: Dict[str, List[str]] = Field(default_factory=dict)
+
+    @field_validator("note_text", mode="before")
+    @classmethod
+    def _coerce_note_text(cls, value):
+        if value is None:
+            return ""
+        return str(value)
+
+    @field_validator("note_image_order", mode="before")
+    @classmethod
+    def _coerce_note_image_order(cls, value):
+        if not value or not isinstance(value, (list, tuple)):
+            return []
+        out: List[str] = []
+        seen = set()
+        for raw in value:
+            name = Path(str(raw or "").strip()).name
+            if not name or name in seen:
+                continue
+            out.append(name)
+            seen.add(name)
+        return out
 
     @field_validator("photo_file_order", mode="before")
     @classmethod

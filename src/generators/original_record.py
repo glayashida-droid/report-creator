@@ -62,6 +62,9 @@ class OriginalRecordData:
     standards: List[TestStandard] = field(default_factory=list)
     tester_name: str = ""
     data_tables: List[DataTableRef] = field(default_factory=list)
+    note_text: str = ""
+    note_tables: List[DataTableRef] = field(default_factory=list)
+    note_image_order: List[str] = field(default_factory=list)
     project_path: str = ""
     remote_root: str = ""
     leg_name: str = ""
@@ -108,6 +111,9 @@ def original_record_data_from_node(
         standards=list(node.resolved_standards()),
         tester_name=tester,
         data_tables=list(node.data_tables or []),
+        note_text=getattr(node, "note_text", "") or "",
+        note_tables=list(getattr(node, "note_tables", None) or []),
+        note_image_order=list(getattr(node, "note_image_order", None) or []),
         project_path=str(project_path or ""),
         remote_root=str(remote_root or ""),
         leg_name=(leg_name or "").strip(),
@@ -249,6 +255,7 @@ def generate_original_record(
     _remove_marker_paragraph(doc, RESULT_TABLE_MARKER)
     _fill_data_tables_section(doc, data, template_path=template)
     _fill_test_parameters_section(doc, data.standards or [], template_path=template)
+    _fill_note_section(doc, data, template_path=template)
 
     placeholders = {
         "{{申请单编号}}": data.application_no or "",
@@ -360,6 +367,45 @@ def export_node_original_record(
 def _safe_stem(text: str) -> str:
     cleaned = re.sub(r'[\\/:*?"<>|\s]+', "_", (text or "").strip())
     return cleaned.strip("._")[:80]
+
+
+def _fill_note_section(doc: Document, data: OriginalRecordData, *, template_path: Path) -> None:
+    """Replace the template underline under 备注(note). Leave it when the note is empty."""
+    anchor = _find_note_underline(doc)
+    if anchor is None:
+        return
+    node = TestNode(
+        test_name=(data.test_item or "").strip() or "请选择试验...",
+        note_text=data.note_text or "",
+        note_tables=list(data.note_tables or []),
+        note_image_order=list(data.note_image_order or []),
+    )
+    engine = WordGenerator(str(template_path))
+    inserted = engine._insert_note_section(
+        doc,
+        anchor,
+        node,
+        data.project_path or None,
+        data.leg_name or "",
+        remote_root=data.remote_root or None,
+        label=None,
+    )
+    if inserted:
+        engine._delete_paragraph(anchor)
+
+
+def _find_note_underline(doc: Document) -> Optional[Paragraph]:
+    paras = list(doc.paragraphs)
+    for index, paragraph in enumerate(paras):
+        text = (paragraph.text or "").strip()
+        folded = text.casefold()
+        if not text.startswith("备注") or "note" not in folded:
+            continue
+        for follower in paras[index + 1 : index + 4]:
+            line = (follower.text or "").strip()
+            if line and set(line) <= {"_"}:
+                return follower
+    return None
 
 
 def _fill_test_parameters_section(

@@ -775,7 +775,13 @@ class ElpReportGenerator:
             elif "结果判定" in label:
                 self._write_blue(value_cell, conclusion)
             elif label.startswith("备注"):
-                set_blue_portion(value_cell, "/")
+                self._fill_remark_cell(
+                    value_cell,
+                    node,
+                    project_path=project_path,
+                    remote_root=remote_root,
+                    leg_name=leg_name,
+                )
         self._fill_equipment_rows(detail, node)
         heading = next((el for el in elements if el.tag == qn("w:p")), None)
         if heading is not None and not matched:
@@ -808,6 +814,24 @@ class ElpReportGenerator:
             updated = re.sub(r"7\.\d+", f"7.{index}", raw, count=1)
             if updated != raw:
                 force_black_text(cells[0], updated)
+
+    def _fill_remark_cell(
+        self,
+        cell,
+        node: TestNode,
+        *,
+        project_path: Optional[str],
+        remote_root: Optional[str],
+        leg_name: str,
+    ) -> None:
+        """Put note text, images, and tables into the template 备注 cell. Empty stays '/'."""
+        parts = self._word._load_note_parts(node, project_path, leg_name, remote_root)
+        if parts is None:
+            set_blue_portion(cell, "/")
+            return
+        blocks, images, loaded = parts
+        set_blue_portion(cell, blocks[0] if blocks else "")
+        self._word.append_note_to_cell(cell, blocks, images, loaded)
 
     def _fill_equipment_rows(self, table: Table, node: TestNode) -> None:
         items = list(node.equipments or [])

@@ -107,6 +107,16 @@ def raw_label(zh: str, en: str, language: str) -> str:
     return zh
 
 
+def note_section_label(language: str) -> str:
+    """Heading above a test's free-form note. One body, label follows report language."""
+    lang = (language or "中文").strip()
+    if lang == "英文":
+        return "Note:"
+    if lang == "中英文":
+        return "备注/Note："
+    return "备注："
+
+
 def table_header_label(zh: str, en: str, language: str, *, inline: bool = False) -> str:
     """Word table headers: bilingual zh/en on separate lines unless inline."""
     zh = (zh or "").strip()
