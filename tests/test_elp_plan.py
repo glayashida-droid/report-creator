@@ -2,6 +2,8 @@ from pathlib import Path
 
 from src.io.project_mirror import repo_root
 from src.parsers.elp_plan import (
+    ElpPlan,
+    _parse_hw_sw,
     caption_from_stem,
     elp_names_match,
     extract_plan_number_from_text,
@@ -113,6 +115,33 @@ def test_parse_example_elp_plan_without_ocr():
     with Image.open(io.BytesIO(plan.chapter6_images["work_modes"])) as im:
         # 300 dpi, table plus the 备注 block under it.
         assert im.size[1] > 780
+
+
+def test_parse_hw_sw_maps_na_and_joins_stacked_parts():
+    single = ElpPlan()
+    _parse_hw_sw(
+        single,
+        [
+            ["吉利零部件号", "硬件版本", "软件版本"],
+            ["6608707284", "V1.0", "N/A"],
+        ],
+    )
+    assert single.part_no == "6608707284"
+    assert single.hw_version == "V1.0"
+    assert single.sw_version == "/"
+
+    stacked = ElpPlan()
+    _parse_hw_sw(
+        stacked,
+        [
+            ["吉利零部件号", "硬件版本", "软件版本"],
+            ["6608585460", "01", "N/A"],
+            ["6608585459", "01", "n/a"],
+        ],
+    )
+    assert stacked.part_no == "6608585460"
+    assert stacked.hw_version == "零件6608585460：01，零件6608585459：01"
+    assert stacked.sw_version == "零件6608585460：/，零件6608585459：/"
 
 
 def test_find_elp_plan_in_example_project():

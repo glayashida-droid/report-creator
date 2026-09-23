@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Tuple
 
+from src.io.cancellable_process import run_cancellable
 from src.io.project_mirror import repo_root
 
 _DATE_SUFFIX_RE = re.compile(r"-(\d{8})(?=\.[^.]+$)")
@@ -280,12 +281,36 @@ def probe_result_from_dict(data: dict) -> ProbeResult:
     )
 
 
+def _run_probe_child(run, args, *, input, timeout, env, cwd, cancelled):
+    if cancelled is None:
+        return run(
+            args,
+            input=input,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            cwd=cwd,
+            check=False,
+        )
+    return run_cancellable(
+        args,
+        input=input,
+        timeout=timeout,
+        env=env,
+        cwd=cwd,
+        text=True,
+        cancelled=cancelled,
+    )
+
+
 def isolated_probe_network_sources(
     config: NetworkSourcesConfig,
     *,
     timeout_sec: Optional[float] = None,
     run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
     python_executable: Optional[str] = None,
+    cancelled=None,
 ) -> ProbeResult:
     """Probe in a child process so hung SMB cannot freeze the GUI process."""
     timeout = float(
@@ -299,15 +324,14 @@ def isolated_probe_network_sources(
     cmd = [python_executable or sys.executable, str(Path(__file__).resolve())]
     payload = json.dumps(network_config_to_payload(config), ensure_ascii=False)
     try:
-        completed = run(
+        completed = _run_probe_child(
+            run,
             cmd,
             input=payload,
-            capture_output=True,
-            text=True,
             timeout=max(timeout, 0.1),
             env=env,
             cwd=str(root),
-            check=False,
+            cancelled=cancelled,
         )
     except subprocess.TimeoutExpired:
         return disconnected_probe_result("公盘探测超时")
@@ -469,7 +493,7 @@ def _needs_smb_mount(config: NetworkSourcesConfig) -> bool:
     return False
 
 
-def attempt_mount_network_shares(config: NetworkSourcesConfig) -> None:
+def attempt_mount_network_shares(config: NetworkSourcesConfig, cancelled=None) -> None:
     """On macOS, ask Finder to mount configured SMB shares when they are missing or stale.
 
     Called once after the main window is shown. Periodic probes only check path
@@ -486,7 +510,12 @@ def attempt_mount_network_shares(config: NetworkSourcesConfig) -> None:
         return
     _last_mount_attempt_monotonic = now
     for _share_name, mount_url in shares:
-        subprocess.run(["open", mount_url], check=False)
+        if cancelled is not None and cancelled():
+            return
+        try:
+            subprocess.run(["open", mount_url], check=False, timeout=5)
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def normalize_config_path(value: str) -> str:

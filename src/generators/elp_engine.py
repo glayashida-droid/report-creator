@@ -18,7 +18,6 @@ from src.generators.elp_docx import (
     BLACK_VAL,
     cell_has_blue,
     cell_text,
-    delete_row_cell,
     delete_table,
     delete_table_row,
     fill_result_slot,
@@ -367,6 +366,45 @@ class ElpReportGenerator:
                 if label.startswith(key):
                     self._write_blue(cells[1], val)
                     break
+        to_no = (fields.get("TO号") or state.to_numbers_display or "").strip()
+        if to_no:
+            self._append_to_number_row(table, to_no)
+
+    def _append_to_number_row(self, table: Table, to_no: str) -> None:
+        """Clone 测试结束时间 and put the project TO under it.
+
+        Cloning keeps 宋体小五 and single spacing from the template row.
+        """
+        end_idx = None
+        for idx, row in enumerate(list(table.rows)):
+            cells = unique_cells(row)
+            if cells and cell_text(cells[0]).startswith("测试结束时间"):
+                end_idx = idx
+        if end_idx is None:
+            return
+        insert_cloned_row_after(table, end_idx)
+        cells = unique_cells(table.rows[end_idx + 1])
+        if len(cells) < 2:
+            return
+        self._replace_kept_run_text(cells[0], "TO 号")
+        self._replace_kept_run_text(cells[1], to_no)
+
+    @staticmethod
+    def _replace_kept_run_text(cell, text: str) -> None:
+        """Replace visible text without rebuilding the run, so font size stays."""
+        paragraph = cell.paragraphs[0] if cell.paragraphs else None
+        if paragraph is None:
+            return
+        runs = [run for run in paragraph.runs if not run_has_drawing(run)]
+        value = "" if text is None else str(text)
+        if not runs:
+            ElpReportGenerator._write_blue(cell, value)
+            return
+        runs[0].text = value
+        for run in runs[1:]:
+            run.text = ""
+        for extra in list(cell.paragraphs)[1:]:
+            extra.text = ""
 
     def _fill_lab_and_maker(
         self,
@@ -955,10 +993,13 @@ class ElpReportGenerator:
                 delete_table_row(table, cap_row)
                 delete_table_row(table, img_row)
             if last_used_pair >= 0 and last_pair_used == 1:
-                img_row, cap_row, slots = pairs[last_used_pair]
-                if len(slots) > 1:
-                    delete_row_cell(table.rows[img_row], -1)
-                    delete_row_cell(table.rows[cap_row], -1)
+                _img_row, _cap_row, slots = pairs[last_used_pair]
+                for cap_cell, img_cell in slots[1:]:
+                    force_black_text(img_cell, "/")
+                    if img_cell.paragraphs:
+                        img_cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    set_photo_caption(cap_cell, used + 1, "/")
+                    used += 1
 
     def _collect_photos(
         self,
@@ -1016,7 +1057,9 @@ class ElpReportGenerator:
     @staticmethod
     def _pattern_photos(test_name: str, pattern_dir: Optional[Path]) -> List[Path]:
         if pattern_dir is None:
-            pattern_dir = elp_data_pattern_directory()
+            from src.io.source_mirror import prefer_local_tree
+
+            pattern_dir = prefer_local_tree("elp_data_patten", elp_data_pattern_directory)
         root = Path(pattern_dir)
         try:
             if not root.is_dir() or not test_name:

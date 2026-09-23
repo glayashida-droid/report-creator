@@ -10,6 +10,7 @@ from PySide6.QtGui import QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDro
 
 from src.models.project_state import TestLeg, TestNode
 from src.generators.original_record import (
+    export_leg_original_record,
     export_node_original_record,
     original_record_data_from_node,
     resolve_original_record_template,
@@ -33,6 +34,34 @@ from src.io.test_notes import retarget_node_note_tables
 PLACEHOLDER_TEST = "请选择试验..."
 CUSTOM_TEST = CUSTOM_TEST_NAME
 LEG_CARD_WIDTH = 220
+PRINT_SEPARATE = "separate"
+PRINT_COMBINED = "combined"
+
+
+def _open_exported_record(path, *, reveal: bool) -> None:
+    from src.ui.main_window import _open_in_file_manager
+
+    _open_in_file_manager(Path(path), reveal=reveal)
+
+
+def ask_batch_print_mode(parent, leg_name: str) -> Optional[str]:
+    """整合打印 / 分别打印 / 取消。取消是默认按钮，挡住误点。"""
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Question)
+    box.setWindowTitle("批量打印TR")
+    box.setText(f"打印整条{leg_name}的所有原始记录")
+    box.setInformativeText("分别打印写到各自试验目录；整合打印连成一份 Word，试验之间分页。")
+    btn_combined = box.addButton("整合打印", QMessageBox.AcceptRole)
+    btn_separate = box.addButton("分别打印", QMessageBox.AcceptRole)
+    btn_cancel = box.addButton("取消", QMessageBox.RejectRole)
+    box.setDefaultButton(btn_cancel)
+    box.exec()
+    clicked = box.clickedButton()
+    if clicked is btn_combined:
+        return PRINT_COMBINED
+    if clicked is btn_separate:
+        return PRINT_SEPARATE
+    return None
 
 
 def snap_combo_text_start(combo: QComboBox) -> None:
@@ -67,6 +96,18 @@ def insert_index_for_y(leg_widget, node_widgets, y: int) -> int:
         if y < center:
             return i
     return len(node_widgets)
+
+
+class NoWheelComboBox(QComboBox):
+    """Test-name field is chosen by click or typing. Wheel must not change it.
+
+    Fusion steps a focused combo's current item on wheel. The inner line edit
+    ignores that event, so the combo still receives it after the pointer has
+    left the card.
+    """
+
+    def wheelEvent(self, event):
+        event.ignore()
 
 
 def fill_test_combo(combo: QComboBox, pool: list, current_test: str = ""):
@@ -118,7 +159,7 @@ class TestNodeWidget(QFrame):
         top_row.setContentsMargins(0, 0, 0, 0)
         top_row.setSpacing(4)
 
-        self.combo = QComboBox()
+        self.combo = NoWheelComboBox()
         self.combo.setObjectName("nodeTestCombo")
         self.combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.combo.setEditable(True)
@@ -643,14 +684,8 @@ class LegWidget(QFrame):
                 "🙋‍♂️尚有试验未维护完整，请全部维护后打印",
             )
             return
-        reply = QMessageBox.question(
-            self,
-            "批量打印TR",
-            f"🙋‍♀️是否打印整条{self.leg_data.leg_name}的所有原始记录？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
+        mode = ask_batch_print_mode(self, self.leg_data.leg_name)
+        if mode not in (PRINT_SEPARATE, PRINT_COMBINED):
             return
         host = self._main_window()
         try:
@@ -663,19 +698,34 @@ class LegWidget(QFrame):
         state = self._project_state()
         project_path = str(self._project_root() or "")
         remote_root = str(self._remote_root() or "")
+        record = getattr(host, "_record_usage_original_record", None) if host is not None else None
+        if mode == PRINT_COMBINED:
+            self._print_records_combined(
+                nodes, state, project_path, remote_root, template, record
+            )
+            return
+        self._print_records_separately(
+            nodes, state, project_path, remote_root, template, record
+        )
+
+    def _node_record(self, node, state, project_path: str, remote_root: str):
+        return original_record_data_from_node(
+            node,
+            leg_name=self.leg_data.leg_name,
+            state=state,
+            project_path=project_path,
+            remote_root=remote_root,
+        )
+
+    def _print_records_separately(
+        self, nodes, state, project_path, remote_root, template, record
+    ) -> None:
         successes: List[str] = []
         failures: List[str] = []
-        record = getattr(host, "_record_usage_original_record", None) if host is not None else None
         for node in nodes:
             name = (node.test_name or "").strip() or "（未命名试验）"
             try:
-                data = original_record_data_from_node(
-                    node,
-                    leg_name=self.leg_data.leg_name,
-                    state=state,
-                    project_path=project_path,
-                    remote_root=remote_root,
-                )
+                data = self._node_record(node, state, project_path, remote_root)
                 out_path = export_node_original_record(data, template_path=template)
             except Exception as exc:
                 failures.append(f"{name}：{exc}")
@@ -683,6 +733,39 @@ class LegWidget(QFrame):
             successes.append(str(out_path))
             if callable(record):
                 record()
+        self._report_batch_print(successes, failures)
+
+    def _print_records_combined(
+        self, nodes, state, project_path, remote_root, template, record
+    ) -> None:
+        try:
+            records = [
+                self._node_record(node, state, project_path, remote_root) for node in nodes
+            ]
+            out_path = export_leg_original_record(records, template_path=template)
+        except Exception as exc:
+            QMessageBox.critical(self, "导出失败", f"未能生成原始记录：\n{exc}")
+            return
+        if callable(record):
+            record()
+        self._show_combined_record_ready(out_path)
+
+    def _show_combined_record_ready(self, out_path) -> None:
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Information)
+        msg.setWindowTitle("批量打印TR")
+        msg.setText(f"已生成 1 份原始记录：\n{out_path}")
+        btn_open = msg.addButton("打开原始记录", QMessageBox.ActionRole)
+        btn_folder = msg.addButton("打开所在文件夹", QMessageBox.ActionRole)
+        msg.addButton(QMessageBox.Ok)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked is btn_open:
+            _open_exported_record(out_path, reveal=False)
+        elif clicked is btn_folder:
+            _open_exported_record(out_path, reveal=True)
+
+    def _report_batch_print(self, successes: List[str], failures: List[str]) -> None:
         if failures and not successes:
             QMessageBox.critical(
                 self,

@@ -41,7 +41,9 @@ _WPS_APP_NAMES = ("wpsoffice", "WPS Office", "kingsoft")
 
 
 def default_templates_dir() -> Path:
-    return data_table_templates_directory()
+    from src.io.source_mirror import prefer_local_tree
+
+    return prefer_local_tree("data_tables", data_table_templates_directory)
 
 
 class DataTableError(Exception):

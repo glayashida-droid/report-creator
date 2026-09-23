@@ -2,7 +2,7 @@ import sys
 
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPushButton
 
 from src.models.project_state import TestNode
 from src.ui.test_detail_dialog import TestDetailDialog, _is_blank_node_date
@@ -67,6 +67,30 @@ def test_one_blank_date_saves():
     assert dlg._apply_schedule_dates() is True
     assert dlg.node_data.start_date == "2026-09-03"
     assert dlg.node_data.end_date is None
+    dlg.close()
+
+
+def test_enter_does_not_click_save_cancel_or_print():
+    _app()
+    dlg = TestDetailDialog(TestNode(test_name="高温"), [], [])
+    dlg.show()
+    QApplication.processEvents()
+    hits = []
+    for btn in dlg.findChildren(QPushButton):
+        if btn.text() in ("保存", "取消", "打印TR"):
+            btn.clicked.connect(lambda _checked=False, name=btn.text(): hits.append(name))
+            assert btn.autoDefault() is False
+            assert btn.isDefault() is False
+    dlg.txt_env_condition.setFocus()
+    QTest.keyClick(dlg.txt_env_condition, Qt.Key_Return)
+    QTest.keyClick(dlg.txt_env_condition, Qt.Key_Enter)
+    for btn in dlg.findChildren(QPushButton):
+        if btn.text() in ("保存", "取消", "打印TR"):
+            btn.setFocus()
+            QTest.keyClick(btn, Qt.Key_Return)
+    QApplication.processEvents()
+    assert hits == []
+    assert dlg.isVisible()
     dlg.close()
 
 

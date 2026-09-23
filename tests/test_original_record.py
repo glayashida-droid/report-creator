@@ -11,13 +11,16 @@ from openpyxl import Workbook
 
 from src.generators.original_record import (
     OriginalRecordData,
+    build_original_record_document,
     default_output_path,
+    export_leg_original_record,
     export_node_original_record,
     format_id_range,
     format_share_path_for_record,
     format_test_period,
     generate_original_record,
     original_record_data_from_node,
+    resolve_combined_original_record_folder,
     resolve_original_record_folder,
     resolve_original_record_template,
     stack_standard_blocks,
@@ -584,3 +587,105 @@ def test_generate_original_record_splits_wide_five_point_table(tmp_path: Path):
         assert max(content) - min(content) <= len(content)  # drift on last col
         assert len(content) % 3 == 0
         assert all(w == content[0] for w in content[:-1])
+
+
+def _png(color: tuple[int, int, int]) -> bytes:
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (40, 20), color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _blip_ids(doc: Document) -> list[str]:
+    return [
+        blip.get(qn("r:embed"))
+        for blip in doc.element.findall(".//" + qn("a:blip"))
+        if blip.get(qn("r:embed"))
+    ]
+
+
+def _content_children(doc: Document):
+    return [child for child in doc.element.body if child.tag != qn("w:sectPr")]
+
+
+def _is_bare_page_break(child) -> bool:
+    if child.tag != qn("w:p"):
+        return False
+    breaks = list(child.iter(qn("w:br")))
+    return (
+        len(breaks) == 1
+        and breaks[0].get(qn("w:type")) == "page"
+        and not "".join(child.itertext()).strip()
+    )
+
+
+def test_resolve_combined_folder_prefers_remote(tmp_path: Path):
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    local.mkdir()
+    remote.mkdir()
+    folder = resolve_combined_original_record_folder(local, remote)
+    assert folder == remote / TEST_GROUP_DIR
+    assert resolve_combined_original_record_folder(local, tmp_path / "missing") == (
+        local / TEST_GROUP_DIR
+    )
+    assert resolve_combined_original_record_folder(None, None) is None
+
+
+def test_export_leg_original_record_stacks_with_page_break(tmp_path: Path):
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    local.mkdir()
+    remote.mkdir()
+    heat = OriginalRecordData(
+        application_no="A1",
+        test_item="高温试验",
+        leg_name="Leg 1",
+        project_path=str(local),
+        remote_root=str(remote),
+        standards=[StdModel(test_name="高温试验", standard_desc="高温条件", images=[_png((10, 20, 30))])],
+    )
+    dust = OriginalRecordData(
+        application_no="A1",
+        test_item="沙尘试验",
+        leg_name="Leg 1",
+        project_path=str(local),
+        remote_root=str(remote),
+        standards=[StdModel(test_name="沙尘试验", standard_desc="沙尘条件", images=[_png((200, 10, 10))])],
+    )
+    out = export_leg_original_record([heat, dust], template_path=TEMPLATE)
+    assert out.parent == remote / TEST_GROUP_DIR
+    assert out.name == "A1_Leg_1_原始记录.docx"
+    assert not list((remote / TEST_GROUP_DIR).glob("*/*.docx"))
+
+    doc = Document(str(out))
+    heat_doc = build_original_record_document(heat, template_path=TEMPLATE)
+    dust_doc = build_original_record_document(dust, template_path=TEMPLATE)
+    merged = _content_children(doc)
+    heat_n = len(_content_children(heat_doc))
+    dust_n = len(_content_children(dust_doc))
+    assert len(merged) == heat_n + 1 + dust_n
+    assert _is_bare_page_break(merged[heat_n])
+    assert "".join(merged[heat_n - 1].itertext()) == "".join(
+        _content_children(heat_doc)[-1].itertext()
+    )
+    assert "".join(merged[heat_n + 1].itertext()) == "".join(
+        _content_children(dust_doc)[0].itertext()
+    )
+    before = "".join("".join(child.itertext()) for child in merged[:heat_n])
+    after = "".join("".join(child.itertext()) for child in merged[heat_n + 1 :])
+    assert "高温试验" in before and "沙尘试验" not in before
+    assert "沙尘试验" in after
+    embeds = _blip_ids(doc)
+    assert len(embeds) >= 2
+    blobs = []
+    for rid in embeds:
+        assert rid in doc.part.rels
+        blobs.append(doc.part.rels[rid].target_part.blob)
+    assert len(set(blobs)) >= 2
+
+    again = export_leg_original_record([heat], template_path=TEMPLATE)
+    assert again.name == "A1_Leg_1_原始记录-2.docx"

@@ -145,7 +145,9 @@ def _parse_sheet_rows(ws) -> List[SpecialRuleRow]:
 
 def load_special_rules(path: Optional[Path] = None) -> List[SpecialRuleRow]:
     if path is None:
-        folder = report_templates_directory()
+        from src.io.source_mirror import prefer_local_tree
+
+        folder = prefer_local_tree("report_templates", report_templates_directory)
         path = folder / _SPECIAL_FILENAME if folder else None
     if path is None or not path.is_file():
         return []

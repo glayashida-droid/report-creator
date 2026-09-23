@@ -1170,6 +1170,11 @@ QComboBox#bulkResultCombo {{
     combobox-popup: 1;
 }}
 
+QComboBox#sampleResultCombo {{
+    padding: 1px 4px;
+    min-height: 0px;
+}}
+
 QComboBox QAbstractItemView::item {{
     min-height: 20px;
     padding: 2px 6px;
@@ -1492,7 +1497,24 @@ QCheckBox#connectionStatus::indicator:checked:disabled {{
 """
 
 
+def _cyan_question_style():
+    """Fusion, with the question-dialog icon drawn as the cyan circle."""
+    from PySide6.QtGui import QIcon
+    from PySide6.QtWidgets import QProxyStyle, QStyle
+
+    class CyanQuestionStyle(QProxyStyle):
+        def standardIcon(self, standard_icon, option=None, widget=None):
+            if standard_icon == QStyle.StandardPixmap.SP_MessageBoxQuestion:
+                return QIcon(question_pixmap())
+            return super().standardIcon(standard_icon, option, widget)
+
+    return CyanQuestionStyle("Fusion")
+
+
 def apply_cyberpunk_theme(app):
     """Apply the cyberpunk QSS to a QApplication."""
-    app.setStyle("Fusion")
+    # Keep the Python wrapper alive: QApplication deletes the C++ style on
+    # the next setStyle, and a dropped wrapper would dangle.
+    app._cyan_question_style = _cyan_question_style()
+    app.setStyle(app._cyan_question_style)
     app.setStyleSheet(CYBERPUNK_QSS + _connection_status_indicator_qss())

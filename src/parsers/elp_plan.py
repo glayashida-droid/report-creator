@@ -404,16 +404,31 @@ def _parse_basic_info(plan: ElpPlan, table: Sequence[Sequence[str]]) -> None:
         i += 1
 
 
+def _na_to_slash(value: str) -> str:
+    text = (value or "").strip()
+    if text.casefold() == "n/a":
+        return "/"
+    return text
+
+
 def _parse_hw_sw(plan: ElpPlan, table: Sequence[Sequence[str]]) -> None:
-    if len(table) < 2:
+    rows: List[Tuple[str, str, str]] = []
+    for row in table[1:]:
+        part = (row[0] if row else "").strip()
+        hw = _na_to_slash(row[1] if len(row) > 1 else "")
+        sw = _na_to_slash(row[2] if len(row) > 2 else "")
+        if not part and not hw and not sw:
+            continue
+        rows.append((part, hw, sw))
+    if not rows:
         return
-    values = table[1]
-    if len(values) >= 1:
-        plan.part_no = values[0]
-    if len(values) >= 2:
-        plan.hw_version = values[1]
-    if len(values) >= 3:
-        plan.sw_version = values[2]
+    plan.part_no = next((part for part, _hw, _sw in rows if part), "")
+    if len(rows) == 1:
+        plan.hw_version = rows[0][1]
+        plan.sw_version = rows[0][2]
+        return
+    plan.hw_version = "，".join(f"零件{part}：{hw}" for part, hw, _sw in rows)
+    plan.sw_version = "，".join(f"零件{part}：{sw}" for part, _hw, sw in rows)
 
 
 def _parse_work_mode_defs(plan: ElpPlan, table: Sequence[Sequence[str]]) -> None:

@@ -15,10 +15,13 @@ from PySide6.QtWidgets import (
     QLineEdit, QPushButton, QGroupBox, QSplitter, QComboBox, QMessageBox,
     QDateEdit, QFileDialog, QFormLayout, QScrollArea, QSizePolicy, QFrame,
     QInputDialog, QButtonGroup, QToolButton, QDialog, QCheckBox,
-    QStackedWidget, QStyle, QStyleOptionButton, QProgressBar,
+    QStackedWidget, QStyle, QStyleOptionButton,
 )
-from PySide6.QtCore import Qt, QDate, QThread, Signal, QEvent, QObject, QSize, QTimer
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtCore import (
+    Qt, QDate, QThread, Signal, QEvent, QObject, QSize, QTimer,
+    QPropertyAnimation, QEasingCurve, QPoint,
+)
+from PySide6.QtGui import QBitmap, QColor, QPainter, QPainterPath, QPen
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
@@ -53,6 +56,8 @@ from src.io.sample_files import application_not_found_hint, find_sample_files
 from src.io.network_sources import (
     ELP_REPORT_LANGUAGE,
     REPORT_LANGUAGE_CHOICES,
+    SOURCE_CONFIGURED,
+    SOURCE_MIXED,
     NetworkSourcesConfig,
     ProbeResult,
     attempt_mount_network_shares,
@@ -60,8 +65,6 @@ from src.io.network_sources import (
     disconnected_probe_result,
     isolated_probe_network_sources,
     load_network_sources_config,
-    resolve_elp_report_template,
-    resolve_report_template_for_language,
 )
 from src.io.special_rules import profile_from_state, refresh_special_profile, state_has_forbidden_na
 from src.io.usage_stats import (
@@ -202,15 +205,21 @@ class NetworkProbeWorker(QThread):
 
     def run(self):
         run_in_background()
+        from src.io.cancellable_process import ProcessCancelled
+
         try:
-            self.finished.emit(
-                isolated_probe_network_sources(
-                    self._config,
-                    timeout_sec=self._config.connection_check.probe_timeout_sec,
-                )
+            result = isolated_probe_network_sources(
+                self._config,
+                timeout_sec=self._config.connection_check.probe_timeout_sec,
+                cancelled=self.isInterruptionRequested,
             )
+        except ProcessCancelled:
+            return
         except Exception as exc:
-            self.finished.emit(disconnected_probe_result(str(exc)))
+            result = disconnected_probe_result(str(exc))
+        if self.isInterruptionRequested():
+            return
+        self.finished.emit(result)
 
 
 class MirrorWorker(QThread):
@@ -320,134 +329,371 @@ class _MountWorker(QThread):
     def run(self):
         run_in_background()
         try:
-            attempt_mount_network_shares(self._config)
+            attempt_mount_network_shares(
+                self._config, cancelled=self.isInterruptionRequested
+            )
         except Exception:
             pass
+
+
+class _UsageFlushWorker(QThread):
+    """Write usage JSON and the公盘 CSVs without blocking the UI thread."""
+
+    def __init__(self, tracker, now, closing: bool, config, parent=None):
+        super().__init__(parent)
+        self._tracker = tracker
+        self._now = now
+        self._closing = closing
+        self._config = config
+
+    def run(self):
+        run_in_background()
+        try:
+            remote = resolve_usage_directory(self._config)
+        except Exception:
+            remote = None
+        job = self._tracker.capture_flush(
+            self._now, closed=self._closing, remote_dir=remote
+        )
+        if job is not None:
+            from src.io.usage_stats import commit_usage_flush
+
+            commit_usage_flush(job)
 
 
 class ImportWarmWorker(QThread):
     """Import heavy export modules off the UI thread, one at a time."""
 
-    def __init__(self, names: list, parent=None):
+    finished_ok = Signal()
+
+    def __init__(self, names: list, stop: threading.Event, parent=None):
         super().__init__(parent)
         self._names = list(names)
+        self._stop = stop
 
     def run(self):
+        run_in_background()
         for name in self._names:
-            if self.isInterruptionRequested():
+            if self._stop.is_set() or self.isInterruptionRequested():
                 return
             try:
                 __import__(name)
             except Exception:
                 pass
-            time.sleep(0.02)
+            # Let the cover's animation and caption timer run between modules.
+            time.sleep(0.05)
+        if not self._stop.is_set():
+            self.finished_ok.emit()
+
+
+class SourceMirrorWorker(QThread):
+    """Copy changed公盘 templates onto the local templates/ tree."""
+
+    finished_sync = Signal(object)
+
+    def __init__(self, config, parent=None):
+        super().__init__(parent)
+        self._config = config
+
+    def run(self):
+        run_in_background()
+        from src.io.source_mirror import SourceMirrorResult, sync_source_mirror
+
+        try:
+            result = sync_source_mirror(
+                self._config, cancelled=self.isInterruptionRequested
+            )
+        except Exception as exc:
+            result = SourceMirrorResult(error=str(exc))
+        if self.isInterruptionRequested():
+            return
+        self.finished_sync.emit(result)
 
 
 class CatalogWarmWorker(QThread):
-    """Read standards and equipment workbooks off the UI thread."""
+    """Read standards and equipment workbooks in a child process."""
 
-    ready = Signal(object, object, str)
+    ready = Signal(object)
 
-    def __init__(self, loader, parent=None):
+    def __init__(self, standards_path, equipment_path, parent=None):
         super().__init__(parent)
-        self._loader = loader
+        self._standards_path = standards_path or None
+        self._equipment_path = equipment_path or None
 
     def run(self):
-        loader = self._loader
-        standards = []
-        equipments = []
-        error = ""
-        if loader.is_standards_ready:
-            try:
-                standards = loader.load_standards()
-            except DuplicateStandardError as exc:
-                error = duplicate_standard_message(exc)
-            except Exception:
-                standards = []
-        if self.isInterruptionRequested():
-            self.ready.emit(standards, equipments, error)
+        run_in_background()
+        from src.io.preload_child import isolated_load_catalogs
+
+        from src.io.cancellable_process import ProcessCancelled
+
+        try:
+            payload = isolated_load_catalogs(
+                self._standards_path,
+                self._equipment_path,
+                cancelled=self.isInterruptionRequested,
+            )
+        except ProcessCancelled:
             return
-        time.sleep(0.05)
-        if loader.is_equipment_ready:
-            try:
-                equipments = loader.load_equipments()
-            except Exception:
-                equipments = []
-        self.ready.emit(standards, equipments, error)
+        except Exception as exc:
+            from src.io.preload_child import _empty_catalog
+
+            payload = _empty_catalog()
+            payload["standards_error"] = str(exc)
+            payload["equipments_error"] = str(exc)
+        if self.isInterruptionRequested():
+            return
+        self.ready.emit(payload)
 
 
-_STARTUP_COVER_MS = 5000
-_STARTUP_COVER_LINES = (
-    "💻程序加载中🦽",
-    "💽公盘连接就绪",
-    "📝模板加载就绪",
-    "\U0001f469\U0001f3fc\u200d\U0001f9b0欢迎使用Report Creator",
+_IMPORT_MODULES = (
+    "docx",
+    "pdfplumber",
+    "src.generators.word_engine",
+    "src.generators.elp_engine",
+    "src.parsers.elp_plan",
 )
 
+_COVER_FRAME_MS = 40
+_COVER_FINISH_MS = 180
+_COVER_NETWORK_BUDGET_MS = 12000
+_COVER_NETWORK_RETRY_MS = 700
+_COVER_ICON = "\U0001f469\U0001f3fc\u200d\U0001f9b0"
+_COVER_PRODUCT = "Report Creator"
 
-class StartupCover(QDialog):
-    """Five-second cover while startup reads finish behind it."""
+
+def startup_cover_line(tester_name: str = "") -> str:
+    """Greeting on the startup cover. Name comes from the saved default tester."""
+    name = (tester_name or "").strip()
+    if name:
+        return f"{_COVER_ICON}你好，{name}，欢迎使用{_COVER_PRODUCT}"
+    return f"{_COVER_ICON}欢迎使用{_COVER_PRODUCT}"
+
+
+_STARTUP_COVER_LINE = startup_cover_line()
+
+
+class _CoverMarqueeBar(QWidget):
+    """Comet sweeping a rounded track.
+
+    Position is a Qt property animation, so the sweep keeps moving while
+    Python imports hold the GIL. Painting stays in the style engine.
+    """
+
+    _COMET_MS = 980
+    _GHOST_MS = 1700
+    _GHOST_BG = (
+        "qlineargradient(x1:0, y1:0, x2:1, y2:0,"
+        " stop:0 rgba(0, 255, 255, 0),"
+        " stop:0.28 rgba(0, 255, 255, 0.22),"
+        " stop:0.68 rgba(0, 255, 255, 0.62),"
+        " stop:1 rgba(0, 255, 255, 0))"
+    )
+    _COMET_BG = (
+        "qlineargradient(x1:0, y1:0, x2:1, y2:0,"
+        " stop:0 rgba(0, 255, 255, 0),"
+        " stop:0.22 rgba(0, 255, 255, 0.45),"
+        " stop:0.58 #00FFFF,"
+        " stop:0.84 #7FFFFF,"
+        " stop:1 #FFFFFF)"
+    )
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("coverMarquee")
+        self.setFixedHeight(22)
+        self.setStyleSheet(
+            "QWidget#coverMarquee { background: transparent; }"
+            f"QFrame#coverMarqueeTrack {{ background-color: {BG_INPUT};"
+            f" border: 1px solid {OVERDUE}; border-radius: 11px; }}"
+            "QWidget#coverMarqueeClip { background: transparent; border: none; }"
+        )
+        self._sliding = True
+        self._value = 0
+        self._sweep_started = False
+        self._mask_key = None
+        self._track = QFrame(self)
+        self._track.setObjectName("coverMarqueeTrack")
+        self._track.setAttribute(Qt.WA_StyledBackground, True)
+        self._clip = QWidget(self._track)
+        self._clip.setObjectName("coverMarqueeClip")
+        self._ghost = QFrame(self._clip)
+        self._ghost.setObjectName("coverMarqueeGhost")
+        self._beam = QFrame(self._clip)
+        self._beam.setObjectName("coverMarqueeBeam")
+        self._beam.setAttribute(Qt.WA_StyledBackground, True)
+        self._ghost.setAttribute(Qt.WA_StyledBackground, True)
+        self._anim = self._make_sweep(self._beam, self._COMET_MS)
+        self._ghost_anim = self._make_sweep(self._ghost, self._GHOST_MS)
+
+    def value(self) -> int:
+        return self._value
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._fit_chrome()
+        if self._sliding and not self._sweep_started:
+            QTimer.singleShot(0, self._begin_sweep)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_chrome()
+
+    def stop_and_fill(self):
+        self._sliding = False
+        self._value = 1
+        self._sweep_started = True
+        self._anim.stop()
+        self._ghost_anim.stop()
+        self._ghost.hide()
+        self._fit_chrome()
+        clip = self._clip.geometry()
+        if clip.width() <= 2 or clip.height() <= 2:
+            return
+        radius = max(1, clip.height() // 2)
+        self._beam.setGeometry(0, 0, clip.width(), clip.height())
+        self._beam.setStyleSheet(self._pill("coverMarqueeBeam", CYAN, radius))
+        self._beam.show()
+
+    def _begin_sweep(self):
+        """Start once, after the track has its real width. Later layouts do not rewind it."""
+        if not self._sliding or self._sweep_started:
+            return
+        self._fit_chrome()
+        clip = self._clip.geometry()
+        if clip.width() <= 2 or clip.height() <= 2:
+            if self.isVisible():
+                QTimer.singleShot(0, self._begin_sweep)
+            return
+        self._sweep_started = True
+        radius = max(1, clip.height() // 2)
+        ghost_w = max(int(clip.width() * 0.72), 64)
+        beam_w = max(int(clip.width() * 0.42), 40)
+        self._ghost.setStyleSheet(self._pill("coverMarqueeGhost", self._GHOST_BG, radius))
+        self._ghost.setGeometry(0, 0, ghost_w, clip.height())
+        self._ghost.show()
+        self._beam.setStyleSheet(self._pill("coverMarqueeBeam", self._COMET_BG, radius))
+        self._beam.setGeometry(0, 0, beam_w, clip.height())
+        self._beam.show()
+        self._start_sweep(self._ghost_anim, -ghost_w, clip.width())
+        self._start_sweep(self._anim, -beam_w, clip.width())
+
+    def _make_sweep(self, widget, duration: int) -> QPropertyAnimation:
+        anim = QPropertyAnimation(widget, b"pos", self)
+        anim.setDuration(duration)
+        anim.setEasingCurve(QEasingCurve.Linear)
+        anim.setLoopCount(-1)
+        return anim
+
+    def _fit_chrome(self):
+        width, height = self.width(), self.height()
+        if width <= 2 or height <= 2:
+            return
+        self._track.setGeometry(0, 0, width, height)
+        clip = self._track.rect().adjusted(3, 3, -3, -3)
+        if clip.width() <= 2 or clip.height() <= 2:
+            return
+        self._clip.setGeometry(clip)
+        self._apply_clip_mask()
+
+    def _start_sweep(self, anim: QPropertyAnimation, start_x: int, end_x: int):
+        anim.stop()
+        anim.setStartValue(QPoint(start_x, 0))
+        anim.setEndValue(QPoint(end_x, 0))
+        anim.start()
+
+    def _apply_clip_mask(self):
+        size = self._clip.size()
+        key = (size.width(), size.height())
+        if key == self._mask_key or key[0] <= 1 or key[1] <= 1:
+            return
+        self._mask_key = key
+        bitmap = QBitmap(size)
+        bitmap.clear()
+        painter = QPainter(bitmap)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(Qt.color1)
+        radius = size.height() / 2.0
+        painter.drawRoundedRect(0, 0, size.width(), size.height(), radius, radius)
+        painter.end()
+        self._clip.setMask(bitmap)
+
+    @staticmethod
+    def _pill(name: str, background: str, radius: int) -> str:
+        return (
+            f"QFrame#{name} {{ background: {background}; border: none;"
+            f" border-radius: {radius}px; }}"
+        )
+
+
+class StartupCover(QDialog):
+    """Cover shown before preload. Closes when that preload finishes."""
+
+    def __init__(self, parent=None, tester_name: str = ""):
+        super().__init__(parent)
+        self._on_close = None
+        self._prep_done = False
+        self._finished = False
         self.setWindowTitle("Report Creator")
         self.setModal(True)
         self.setWindowModality(Qt.ApplicationModal)
         self.setWindowFlag(Qt.WindowCloseButtonHint, False)
-        self.setFixedSize(560, 176)
+        self.setFixedSize(560, 200)
         self.setStyleSheet(
-            f"QDialog {{ background-color: {BG}; border: 1px solid {OVERDUE}; }}"
+            f"QDialog {{ background-color: {BG}; border: none; }}"
+            f"QFrame#startupCoverFrame {{ background-color: {BG};"
+            f" border: 1px solid {OVERDUE}; border-radius: 10px; }}"
             f"QLabel {{ color: {CYAN}; background: transparent; border: none;"
             f" font-size: 18px; }}"
-            f"QProgressBar {{ background-color: {BG_INPUT}; color: {TEXT};"
-            f" border: 1px solid {OVERDUE}; border-radius: 9px; text-align: center; }}"
-            f"QProgressBar::chunk {{ background-color: {CYAN}; border-radius: 8px; }}"
         )
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 22, 22, 22)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 12, 12, 12)
+        frame = QFrame()
+        frame.setObjectName("startupCoverFrame")
+        frame.setFrameShape(QFrame.NoFrame)
+        frame.setAttribute(Qt.WA_StyledBackground, True)
+        outer.addWidget(frame)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(16)
-        self._label = QLabel(_STARTUP_COVER_LINES[0])
+        self._label = QLabel(startup_cover_line(tester_name))
         self._label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self._label)
-        self._bar = QProgressBar()
-        self._bar.setRange(0, _STARTUP_COVER_MS)
-        self._bar.setValue(0)
-        self._bar.setTextVisible(False)
-        self._bar.setFixedHeight(18)
+        self._bar = _CoverMarqueeBar()
         layout.addWidget(self._bar)
-        self._started = time.monotonic()
-        self._last_line_at = None
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
-        self._timer.start(40)
+        self._on_shown = None
+        self._shown = False
 
-    def _tick(self):
-        elapsed = int((time.monotonic() - self._started) * 1000)
-        shown = min(elapsed, _STARTUP_COVER_MS)
-        self._bar.setValue(shown)
-        if elapsed >= _STARTUP_COVER_MS:
-            index = len(_STARTUP_COVER_LINES) - 1
-        else:
-            index = min(
-                shown * len(_STARTUP_COVER_LINES) // _STARTUP_COVER_MS,
-                len(_STARTUP_COVER_LINES) - 1,
-            )
-        self._label.setText(_STARTUP_COVER_LINES[index])
-        if index == len(_STARTUP_COVER_LINES) - 1 and self._last_line_at is None:
-            self._last_line_at = time.monotonic()
-        if (
-            self._last_line_at is not None
-            and elapsed >= _STARTUP_COVER_MS
-            and (time.monotonic() - self._last_line_at) >= 1.25
-        ):
-            self._timer.stop()
-            self.accept()
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._shown:
+            return
+        self._shown = True
+        if self._on_shown is not None:
+            QTimer.singleShot(_COVER_FRAME_MS, self._on_shown)
+
+    def mark_prep_done(self):
+        """Preload finished. Fill the bar, then close after a short beat."""
+        if self._prep_done:
+            return
+        self._prep_done = True
+        self._bar.stop_and_fill()
+        QTimer.singleShot(_COVER_FINISH_MS, self._finish)
+
+    def _finish(self):
+        if self._finished:
+            return
+        self._finished = True
+        self._bar.stop_and_fill()
+        callback = self._on_close
+        if callback is not None:
+            callback()
+        self.accept()
 
     def reject(self):
         return
 
 
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 # Calendar popup floor. Dates before this are treated as "no end date"
 # because QDateEdit may clamp the blank sentinel to 1752-09-14.
 _EARLIEST_REAL_YEAR = 1990
@@ -562,6 +808,13 @@ def _templates_tooltip(result: ProbeResult, config: NetworkSourcesConfig) -> str
     return "\n".join(lines)
 
 
+def _qthread_running(worker) -> bool:
+    try:
+        return bool(worker.isRunning())
+    except RuntimeError:
+        return False
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -596,14 +849,27 @@ class MainWindow(QMainWindow):
         self._sync_worker = None  # type: Optional[NightlySyncWorker]
         self._elp_prep_worker = None  # type: Optional[ElpExportPrepWorker]
         self._catalog_warm_worker = None  # type: Optional[CatalogWarmWorker]
-        self._import_worker = None  # type: Optional[ImportWarmWorker]
+        self._source_mirror_worker = None  # type: Optional[SourceMirrorWorker]
+        self._source_mirror_started = False
         self._mount_worker = None  # type: Optional[_MountWorker]
         self._hold_tester_prompt = False
+        self._startup_cover = None
+        self._import_worker = None  # type: Optional[ImportWarmWorker]
+        self._imports_done = False
+        self._import_stop = threading.Event()
+        self._catalog_settled = False
+        self._network_probe_seen = False
+        self._cover_waits_for_network = False
+        self._cover_network_ready = False
+        self._cover_network_deadline = 0.0
         self._catalog_waiters = []
         self._catalog_warm_wanted = False
         self._catalog_warm_finished = False
+        self._catalog_epoch = 0
         self._catalog_error = ""
         self._combo_warmed = False
+        self._shutting_down = False
+        self._close_waiting = False
         self._nightly_sync_timer = QTimer(self)
         self._nightly_sync_timer.setInterval(30_000)
         self._nightly_sync_timer.timeout.connect(self._on_nightly_sync_tick)
@@ -612,6 +878,9 @@ class MainWindow(QMainWindow):
         self.init_ui()
         self._refresh_tester_title_label()
         self._usage_tracker = None  # type: Optional[UsageTracker]
+        self._usage_flush_worker = None  # type: Optional[_UsageFlushWorker]
+        self._usage_flush_again = False
+        self._usage_flush_close = False
         self._usage_heartbeat = QTimer(self)
         self._usage_heartbeat.setInterval(120_000)
         self._usage_heartbeat.timeout.connect(self._on_usage_heartbeat)
@@ -1050,31 +1319,97 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._ensure_usage_tracker)
 
     def present_startup_cover(self):
-        """Block the main window for five seconds while the remaining prep runs."""
+        """Show the cover, preload, and mount公盘. Close once those are ready."""
         self._hold_tester_prompt = True
-        self._start_startup_prep()
-        cover = StartupCover(self)
+        self._import_stop.clear()
+        cover = StartupCover(self, tester_name=self._session_tester_name)
+        cover._on_close = self._on_startup_cover_closing
+        cover._on_shown = self._on_cover_shown
+        self._startup_cover = cover
         cover.exec()
+        self._startup_cover = None
         self._hold_tester_prompt = False
+        if self._shutting_down:
+            return
         if self._tester_prompt_pending:
             self._tester_prompt_pending = False
             QTimer.singleShot(0, self._prompt_tester_name)
         elif self._session_tester_name:
             QTimer.singleShot(0, self._ensure_usage_tracker)
-
-    def _start_startup_prep(self):
-        """Read catalogs, import export modules, and scan the board during the cover."""
-        self._start_import_warmup()
         if not self._combo_warmed:
             self._combo_warmed = True
-            self._warm_combo_popup()
+            QTimer.singleShot(0, self._warm_combo_popup)
+
+    def _start_cover_background(self):
+        """Read catalogs off the UI thread. The cover is already on screen."""
         if getattr(self, "_board_page", None) is not None:
             self._board_page.preload()
+        self._apply_catalog_read_paths()
         self._catalog_warm_wanted = True
         self._warm_catalogs()
 
+    def _on_cover_shown(self):
+        """Preload and公盘 mount start one frame after the cover is on screen."""
+        self._arm_cover_network_wait()
+        self._start_cover_background()
+        self._start_import_warmup()
+
+    def _arm_cover_network_wait(self):
+        """Hold the cover until the shares answer, or the startup budget runs out."""
+        self._cover_waits_for_network = True
+        self._cover_network_ready = False
+        self._cover_network_deadline = time.monotonic() + (_COVER_NETWORK_BUDGET_MS / 1000.0)
+        if not self._network_startup_started:
+            self._network_startup_started = True
+            QTimer.singleShot(0, self._start_deferred_network_connect)
+        QTimer.singleShot(_COVER_NETWORK_BUDGET_MS, self._expire_cover_network_budget)
+        if self._network_probe_seen and self._network_all_connected:
+            self._mark_cover_network_ready()
+        elif self._network_probe_seen:
+            QTimer.singleShot(_COVER_NETWORK_RETRY_MS, self._retry_cover_probe)
+
+    def _cover_network_budget_expired(self) -> bool:
+        return time.monotonic() >= self._cover_network_deadline
+
+    def _expire_cover_network_budget(self):
+        if not self._cover_waits_for_network or self._cover_network_ready:
+            return
+        if self._startup_cover is None:
+            return
+        self._mark_cover_network_ready()
+
+    def _mark_cover_network_ready(self):
+        if self._cover_network_ready:
+            return
+        self._cover_network_ready = True
+        self._maybe_release_cover()
+
+    def _note_cover_network(self):
+        if not self._cover_waits_for_network or self._cover_network_ready:
+            return
+        if self._startup_cover is None:
+            return
+        if self._network_all_connected or self._cover_network_budget_expired():
+            self._mark_cover_network_ready()
+            return
+        QTimer.singleShot(_COVER_NETWORK_RETRY_MS, self._retry_cover_probe)
+
+    def _retry_cover_probe(self):
+        if not self._cover_waits_for_network or self._cover_network_ready:
+            return
+        if self._startup_cover is None:
+            return
+        if self._cover_network_budget_expired():
+            self._mark_cover_network_ready()
+            return
+        if self._network_probe_worker is not None and self._network_probe_worker.isRunning():
+            return
+        self._start_network_probe()
+
     def _start_deferred_network_connect(self):
         """Mount SMB off the UI thread, then probe once that attempt returns."""
+        if self._shutting_down:
+            return
         worker = _MountWorker(self._network_config, self)
         worker.setPriority(QThread.LowPriority)
         worker.finished.connect(self._start_network_probe)
@@ -1082,22 +1417,37 @@ class MainWindow(QMainWindow):
         self._mount_worker = worker
         worker.start()
 
-    def _start_import_warmup(self):
-        worker = self._import_worker
-        if worker is not None:
+    def _on_startup_cover_closing(self):
+        """Drop any import slices that did not fit in the cover."""
+        if not self._imports_done:
+            self._import_stop.set()
+
+    def _maybe_release_cover(self):
+        if self._shutting_down:
             return
-        worker = ImportWarmWorker(
-            [
-                "docx",
-                "pdfplumber",
-                "src.generators.word_engine",
-                "src.generators.elp_engine",
-                "src.parsers.elp_plan",
-            ],
-            self,
-        )
+        cover = self._startup_cover
+        if cover is None:
+            return
+        if self._cover_waits_for_network and not self._cover_network_ready:
+            return
+        if self._imports_done and self._catalog_settled:
+            cover.mark_prep_done()
+
+    def _start_import_warmup(self):
+        if self._shutting_down:
+            return
+        worker = self._import_worker
+        if worker is not None or self._imports_done:
+            return
+        worker = ImportWarmWorker(list(_IMPORT_MODULES), self._import_stop, self)
+        worker.setPriority(QThread.LowPriority)
+        worker.finished_ok.connect(self._on_imports_finished)
         self._import_worker = worker
         worker.start()
+
+    def _on_imports_finished(self):
+        self._imports_done = True
+        self._maybe_release_cover()
 
     def _warm_combo_popup(self):
         """Build one hidden combo view so later dropdowns skip first-use style setup."""
@@ -1116,7 +1466,15 @@ class MainWindow(QMainWindow):
         self._catalog_warm_wanted = True
         self._warm_catalogs()
 
+    def _settle_catalog_for_cover(self):
+        if self._catalog_settled:
+            return
+        self._catalog_settled = True
+        self._maybe_release_cover()
+
     def _warm_catalogs(self):
+        if self._shutting_down:
+            return
         loader = self.leg_graph.db_loader
         worker = self._catalog_warm_worker
         if worker is not None and worker.isRunning():
@@ -1124,8 +1482,12 @@ class MainWindow(QMainWindow):
         if self._catalog_warm_finished:
             if self._catalog_waiters:
                 self._flush_catalog_waiters()
+            else:
+                self._settle_catalog_for_cover()
             return
         if not (loader.is_standards_ready or loader.is_equipment_ready):
+            if self._network_probe_seen:
+                self._settle_catalog_for_cover()
             return
         need_std = loader.is_standards_ready and loader.standards_df is None
         need_eq = loader.is_equipment_ready and loader.equipments_df is None
@@ -1134,13 +1496,60 @@ class MainWindow(QMainWindow):
                 self._flush_catalog_waiters()
             else:
                 self._catalog_warm_finished = True
+                self._settle_catalog_for_cover()
             return
         if not self._catalog_warm_wanted and not self._catalog_waiters:
             return
-        worker = CatalogWarmWorker(loader, self)
-        worker.ready.connect(self._on_catalog_ready)
+        worker = CatalogWarmWorker(
+            loader._standards_path if need_std else None,
+            loader._equipment_path if need_eq else None,
+            self,
+        )
+        worker.setPriority(QThread.LowPriority)
+        worker._epoch = self._catalog_epoch
+        worker.ready.connect(self._on_catalog_payload)
         self._catalog_warm_worker = worker
         worker.start()
+
+    def _on_catalog_payload(self, payload):
+        worker = self.sender()
+        if worker is not None and getattr(worker, "_epoch", self._catalog_epoch) != self._catalog_epoch:
+            self._catalog_warm_finished = False
+            self._warm_catalogs()
+            return
+        loader = self.leg_graph.db_loader
+        payload = payload or {}
+        if not payload.get("standards_error"):
+            frame = payload.get("standards_frame")
+            if frame is not None:
+                loader.install_standards(
+                    frame,
+                    payload.get("standard_images") or {},
+                    payload.get("standards_mtime"),
+                )
+            elif payload.get("standards_records") is not None:
+                loader.adopt_standards(
+                    payload.get("standards_records"),
+                    payload.get("standard_images") or {},
+                    payload.get("standards_mtime"),
+                )
+        if not payload.get("equipments_error"):
+            frame = payload.get("equipments_frame")
+            if frame is not None:
+                loader.install_equipments(frame, payload.get("equipments_mtime"))
+            elif payload.get("equipments_records") is not None:
+                loader.adopt_equipments(
+                    payload.get("equipments_records"),
+                    payload.get("equipments_mtime"),
+                )
+        error = payload.get("standards_error") or payload.get("equipments_error") or ""
+        if self._catalog_waiters:
+            standards = loader.peek_standards() or []
+            equipments = loader.peek_equipments() or []
+        else:
+            standards = []
+            equipments = []
+        self._on_catalog_ready(standards, equipments, error)
 
     def _flush_catalog_waiters(self):
         loader = self.leg_graph.db_loader
@@ -1152,6 +1561,7 @@ class MainWindow(QMainWindow):
     def _on_catalog_ready(self, standards, equipments, error):
         self._catalog_warm_finished = True
         self._catalog_error = error or ""
+        self._settle_catalog_for_cover()
         waiters = self._catalog_waiters
         self._catalog_waiters = []
         for dialog in waiters:
@@ -1202,28 +1612,52 @@ class MainWindow(QMainWindow):
                 tester_name=name,
                 machine_id=usage_machine_id(),
                 local_dir=local_usage_root(),
-                remote_dir=resolve_usage_directory(self._network_config),
+                remote_dir=None,
             )
-            self._usage_tracker.start(now)
+            self._usage_tracker.open_session(now)
             self._usage_heartbeat.start()
             self._schedule_usage_midnight()
+            self._flush_usage()
             return
         if self._usage_tracker.tester_name != name:
             self._usage_tracker.rename_tester(name, now)
         else:
-            self._usage_tracker.remote_dir = resolve_usage_directory(self._network_config)
-            self._usage_tracker.tick(now)
+            self._flush_usage()
 
     def _flush_usage(self, *, closing: bool = False):
+        if self._shutting_down and not closing:
+            return
         tracker = getattr(self, "_usage_tracker", None)
         if tracker is None:
             return
-        now = datetime.now()
         if closing:
-            tracker.close(now)
+            self._usage_flush_close = True
+        worker = self._usage_flush_worker
+        if worker is not None and worker.isRunning():
+            self._usage_flush_again = True
             return
-        tracker.remote_dir = resolve_usage_directory(self._network_config)
-        tracker.tick(now)
+        self._start_usage_flush()
+
+    def _start_usage_flush(self):
+        tracker = self._usage_tracker
+        if tracker is None:
+            self._usage_flush_again = False
+            self._usage_flush_close = False
+            return
+        closing = self._usage_flush_close
+        self._usage_flush_close = False
+        self._usage_flush_again = False
+        worker = _UsageFlushWorker(
+            tracker, datetime.now(), closing, self._network_config, self
+        )
+        worker.setPriority(QThread.LowPriority)
+        worker.finished.connect(self._on_usage_flush_done)
+        self._usage_flush_worker = worker
+        worker.start()
+
+    def _on_usage_flush_done(self):
+        if self._usage_flush_again or self._usage_flush_close:
+            self._start_usage_flush()
 
     def _on_usage_heartbeat(self):
         self._flush_usage()
@@ -1348,6 +1782,9 @@ class MainWindow(QMainWindow):
         return choice["value"]
 
     def closeEvent(self, event):
+        if self._close_waiting:
+            event.ignore()
+            return
         if self._has_unsaved_changes():
             choice = self._confirm_unsaved_exit()
             if choice == "back":
@@ -1358,24 +1795,88 @@ class MainWindow(QMainWindow):
                     event.ignore()
                     return
 
-        self._flush_usage(closing=True)
+        self._close_waiting = True
+        self._shutting_down = True
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            self._note_closing()
+            self._stop_restart_timers()
+            self._flush_usage(closing=True)
+            self._wait_background_threads()
+        finally:
+            self._close_waiting = False
+            QApplication.restoreOverrideCursor()
+        super().closeEvent(event)
+
+    def _note_closing(self):
+        cover = self._startup_cover
+        if cover is not None:
+            cover._label.setText("正在结束…")
+        label = getattr(self, "lbl_sync_status", None)
+        if label is not None:
+            label.setText("正在结束…")
+
+    def _stop_restart_timers(self):
+        self._connection_timer.stop()
+        self._nightly_sync_timer.stop()
         self._usage_heartbeat.stop()
         self._usage_midnight.stop()
+        page = getattr(self, "_board_page", None)
+        if page is not None:
+            page._lookup_timer.stop()
 
-        if self._mirror_worker is not None:
-            self._mirror_worker.requestInterruption()
-            self._mirror_worker.wait(2000)
-        if self._network_probe_worker is not None:
-            self._network_probe_worker.requestInterruption()
-            self._network_probe_worker.wait(2000)
-        if self._elp_prep_worker is not None:
-            self._elp_prep_worker.requestInterruption()
-            self._elp_prep_worker.wait(8000)
-        self._connection_timer.stop()
-        for worker in list(self._abandoned_workers):
-            worker.requestInterruption()
-            worker.wait(500)
-        super().closeEvent(event)
+    def _background_threads(self):
+        threads = []
+        for worker in (
+            self._mount_worker,
+            self._network_probe_worker,
+            self._catalog_warm_worker,
+            self._import_worker,
+            self._source_mirror_worker,
+            self._mirror_worker,
+            self._elp_prep_worker,
+            self._sync_worker,
+            self._usage_flush_worker,
+        ):
+            if worker is not None:
+                threads.append(worker)
+        threads.extend(self._abandoned_workers)
+        page = getattr(self, "_board_page", None)
+        if page is not None:
+            if page._preload_worker is not None:
+                threads.append(page._preload_worker)
+            threads.extend(list(page._lookup_workers))
+        return threads
+
+    def _request_background_stop(self):
+        self._import_stop.set()
+        page = getattr(self, "_board_page", None)
+        if page is not None:
+            page.request_stop()
+        usage = self._usage_flush_worker
+        for worker in self._background_threads():
+            if worker is usage:
+                continue
+            try:
+                worker.requestInterruption()
+            except RuntimeError:
+                pass
+
+    def _wait_background_threads(self):
+        """Block close until every owned QThread has returned.
+
+        Destroying a QThread that is still running aborts the process.
+        """
+        while True:
+            self._request_background_stop()
+            QApplication.processEvents()
+            running = [worker for worker in self._background_threads() if _qthread_running(worker)]
+            pending_usage = self._usage_flush_again or self._usage_flush_close
+            if not running and not pending_usage:
+                return
+            for worker in running:
+                if _qthread_running(worker):
+                    worker.wait(30)
 
     # ---------- path helpers ----------
 
@@ -2196,6 +2697,8 @@ class MainWindow(QMainWindow):
         return jobs
 
     def _start_backup_jobs(self, jobs, *, label: str):
+        if self._shutting_down:
+            return
         if not jobs:
             self.lbl_sync_status.setText(f"{label}：无任务")
             return
@@ -2240,6 +2743,8 @@ class MainWindow(QMainWindow):
         self._refresh_remote_json_status()
 
     def _start_network_probe(self):
+        if self._shutting_down:
+            return
         if self._network_probe_worker is not None and self._network_probe_worker.isRunning():
             return
         worker = NetworkProbeWorker(self._network_config, self)
@@ -2248,14 +2753,77 @@ class MainWindow(QMainWindow):
         self._network_probe_worker = worker
         worker.start()
 
-    def _on_network_probe_done(self, result: ProbeResult):
+    def _apply_catalog_read_paths(self, result: Optional[ProbeResult] = None) -> None:
+        """Point catalog reads at templates/ when a local mirror file is present."""
         loader = self.leg_graph.db_loader
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            if result is None:
+                return
+            loader.apply_network_probe(
+                standards_path=result.standards_path,
+                standards_ok=result.standards_ok,
+                equipment_path=result.equipment_path,
+                equipment_ok=result.equipment_ok,
+            )
+            return
+        from src.io.source_mirror import local_equipment_file, local_standards_file
+
+        standards = local_standards_file()
+        equipment = local_equipment_file(self._network_config)
         loader.apply_network_probe(
-            standards_path=result.standards_path,
-            standards_ok=result.standards_ok,
-            equipment_path=result.equipment_path,
-            equipment_ok=result.equipment_ok,
+            standards_path=str(standards) if standards is not None else (
+                result.standards_path if result is not None else None
+            ),
+            standards_ok=standards is not None or bool(result and result.standards_ok),
+            equipment_path=str(equipment) if equipment is not None else (
+                result.equipment_path if result is not None else None
+            ),
+            equipment_ok=equipment is not None or bool(result and result.equipment_ok),
         )
+
+    def _share_ready_for_mirror(self, result: ProbeResult) -> bool:
+        return bool(
+            (result.equipment_ok and result.equipment_source == SOURCE_CONFIGURED)
+            or (result.standards_ok and result.standards_source == SOURCE_CONFIGURED)
+            or (
+                result.templates_ok
+                and result.templates_source in {SOURCE_CONFIGURED, SOURCE_MIXED}
+            )
+        )
+
+    def _maybe_start_source_mirror(self, result: ProbeResult) -> None:
+        if self._shutting_down:
+            return
+        if os.environ.get("PYTEST_CURRENT_TEST") or self._source_mirror_started:
+            return
+        if not self._share_ready_for_mirror(result):
+            return
+        self._source_mirror_started = True
+        worker = SourceMirrorWorker(self._network_config, self)
+        worker.setPriority(QThread.LowPriority)
+        worker.finished_sync.connect(self._on_source_mirror_done)
+        self._source_mirror_worker = worker
+        worker.start()
+
+    def _on_source_mirror_done(self, result) -> None:
+        if result is None:
+            return
+        if not (result.standards_changed or result.equipment_changed):
+            return
+        loader = self.leg_graph.db_loader
+        self._catalog_epoch += 1
+        self._apply_catalog_read_paths()
+        loader.forget_cached_catalog(
+            standards=bool(result.standards_changed),
+            equipment=bool(result.equipment_changed),
+        )
+        self._catalog_warm_finished = False
+        self._catalog_warm_wanted = True
+        self._warm_catalogs()
+
+    def _on_network_probe_done(self, result: ProbeResult):
+        self._network_probe_seen = True
+        self._apply_catalog_read_paths(result)
         self._network_all_connected = result.all_configured_connected
         cfg = self._network_config
         _apply_connection_status(
@@ -2299,13 +2867,21 @@ class MainWindow(QMainWindow):
             _templates_tooltip(result, cfg) or (result.templates_error or "模板未连接")
         )
         self._schedule_network_probe()
-        self._catalog_warm_wanted = bool(result.standards_ok or result.equipment_ok)
+        loader = self.leg_graph.db_loader
+        self._catalog_warm_wanted = bool(
+            result.standards_ok or result.equipment_ok or loader.is_standards_ready or loader.is_equipment_ready
+        )
         self._warm_catalogs()
+        self._maybe_start_source_mirror(result)
         if self.state.project_id:
             self._refresh_remote_json_status()
         self._flush_usage()
+        self._note_cover_network()
 
     def _schedule_network_probe(self):
+        if self._shutting_down:
+            self._connection_timer.stop()
+            return
         check = self._network_config.connection_check
         interval_ms = (
             check.retry_interval_connected_sec
@@ -2372,6 +2948,8 @@ class MainWindow(QMainWindow):
             pass
 
     def _start_elp_export_prep(self, plan_pdf, pattern_dir):
+        if self._shutting_down:
+            return
         pdf_key = ""
         if plan_pdf is not None:
             try:
@@ -2404,6 +2982,8 @@ class MainWindow(QMainWindow):
             worker.wait(50)
 
     def _start_mirror(self, src, dest):
+        if self._shutting_down:
+            return
         if self._mirror_worker is not None:
             try:
                 self._mirror_worker.succeeded.disconnect(self._on_mirror_ok)
@@ -2861,14 +3441,18 @@ class MainWindow(QMainWindow):
             elp_pattern_dir = None
             if is_elp:
                 from src.io.network_sources import elp_data_pattern_directory
+                from src.io.source_mirror import prefer_local_tree, read_elp_report_template
                 from src.parsers.elp_plan import resolve_elp_plan_pdf
 
-                template_path = resolve_elp_report_template(self._network_config)
+                template_path = read_elp_report_template(self._network_config)
                 if template_path is None:
                     QMessageBox.warning(self, "错误", "找不到吉利ELP报告模板，请确认公盘 report_templates 中有 ELP 模板")
                     return
                 plan_pdf = resolve_elp_plan_pdf(self._local_path, self._source_project_path())
-                elp_pattern_dir = elp_data_pattern_directory(self._network_config)
+                elp_pattern_dir = prefer_local_tree(
+                    "elp_data_patten",
+                    lambda: elp_data_pattern_directory(self._network_config),
+                )
                 self._start_elp_export_prep(plan_pdf, elp_pattern_dir)
 
             word_lang = "中文" if is_elp else lang
@@ -2911,7 +3495,9 @@ class MainWindow(QMainWindow):
                 if elp_extras.plan_no:
                     elp_plan.plan_no = elp_extras.plan_no
             else:
-                template_path = resolve_report_template_for_language(
+                from src.io.source_mirror import read_report_template_for_language
+
+                template_path = read_report_template_for_language(
                     lang,
                     self._network_config,
                     use_4sign=profile.use_4sign,

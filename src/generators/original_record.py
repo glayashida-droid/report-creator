@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import io
 import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence
 
 from docx import Document
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from docx.table import Table, _Cell
@@ -34,7 +36,7 @@ from src.io.project_assets import (
     resolve_data_table_path,
 )
 from src.io.project_board import PROJECT_INTRANET_SHARE
-from src.io.test_photos import is_usable_test_name, test_dir
+from src.io.test_photos import TEST_GROUP_DIR, is_usable_test_name, test_dir
 from src.models.project_state import (
     DataTableRef,
     TestEquipment,
@@ -121,8 +123,11 @@ def original_record_data_from_node(
 
 
 def resolve_original_record_template(config=None) -> Path:
-    """Prefer configured original_data_sheet dir, then local original_data_sheet."""
+    """Local mirror first, then the configured original_data_sheet dir."""
     name = ORIGINAL_RECORD_TEMPLATE_NAME
+    local = local_fallback_root() / "original_data_sheet" / name
+    if local.is_file():
+        return local
     try:
         folder = original_data_sheet_directory(config)
         candidate = folder / name
@@ -130,9 +135,6 @@ def resolve_original_record_template(config=None) -> Path:
             return candidate
     except Exception:
         pass
-    local = local_fallback_root() / "original_data_sheet" / name
-    if local.is_file():
-        return local
     raise FileNotFoundError(f"找不到原始记录模板: {name}")
 
 
@@ -239,6 +241,18 @@ def stack_standard_blocks(
     return "\n\n".join(blocks)
 
 
+def build_original_record_document(
+    data: OriginalRecordData,
+    *,
+    template_path: Path | str | None = None,
+) -> Document:
+    """Fill one original-record document in memory."""
+    template = Path(template_path) if template_path else resolve_original_record_template()
+    doc = Document(str(template))
+    _fill_original_record(doc, data, template)
+    return doc
+
+
 def generate_original_record(
     data: OriginalRecordData,
     output_path: Path | str,
@@ -248,8 +262,12 @@ def generate_original_record(
     template = Path(template_path) if template_path else resolve_original_record_template()
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
+    doc = build_original_record_document(data, template_path=template)
+    doc.save(str(out))
+    return out
 
-    doc = Document(str(template))
+
+def _fill_original_record(doc: Document, data: OriginalRecordData, template: Path) -> None:
     _expand_equipment_rows(doc, data.equipments or [])
     _expand_result_tables(doc, data.standards or [], data.sample_ids or [])
     _remove_marker_paragraph(doc, RESULT_TABLE_MARKER)
@@ -285,9 +303,6 @@ def generate_original_record(
             "{{DATA_TABLES}}": "/",
         },
     )
-
-    doc.save(str(out))
-    return out
 
 
 def _existing_dir(raw: Optional[Path | str]) -> Optional[Path]:
@@ -362,6 +377,103 @@ def export_node_original_record(
         test_item=data.test_item,
     )
     return generate_original_record(data, out_path, template_path=template_path)
+
+
+def resolve_combined_original_record_folder(
+    project_dir: Optional[Path | str],
+    remote_root: Optional[Path | str] = None,
+) -> Optional[Path]:
+    """3.测试组/，与各试验目录同级。公盘可达则用公盘，否则本地镜像。"""
+    root = _existing_dir(remote_root) or _existing_dir(project_dir)
+    if root is None:
+        return None
+    return root / TEST_GROUP_DIR
+
+
+def export_leg_original_record(
+    records: Sequence[OriginalRecordData],
+    *,
+    template_path: Path | str,
+) -> Path:
+    """Write one Word file that stacks every test on this leg, with a page break between them."""
+    items = list(records or [])
+    if not items:
+        raise ValueError("没有可打印的试验")
+    for data in items:
+        if not is_usable_test_name(data.test_item):
+            raise ValueError("请先选择试验名称")
+    leg = (items[0].leg_name or "").strip()
+    if not leg:
+        raise ValueError("缺少 Leg 名称")
+    folder = resolve_combined_original_record_folder(
+        items[0].project_path or None,
+        items[0].remote_root or None,
+    )
+    if folder is None:
+        raise FileNotFoundError("找不到项目目录（公盘与本地均不可用）")
+    out_path = default_output_path(
+        folder,
+        application_no=items[0].application_no,
+        test_item=leg,
+    )
+    base = build_original_record_document(items[0], template_path=template_path)
+    for data in items[1:]:
+        extra = build_original_record_document(data, template_path=template_path)
+        append_original_record(base, extra)
+    base.save(str(out_path))
+    return out_path
+
+
+def append_original_record(base: Document, extra: Document) -> None:
+    """Append another filled original record after a page break. Images keep their bytes."""
+    body = base.element.body
+    sect = body.find(qn("w:sectPr"))
+    _insert_body_child(body, sect, _page_break_paragraph())
+    cache: Dict[str, str] = {}
+    for child in list(extra.element.body):
+        if child.tag == qn("w:sectPr"):
+            continue
+        cloned = deepcopy(child)
+        _remap_relationships(cloned, extra.part, base.part, cache)
+        _insert_body_child(body, sect, cloned)
+
+
+def _insert_body_child(body, sect, element) -> None:
+    if sect is not None:
+        sect.addprevious(element)
+    else:
+        body.append(element)
+
+
+def _page_break_paragraph():
+    paragraph = OxmlElement("w:p")
+    run = OxmlElement("w:r")
+    br = OxmlElement("w:br")
+    br.set(qn("w:type"), "page")
+    run.append(br)
+    paragraph.append(run)
+    return paragraph
+
+
+def _remap_relationships(element, src_part, dest_part, cache: Dict[str, str]) -> None:
+    attrs = (qn("r:embed"), qn("r:link"), qn("r:id"))
+    for node in element.iter():
+        for attr in attrs:
+            old = node.get(attr)
+            if not old or old not in src_part.rels:
+                continue
+            if old not in cache:
+                cache[old] = _rehome_relationship(src_part.rels[old], dest_part)
+            node.set(attr, cache[old])
+
+
+def _rehome_relationship(rel, dest_part) -> str:
+    if rel.is_external:
+        return dest_part.relate_to(rel.target_ref, rel.reltype, is_external=True)
+    if rel.reltype == RT.IMAGE:
+        new_rid, _image = dest_part.get_or_add_image(io.BytesIO(rel.target_part.blob))
+        return new_rid
+    return dest_part.relate_to(rel.target_part, rel.reltype)
 
 
 def _safe_stem(text: str) -> str:

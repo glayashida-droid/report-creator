@@ -479,11 +479,9 @@ def test_open_project_folder_opens_normalized_unc_remote(tmp_path: Path):
     win.close()
 
 
-def test_question_pixmap_is_cyan_on_dark_background():
+def _cyan_vs_dark(pm):
     from PySide6.QtGui import QColor
 
-    _app()
-    pm = question_pixmap()
     img = pm.toImage()
     assert not img.isNull()
     target = QColor(CYAN)
@@ -502,5 +500,27 @@ def test_question_pixmap_is_cyan_on_dark_background():
                 cyans += 1
             if c.red() < 50 and c.green() < 50 and c.blue() < 50:
                 darks += 1
+    return cyans, darks
+
+
+def test_question_pixmap_is_cyan_on_dark_background():
+    _app()
+    cyans, darks = _cyan_vs_dark(question_pixmap())
+    assert cyans > 0
+    assert cyans > darks
+
+
+def test_question_message_box_uses_cyan_circle():
+    from PySide6.QtWidgets import QMessageBox, QStyle
+
+    app = _app()
+    icon = app.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxQuestion)
+    cyans, darks = _cyan_vs_dark(icon.pixmap(48, 48))
+    assert cyans > 0
+    assert cyans > darks
+
+    box = QMessageBox()
+    box.setIcon(QMessageBox.Icon.Question)
+    cyans, darks = _cyan_vs_dark(box.iconPixmap())
     assert cyans > 0
     assert cyans > darks

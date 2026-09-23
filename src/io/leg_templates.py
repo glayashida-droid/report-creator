@@ -108,6 +108,10 @@ def save_leg_template(
         "legs": [leg.model_dump() for leg in legs_for_template(legs)],
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    if templates_dir is None:
+        from src.io.source_mirror import mirror_saved_file
+
+        mirror_saved_file("leg_templates", path)
     return path
 
 
@@ -133,7 +137,12 @@ def apply_leg_template(state: ProjectState, name: str, legs: List[TestLeg], cata
 
 
 def list_leg_templates(templates_dir: Optional[Path] = None) -> List[SavedLegTemplate]:
-    root = templates_dir or default_templates_dir()
+    if templates_dir is not None:
+        root = templates_dir
+    else:
+        from src.io.source_mirror import prefer_local_tree
+
+        root = prefer_local_tree("leg_templates", leg_templates_directory)
     if not root.is_dir():
         return []
     found: List[SavedLegTemplate] = []

@@ -275,6 +275,81 @@ def test_elp_export_fields_trim_values():
     assert fields.manufacturer_address == "上海市嘉定工业区北和公路 1000 号"
 
 
+def test_elp_object_table_appends_to_number_under_end_time(tmp_path: Path):
+    from docx import Document
+    from docx.oxml.ns import qn
+
+    blank = tmp_path / "blank.docx"
+    Document().save(blank)
+    gen = ElpReportGenerator(str(blank))
+
+    def _object_doc():
+        doc = Document()
+        table = doc.add_table(3, 2)
+        table.cell(0, 0).text = "车型代码"
+        table.cell(1, 0).text = "样品名称"
+        table.cell(2, 0).text = "测试结束时间"
+        return doc, table
+
+    doc, table = _object_doc()
+    state = ProjectState(
+        to_numbers_display="TO-26112398-04/05/06",
+        test_end_date="2026-08-10",
+    )
+    gen._fill_object_table(
+        doc,
+        state,
+        {"车型代码": "P166", "样品名称": "开关", "TO号": "TO-26112398-04/05/06"},
+        ElpExportFields(),
+        ElpPlan(),
+        [],
+    )
+    labels = [cell_text(unique_cells(row)[0]) for row in table.rows]
+    assert labels == ["车型代码", "样品名称", "测试结束时间", "TO 号"]
+    assert cell_text(unique_cells(table.rows[2])[1]) == "2026.08.10"
+    assert cell_text(unique_cells(table.rows[3])[1]) == "TO-26112398-04/05/06"
+
+    empty_doc, empty_table = _object_doc()
+    gen._fill_object_table(
+        empty_doc,
+        ProjectState(test_end_date="2026-08-10"),
+        {"车型代码": "P166", "样品名称": "开关"},
+        ElpExportFields(),
+        ElpPlan(),
+        [],
+    )
+    empty_labels = [cell_text(unique_cells(row)[0]) for row in empty_table.rows]
+    assert empty_labels == ["车型代码", "样品名称", "测试结束时间"]
+
+    if not TEMPLATE.is_file():
+        return
+    real = Document(str(TEMPLATE))
+    real_state = ProjectState(
+        to_numbers_display="TO-26112398-04/05/06",
+        test_end_date="2026-08-10",
+        sample_receive_date="2026-08-01",
+        test_start_date="2026-08-02",
+    )
+    gen._fill_object_table(
+        real,
+        real_state,
+        real_state.overview_field_map("中文"),
+        ElpExportFields(rated_voltage="12V", sample_source="送样"),
+        ElpPlan(vehicle_code="P166", product_name="开关", part_no="6608707284"),
+        [],
+    )
+    object_table = next(
+        t
+        for t in real.tables
+        if "额定电压" in "".join(cell_text(c) for r in t.rows for c in unique_cells(r))
+    )
+    real_labels = [cell_text(unique_cells(row)[0]) for row in object_table.rows]
+    assert real_labels[-2:] == ["测试结束时间", "TO 号"]
+    label_run = unique_cells(object_table.rows[-1])[0].paragraphs[0].runs[0]
+    sz = label_run._r.find(qn("w:rPr")).find(qn("w:sz"))
+    assert sz is not None and sz.get(qn("w:val")) == "18"
+
+
 def test_elp_lab_address_is_fixed_and_maker_address_is_confirmed(tmp_path: Path):
     from docx import Document
 
@@ -725,7 +800,7 @@ def _fill_first_block_photos(doc, paths):
     return block
 
 
-def test_elp_photo_tables_drop_empty_slots(tmp_path: Path):
+def test_elp_photo_tables_keep_odd_slot_placeholder(tmp_path: Path):
     if not TEMPLATE.is_file():
         return
     from docx import Document
@@ -739,8 +814,9 @@ def test_elp_photo_tables_drop_empty_slots(tmp_path: Path):
     assert len(table.rows) == 7
     last_img = unique_cells(table.rows[5])
     last_cap = unique_cells(table.rows[6])
-    assert len(last_img) == 1
-    assert len(last_cap) == 1
+    assert len(last_img) == 2
+    assert len(last_cap) == 2
+    assert cell_text(last_img[1]) == "/"
     prev_img = unique_cells(table.rows[3])
     assert len(prev_img) == 2
     captions = [
@@ -754,20 +830,11 @@ def test_elp_photo_tables_drop_empty_slots(tmp_path: Path):
         "图片3：校准3",
         "图片4：校准4",
         "图片5：校准5",
+        "图片6：/",
     ]
-    from docx.oxml.ns import qn
-
-    last_tcPr = last_img[0]._tc.find(qn("w:tcPr"))
-    last_w = last_tcPr.find(qn("w:tcW"))
-    prev_tcPr = prev_img[0]._tc.find(qn("w:tcPr"))
-    prev_w = prev_tcPr.find(qn("w:tcW"))
-    assert last_w is not None and prev_w is not None
-    assert last_w.get(qn("w:w")) == prev_w.get(qn("w:w"))
-    assert last_tcPr.find(qn("w:gridSpan")) is None
     blob = "\n".join(
         cell_text(c) for t in photo_tables for r in t.rows for c in unique_cells(r)
     )
-    assert "图片6" not in blob
     assert "XXXXXXX" not in blob
 
 
@@ -854,8 +921,9 @@ def test_elp_photo_tables_grow_when_needed(tmp_path: Path):
         if cell_text(c)
     ]
     assert captions[0] == "图片1：校准1"
-    assert captions[-1] == "图片9：校准9"
-    assert len(captions) == 9
+    assert captions[-2] == "图片9：校准9"
+    assert captions[-1] == "图片10：/"
+    assert len(captions) == 10
 
 
 def test_elp_template_keeps_blue_slots():
@@ -888,10 +956,19 @@ def test_result_slot_drops_template_first_line_indent():
         ind.set(qn("w:firstLine"), "360")
         pPr.append(ind)
 
+    row = cell._tc.getparent()
+    trPr = row.get_or_add_trPr()
+    height = OxmlElement("w:trHeight")
+    height.set(qn("w:val"), "7938")
+    height.set(qn("w:hRule"), "exact")
+    trPr.append(height)
+
     text = "A01：试验后，满足功能等级 A\nA02：试验后，满足功能等级 A"
     fill_result_slot(cell, text)
     assert cell_text(cell).startswith("A01：")
     assert "A02：" in cell_text(cell)
+    assert len(cell.paragraphs) == 1
+    assert row.find(qn("w:trPr")).find(qn("w:trHeight")) is None
     for paragraph in cell.paragraphs:
         pPr = paragraph._p.find(qn("w:pPr"))
         ind = pPr.find(qn("w:ind")) if pPr is not None else None

@@ -6,6 +6,7 @@ import csv
 import json
 import os
 import re
+import threading
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, time, timedelta
@@ -294,6 +295,39 @@ def publish_usage_csvs(remote_dir: Path) -> None:
     _write_summary_weekly(Path(remote_dir) / "汇总_周.csv", names, weekly_by_name)
 
 
+_KEEP_REMOTE = object()
+
+
+@dataclass(frozen=True)
+class _UsageFlushJob:
+    source: TesterSource
+    local_path: Path
+    remote_dir: Optional[Path]
+
+
+def commit_usage_flush(job: _UsageFlushJob) -> None:
+    """Write one captured snapshot. Safe to call off the UI thread."""
+    try:
+        write_source(job.local_path, job.source)
+    except OSError:
+        pass
+    remote = job.remote_dir
+    if remote is None:
+        return
+    try:
+        remote.mkdir(parents=True, exist_ok=True)
+        (remote / _SOURCES_DIR).mkdir(parents=True, exist_ok=True)
+        if not remote.is_dir():
+            return
+        write_source(
+            remote / _SOURCES_DIR / source_filename(job.source.tester_name, job.source.machine_id),
+            job.source,
+        )
+        publish_usage_csvs(remote)
+    except OSError:
+        return
+
+
 class UsageTracker:
     def __init__(
         self,
@@ -312,38 +346,41 @@ class UsageTracker:
         self._sessions: list[SessionSlice] = []
         self._events: list[CountEvent] = []
         self._loaded = False
+        self._lock = threading.RLock()
+
+    def open_session(self, now: datetime) -> None:
+        """Remember that a session is open. Disk and 公盘 writes stay in flush."""
+        with self._lock:
+            if not self.tester_name or self.session_id is not None:
+                return
+            self.session_id = uuid.uuid4().hex
+            self.session_start = now
 
     def start(self, now: datetime) -> None:
-        if not self.tester_name or self.session_id is not None:
-            return
-        self._ensure_loaded()
-        self.session_id = uuid.uuid4().hex
-        self.session_start = now
+        with self._lock:
+            if not self.tester_name or self.session_id is not None:
+                return
+            self._ensure_loaded()
+            self.session_id = uuid.uuid4().hex
+            self.session_start = now
         self.flush(now, closed=False)
 
     def tick(self, now: datetime) -> None:
-        if self.session_id is None:
-            self.flush(now, closed=False)
-            return
         self.flush(now, closed=False)
 
     def close(self, now: datetime) -> None:
-        if self.session_id is None:
-            self.flush(now, closed=False)
-            return
         self.flush(now, closed=True)
-        self.session_id = None
-        self.session_start = None
 
     def rename_tester(self, new_name: str, now: datetime) -> None:
         name = (new_name or "").strip()
         if not name or name == self.tester_name:
             return
         self.close(now)
-        self.tester_name = name
-        self._sessions = []
-        self._events = []
-        self._loaded = False
+        with self._lock:
+            self.tester_name = name
+            self._sessions = []
+            self._events = []
+            self._loaded = False
         self.start(now)
 
     def record_report(self, now: datetime) -> None:
@@ -353,41 +390,47 @@ class UsageTracker:
         self._record_event(KIND_ORIGINAL, now)
 
     def flush(self, now: datetime, *, closed: bool = False) -> None:
-        if not self.tester_name:
-            return
-        self._ensure_loaded()
-        self._replace_open_slices(now, closed=closed)
-        source = TesterSource(
-            tester_name=self.tester_name,
-            machine_id=self.machine_id,
-            sessions=list(self._sessions),
-            events=list(self._events),
-        )
-        try:
-            write_source(
-                self.local_dir / source_filename(self.tester_name, self.machine_id),
-                source,
+        job = self.capture_flush(now, closed=closed)
+        if job is not None:
+            commit_usage_flush(job)
+
+    def capture_flush(
+        self,
+        now: datetime,
+        *,
+        closed: bool = False,
+        remote_dir: object = _KEEP_REMOTE,
+    ) -> Optional[_UsageFlushJob]:
+        """Update memory and return the files to write. Does not touch disk."""
+        with self._lock:
+            if remote_dir is not _KEEP_REMOTE:
+                self.remote_dir = Path(remote_dir) if remote_dir is not None else None
+            if not self.tester_name:
+                return None
+            actually_closed = closed and self.session_id is not None
+            self._ensure_loaded()
+            self._replace_open_slices(now, closed=actually_closed)
+            source = TesterSource(
+                tester_name=self.tester_name,
+                machine_id=self.machine_id,
+                sessions=list(self._sessions),
+                events=list(self._events),
             )
-        except OSError:
-            pass
-        remote = self._ensure_remote()
-        if remote is None:
-            return
-        try:
-            write_source(
-                remote / _SOURCES_DIR / source_filename(self.tester_name, self.machine_id),
-                source,
-            )
-            publish_usage_csvs(remote)
-        except OSError:
-            return
+            local_path = self.local_dir / source_filename(self.tester_name, self.machine_id)
+            remote = self.remote_dir
+            if actually_closed:
+                self.session_id = None
+                self.session_start = None
+            return _UsageFlushJob(source=source, local_path=local_path, remote_dir=remote)
 
     def _record_event(self, kind: str, now: datetime) -> None:
-        self._ensure_loaded()
-        self._events.append(
-            CountEvent(event_id=uuid.uuid4().hex, date=now.date().isoformat(), kind=kind)
-        )
-        if self.session_id is None:
+        with self._lock:
+            self._ensure_loaded()
+            self._events.append(
+                CountEvent(event_id=uuid.uuid4().hex, date=now.date().isoformat(), kind=kind)
+            )
+            need_start = self.session_id is None
+        if need_start:
             self.start(now)
             return
         self.flush(now, closed=False)

@@ -4,6 +4,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QLineEdit, QWidget
 
 from src.generators.word_engine import WordGenerator
+from src.ui.theme import CYBERPUNK_QSS
 from src.models.project_state import (
     ProjectState,
     SampleStandardResult,
@@ -70,6 +71,19 @@ def test_sample_table_has_result_desc_column_and_autofills_on_generate():
         assert isinstance(desc_w, QLineEdit)
         assert desc_w.text() == desc
         assert not desc_w.isReadOnly()
+
+
+def test_sample_result_combo_matches_text_cell_height():
+    _app()
+    dlg = TestDetailDialog(TestNode(test_name="机械冲击"), [], [])
+    dlg.setStyleSheet(CYBERPUNK_QSS)
+    dlg.add_sample_row("A01", TestResult.FAIL)
+    id_w = dlg.table.cellWidget(0, 1)
+    combo = dlg.table.cellWidget(0, 3)
+    id_w.ensurePolished()
+    combo.ensurePolished()
+    assert combo.objectName() == "sampleResultCombo"
+    assert combo.minimumSizeHint().height() <= id_w.minimumSizeHint().height() + 2
 
 
 def test_per_sample_result_desc_editable_and_persisted():
@@ -153,6 +167,7 @@ def test_editing_one_standard_result_desc_leaves_other_samples():
 
     editor = dlg.result_desc_table.cellWidget(1, 1)
     editor.setPlainText("湿热改过")
+    dlg._flush_result_desc_now()
 
     assert dlg._sample_table_slots[0]["table"].cellWidget(0, 2).text() == custom
     assert dlg._sample_table_slots[1]["table"].cellWidget(0, 2).text() == "湿热改过"
@@ -179,6 +194,7 @@ def test_standard_result_desc_edit_still_overwrites_all_sample_rows():
     updated = "上面改过的标准描述"
     editor = dlg.result_desc_table.cellWidget(0, 1)
     editor.setPlainText(updated)
+    dlg._flush_result_desc_now()
 
     assert dlg.table.cellWidget(0, 2).text() == updated
     assert dlg.table.cellWidget(1, 2).text() == updated

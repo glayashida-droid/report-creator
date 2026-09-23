@@ -504,9 +504,10 @@ class DrawerSection(QFrame):
             lay = parent.layout()
             if lay is not None:
                 lay.invalidate()
-                lay.activate()
             parent.updateGeometry()
-            parent.adjustSize()
+
+
+_RESULT_DESC_SYNC_MS = 180
 
 
 class TestDetailDialog(QDialog):
@@ -562,14 +563,15 @@ class TestDetailDialog(QDialog):
         self._eq_table_ready = False
         self._eq_table_filling = False
         self._eq_pick = []
+        self._eq_by_row = None
         self._catalogs_pending = bool(catalogs_pending)
         self._samples_loaded = False
-        self._std_fill_rows = []
-        self._std_fill_at = 0
-        self._std_fill_gen = 0
-        self._eq_fill_rows = []
-        self._eq_fill_at = 0
-        self._eq_fill_gen = 0
+        self._result_desc_editors = set()
+        self._result_desc_pending = set()
+        self._result_desc_flushing = False
+        self._result_desc_timer = QTimer(self)
+        self._result_desc_timer.setSingleShot(True)
+        self._result_desc_timer.timeout.connect(self._flush_result_desc_sync)
 
         self.proj_start_date = None
         self.proj_end_date = None
@@ -687,6 +689,22 @@ class TestDetailDialog(QDialog):
     def showEvent(self, event):
         super().showEvent(event)
         self._sync_top_bar_heights()
+        self._disarm_dialog_buttons()
+
+    def keyPressEvent(self, event):
+        # QLineEdit ignores Enter so the dialog can click its default button.
+        # This page has no default button: 保存 / 取消 / 打印TR only respond to clicks.
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _disarm_dialog_buttons(self):
+        for btn in self.findChildren(QPushButton):
+            if btn.window() is not self:
+                continue
+            btn.setAutoDefault(False)
+            btn.setDefault(False)
 
     def _make_table(self, headers, min_height):
         table = ContainedTableWidget(0, len(headers))
@@ -1037,6 +1055,7 @@ class TestDetailDialog(QDialog):
         btn_layout.addWidget(btn_save)
         btn_layout.addWidget(btn_cancel)
         outer.addLayout(btn_layout)
+        self._disarm_dialog_buttons()
 
         self._schedule_result_header_sync()
         self._refresh_import_from_prev_button()
@@ -1101,7 +1120,7 @@ class TestDetailDialog(QDialog):
         msg = QMessageBox(self)
         msg.setWindowTitle("导出成功")
         msg.setText(f"原始记录已生成至:\n{out_path}")
-        btn_open = msg.addButton("打开文件", QMessageBox.ActionRole)
+        btn_open = msg.addButton("打开原始记录", QMessageBox.ActionRole)
         btn_folder = msg.addButton("打开所在文件夹", QMessageBox.ActionRole)
         msg.addButton(QMessageBox.Ok)
         msg.exec()
@@ -1465,6 +1484,7 @@ class TestDetailDialog(QDialog):
         # inside add_sample_row from that standard's current 结果描述.
         self._schedule_result_header_sync()
         self._refresh_sample_summary()
+        self._disarm_dialog_buttons()
 
     def _standard_fill_rows(self):
         rows = []
@@ -1499,6 +1519,7 @@ class TestDetailDialog(QDialog):
         finally:
             self._std_table.setUpdatesEnabled(True)
             self._std_table.blockSignals(False)
+            self._std_table.setEnabled(True)
 
     def _equipment_fill_rows(self):
         rows = []
@@ -1543,59 +1564,30 @@ class TestDetailDialog(QDialog):
         finally:
             self._eq_table.setUpdatesEnabled(True)
             self._eq_table.blockSignals(False)
+            self._eq_table.setEnabled(True)
         self._refresh_eq_expiry()
 
     @property
     def std_table(self):
         if not self._std_table_ready:
-            self._std_fill_gen += 1
-            self._std_table_filling = False
-            self._ensure_standards_table(immediate=True)
+            self._ensure_standards_table()
         return self._std_table
 
     @property
     def eq_table(self):
         if not self._eq_table_ready:
-            self._eq_fill_gen += 1
-            self._eq_table_filling = False
-            self._ensure_equipment_table(immediate=True)
+            self._ensure_equipment_table()
         return self._eq_table
 
-    def _ensure_standards_table(self, *, immediate=False):
+    def _ensure_standards_table(self):
         if self._std_table_ready or self._std_table_filling or not hasattr(self, "_std_table"):
             return
-        rows = self._standard_fill_rows()
-        if immediate or len(rows) <= 36:
-            self._std_table_filling = True
-            try:
-                self._fill_standards()
-                self._finish_standards_table()
-            finally:
-                self._std_table_filling = False
-            return
-        self._std_fill_rows = rows
-        self._std_fill_at = 0
-        self._std_fill_gen += 1
-        generation = self._std_fill_gen
         self._std_table_filling = True
-        self._std_table.blockSignals(True)
-        self._std_table.setUpdatesEnabled(False)
-        self._std_table.setRowCount(len(rows))
-        QTimer.singleShot(0, lambda gen=generation: self._fill_standards_batch(gen))
-
-    def _fill_standards_batch(self, generation):
-        if generation != self._std_fill_gen or self._std_table_ready or not self._std_table_filling:
-            return
-        end = min(self._std_fill_at + 36, len(self._std_fill_rows))
-        self._write_standard_rows(self._std_fill_rows, self._std_fill_at, end)
-        self._std_fill_at = end
-        if self._std_fill_at < len(self._std_fill_rows):
-            QTimer.singleShot(0, lambda gen=generation: self._fill_standards_batch(gen))
-            return
-        self._std_table.setUpdatesEnabled(True)
-        self._std_table.blockSignals(False)
-        self._finish_standards_table()
-        self._std_table_filling = False
+        try:
+            self._fill_standards()
+            self._finish_standards_table()
+        finally:
+            self._std_table_filling = False
 
     def _finish_standards_table(self):
         self._apply_standard_checks()
@@ -1604,42 +1596,15 @@ class TestDetailDialog(QDialog):
         if query:
             self._filter_standards(query)
 
-    def _ensure_equipment_table(self, *, immediate=False):
+    def _ensure_equipment_table(self):
         if self._eq_table_ready or self._eq_table_filling or not hasattr(self, "_eq_table"):
             return
-        rows = self._equipment_fill_rows()
-        if immediate or len(rows) <= 36:
-            self._eq_table_filling = True
-            try:
-                self._fill_equipments()
-                self._finish_equipment_table()
-            finally:
-                self._eq_table_filling = False
-            return
-        self._eq_fill_rows = rows
-        self._eq_fill_at = 0
-        self._eq_fill_gen += 1
-        generation = self._eq_fill_gen
         self._eq_table_filling = True
-        self._eq_table.blockSignals(True)
-        self._eq_table.setUpdatesEnabled(False)
-        self._eq_table.setRowCount(len(rows))
-        QTimer.singleShot(0, lambda gen=generation: self._fill_equipments_batch(gen))
-
-    def _fill_equipments_batch(self, generation):
-        if generation != self._eq_fill_gen or self._eq_table_ready or not self._eq_table_filling:
-            return
-        end = min(self._eq_fill_at + 36, len(self._eq_fill_rows))
-        self._write_equipment_rows(self._eq_fill_rows, self._eq_fill_at, end)
-        self._eq_fill_at = end
-        if self._eq_fill_at < len(self._eq_fill_rows):
-            QTimer.singleShot(0, lambda gen=generation: self._fill_equipments_batch(gen))
-            return
-        self._eq_table.setUpdatesEnabled(True)
-        self._eq_table.blockSignals(False)
-        self._refresh_eq_expiry()
-        self._finish_equipment_table()
-        self._eq_table_filling = False
+        try:
+            self._fill_equipments()
+            self._finish_equipment_table()
+        finally:
+            self._eq_table_filling = False
 
     def _finish_equipment_table(self):
         self._apply_equipment_checks()
@@ -1695,6 +1660,7 @@ class TestDetailDialog(QDialog):
         finally:
             self._eq_table.blockSignals(False)
         self._refresh_eq_expiry()
+        self._rebuild_eq_selection()
 
     def _filter_standards(self, query=""):
         for row in range(self._std_table.rowCount()):
@@ -2140,6 +2106,9 @@ class TestDetailDialog(QDialog):
 
     def _fill_result_desc_table(self, picked):
         self._collect_result_edits()
+        self._result_desc_pending.clear()
+        self._result_desc_timer.stop()
+        self._result_desc_editors.clear()
         self.result_desc_table.setRowCount(0)
         if not picked:
             return
@@ -2163,8 +2132,14 @@ class TestDetailDialog(QDialog):
             editor.setPlainText(text)
             self.result_desc_table.setCellWidget(row, 1, editor)
             editor.textChanged.connect(
-                lambda _text="", k=key: self._apply_result_desc_to_key(k)
+                lambda _text="", k=key: self._schedule_result_desc_sync(k)
             )
+            editor.installEventFilter(self)
+            self._result_desc_editors.add(editor)
+            viewport = editor.viewport()
+            if viewport is not None:
+                viewport.installEventFilter(self)
+                self._result_desc_editors.add(viewport)
             self.result_desc_table.setRowHeight(row, 56)
         rows = self.result_desc_table.rowCount()
         self.result_desc_table.setFixedHeight(min(56 * rows + 36, 220) if rows else 80)
@@ -2227,6 +2202,28 @@ class TestDetailDialog(QDialog):
         attr = "result_desc_en" if self._is_edit_en() else "result_desc"
         return _cell_text(getattr(self.node_data, attr, None))
 
+    def _schedule_result_desc_sync(self, key):
+        if key is None or self._result_desc_flushing:
+            return
+        self._result_desc_pending.add(key)
+        self._result_desc_timer.start(_RESULT_DESC_SYNC_MS)
+
+    def _flush_result_desc_sync(self):
+        if self._result_desc_flushing:
+            return
+        keys = list(self._result_desc_pending)
+        self._result_desc_pending.clear()
+        self._result_desc_flushing = True
+        try:
+            for key in keys:
+                self._apply_result_desc_to_key(key)
+        finally:
+            self._result_desc_flushing = False
+
+    def _flush_result_desc_now(self):
+        self._result_desc_timer.stop()
+        self._flush_result_desc_sync()
+
     def _apply_result_desc_to_key(self, key):
         """Push one standard's current 结果描述 onto that standard's sample rows."""
         if key is None:
@@ -2261,13 +2258,17 @@ class TestDetailDialog(QDialog):
                 widget.setCursorPosition(0)
 
     def _on_eq_item_changed(self, item):
-        if item and item.column() == 0:
-            data = item.data(Qt.UserRole) or {}
-            if item.checkState() == Qt.Checked and not _equipment_cal_start(data).isValid():
-                self._eq_table.blockSignals(True)
-                item.setCheckState(Qt.Unchecked)
-                self._eq_table.blockSignals(False)
-            self._refresh_eq_summary()
+        if not item or item.column() != 0:
+            return
+        data = item.data(Qt.UserRole) or {}
+        if item.checkState() == Qt.Checked and not _equipment_cal_start(data).isValid():
+            self._eq_table.blockSignals(True)
+            item.setCheckState(Qt.Unchecked)
+            self._eq_table.blockSignals(False)
+            return
+        if self._eq_table_ready:
+            self._note_eq_row(item.row())
+        self._refresh_eq_summary()
 
     def _on_eq_cell_clicked(self, row, col):
         if col == 0:
@@ -2304,13 +2305,22 @@ class TestDetailDialog(QDialog):
                     name_item.setData(_EQ_EXPIRED_ROLE, expired)
                     name_item.setData(_EQ_PREV_CYCLE_ROLE, prev_cycle and not expired)
                 cal_item = self._eq_table.item(row, 4)
+                cal_text = _equipment_report_valid_date(data, end)
                 if cal_item is not None:
-                    cal_item.setText(_equipment_report_valid_date(data, end))
+                    cal_item.setText(cal_text)
+                cached = None if self._eq_by_row is None else self._eq_by_row.get(row)
+                if cached is not None:
+                    cached.valid_date = cal_text
         finally:
             self._eq_table.blockSignals(False)
         self._eq_table.viewport().update()
 
     def eventFilter(self, obj, event):
+        if (
+            event.type() == QEvent.FocusOut
+            and obj in self._result_desc_editors
+        ):
+            self._flush_result_desc_now()
         if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Backspace, Qt.Key_Delete):
             date_edit = self._date_edit_from_event_target(obj)
             if date_edit is not None:
@@ -2393,30 +2403,56 @@ class TestDetailDialog(QDialog):
             valid_date=_equipment_report_valid_date(data, end),
         )
 
+    def _equipment_from_row(self, row):
+        chk = self._eq_table.item(row, 0)
+        data = (chk.data(Qt.UserRole) if chk else None) or {}
+        end = self._test_end_date()
+        code_item = self._eq_table.item(row, 1)
+        cal_item = self._eq_table.item(row, 4)
+        return TestEquipment(
+            name=_cell_text(data.get("设备名称")),
+            name_en=_cell_text(data.get("Equipment")),
+            code=(code_item.text().strip() if code_item else "")
+            or equipment_display_code(data),
+            model=_cell_text(data.get("型号")),
+            valid_date=(cal_item.text().strip() if cal_item else "")
+            or _equipment_report_valid_date(data, end),
+        )
+
+    def _rebuild_eq_selection(self):
+        selected = {}
+        table = getattr(self, "_eq_table", None)
+        if table is not None:
+            for row in range(table.rowCount()):
+                chk = table.item(row, 0)
+                if chk is None or chk.checkState() != Qt.Checked:
+                    continue
+                data = chk.data(Qt.UserRole) or {}
+                if not _equipment_cal_start(data).isValid():
+                    continue
+                selected[row] = self._equipment_from_row(row)
+        self._eq_by_row = selected
+
+    def _note_eq_row(self, row):
+        if self._eq_by_row is None:
+            self._rebuild_eq_selection()
+            return
+        chk = self._eq_table.item(row, 0)
+        if chk is None or chk.checkState() != Qt.Checked:
+            self._eq_by_row.pop(row, None)
+            return
+        data = chk.data(Qt.UserRole) or {}
+        if not _equipment_cal_start(data).isValid():
+            self._eq_by_row.pop(row, None)
+            return
+        self._eq_by_row[row] = self._equipment_from_row(row)
+
     def _selected_equipments(self):
         if not self._eq_table_ready:
             return [self._equipment_from_record(eq) for eq in self._eq_pick]
-        picked = []
-        end = self._test_end_date()
-        for row in range(self._eq_table.rowCount()):
-            chk = self._eq_table.item(row, 0)
-            if chk is None or chk.checkState() != Qt.Checked:
-                continue
-            data = chk.data(Qt.UserRole) or {}
-            if not _equipment_cal_start(data).isValid():
-                continue
-            code_item = self._eq_table.item(row, 1)
-            cal_item = self._eq_table.item(row, 4)
-            picked.append(TestEquipment(
-                name=_cell_text(data.get("设备名称")),
-                name_en=_cell_text(data.get("Equipment")),
-                code=(code_item.text().strip() if code_item else "")
-                or equipment_display_code(data),
-                model=_cell_text(data.get("型号")),
-                valid_date=(cal_item.text().strip() if cal_item else "")
-                or _equipment_report_valid_date(data, end),
-            ))
-        return picked
+        if self._eq_by_row is None:
+            self._rebuild_eq_selection()
+        return [self._eq_by_row[row] for row in sorted(self._eq_by_row)]
 
     def add_sample_row(
         self,
@@ -2503,6 +2539,7 @@ class TestDetailDialog(QDialog):
             table.setCellWidget(row, 3, combo_res)
         self._refresh_sample_summary()
         self._schedule_result_header_sync()
+        self._disarm_dialog_buttons()
 
     def _sync_sample_id(self, row, text, source_table):
         if self._sample_id_syncing:
@@ -2730,22 +2767,37 @@ class TestDetailDialog(QDialog):
 
     def apply_catalogs(self, standards, equipments, error=""):
         """Attach workbook rows after a background read. Safe if the dialog is open."""
+        env_text = self.txt_env_condition.text()
+        method_text = self.txt_std_method.text()
+        env_touched = self.txt_env_condition.isModified()
+        method_touched = self.txt_std_method.isModified()
         self.standards = list(standards or [])
         self.equipments = list(equipments or [])
         self._catalogs_pending = False
-        self._std_fill_gen += 1
-        self._eq_fill_gen += 1
         self._std_table_ready = False
         self._std_table_filling = False
         self._eq_table_ready = False
         self._eq_table_filling = False
+        self._eq_by_row = None
+        if hasattr(self, "_std_table"):
+            self._std_table.setEnabled(True)
+            self._std_table.blockSignals(False)
+        if hasattr(self, "_eq_table"):
+            self._eq_table.setEnabled(True)
+            self._eq_table.blockSignals(False)
         if error:
             QMessageBox.warning(self, "提示", error)
         self._restore_standards()
         self._restore_equipments()
-        if self.node_data.env_condition:
+        if env_touched:
+            self.txt_env_condition.setText(env_text)
+            self.txt_env_condition.setModified(True)
+        elif self.node_data.env_condition:
             self.txt_env_condition.setText(self.node_data.env_condition)
-        if self.node_data.test_method:
+        if method_touched:
+            self.txt_std_method.setText(method_text)
+            self.txt_std_method.setModified(True)
+        elif self.node_data.test_method:
             self.txt_std_method.setText(self.node_data.test_method)
         self._load_saved_samples()
         if self.drawer_std._expanded:
@@ -3104,6 +3156,7 @@ class TestDetailDialog(QDialog):
             self._data_table_preview_tables[ref.relative_path] = preview
         if len(self._data_table_drawers) == 1:
             self._data_table_drawers[0].set_expanded(True)
+        self._disarm_dialog_buttons()
 
     def _refresh_data_table_preview(self, ref: DataTableRef):
         focus = ref.relative_path
@@ -3545,6 +3598,7 @@ class TestDetailDialog(QDialog):
         return True
 
     def save_and_close(self):
+        self._flush_result_desc_now()
         if not self._apply_schedule_dates():
             return
         if hasattr(self, "note_panel"):

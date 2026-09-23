@@ -282,3 +282,41 @@ class BaseDataLoader:
             self._equipments_mtime = mtime
 
         return self.equipments_df.to_dict("records")
+
+    def adopt_standards(self, records, images, mtime) -> None:
+        """Install rows read in another process. Later loads reuse this cache."""
+        frame = pd.DataFrame(list(records or []))
+        if not frame.empty:
+            frame = frame.fillna("")
+        self.install_standards(frame, images, mtime)
+
+    def install_standards(self, frame, images, mtime) -> None:
+        """Store a frame already built off the UI thread."""
+        with self._load_lock:
+            self.standards_df = frame
+            self._standard_images = dict(images or {})
+            self._standards_mtime = mtime
+
+    def adopt_equipments(self, records, mtime) -> None:
+        """Install equipment rows read in another process."""
+        frame = pd.DataFrame(list(records or []))
+        if not frame.empty:
+            frame = frame.fillna("")
+        self.install_equipments(frame, mtime)
+
+    def install_equipments(self, frame, mtime) -> None:
+        """Store an equipment frame already built off the UI thread."""
+        with self._load_lock:
+            self.equipments_df = frame
+            self._equipments_mtime = mtime
+
+    def forget_cached_catalog(self, *, standards: bool = False, equipment: bool = False) -> None:
+        """Drop in-memory rows so the next load re-reads the local mirror."""
+        with self._load_lock:
+            if standards:
+                self.standards_df = None
+                self._standard_images = None
+                self._standards_mtime = None
+            if equipment:
+                self.equipments_df = None
+                self._equipments_mtime = None

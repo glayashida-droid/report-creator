@@ -5,6 +5,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from src.io.usage_stats import (
@@ -301,8 +302,13 @@ def test_main_window_starts_tracker_when_enabled(tmp_path, monkeypatch):
     win = MainWindow()
     win._prompt_tester_name = lambda **_kwargs: True
     win.show()
-    app.processEvents()
-    app.processEvents()
+    for _ in range(50):
+        app.processEvents()
+        worker = win._usage_flush_worker
+        pending = win._usage_flush_again or win._usage_flush_close
+        if worker is not None and not worker.isRunning() and not pending:
+            break
+        QTest.qWait(30)
     assert win._usage_tracker is not None
     assert (remote / "展玮鸿_日.csv").is_file()
     win._record_usage_report()

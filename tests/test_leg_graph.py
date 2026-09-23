@@ -2,7 +2,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtCore import QDate, QPoint
+from PySide6.QtCore import QDate, QPoint, Qt
+from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import QApplication, QComboBox, QMessageBox
 
 from src.io.test_photos import test_dir_key as leg_test_dir_key
@@ -10,7 +11,11 @@ from src.models.project_state import ProjectState, TestEquipment, TestLeg, TestN
 from src.ui.leg_graph import (
     LEG_CARD_WIDTH,
     PLACEHOLDER_TEST,
+    PRINT_COMBINED,
+    PRINT_SEPARATE,
     LegGraphArea,
+    TestNodeWidget,
+    ask_batch_print_mode,
     fill_test_combo,
     insert_index_for_y,
 )
@@ -91,6 +96,48 @@ def test_toolbar_save_load_use_detail_labels():
     area = LegGraphArea(ProjectState(project_id="P1"))
     assert area.btn_save.text() == "保存明细"
     assert area.btn_load_state.text() == "加载明细"
+
+
+def _wheel(widget, delta=-120):
+    pos = widget.rect().center()
+    return QWheelEvent(
+        pos,
+        widget.mapToGlobal(pos),
+        QPoint(0, 0),
+        QPoint(0, delta),
+        Qt.NoButton,
+        Qt.NoModifier,
+        Qt.ScrollUpdate,
+        False,
+    )
+
+
+def test_node_test_combo_ignores_wheel():
+    _app()
+    node = TestNode(test_name="绝缘电阻")
+    widget = TestNodeWidget(node, ["绝缘电阻", "跳跃启动", "测试前五点功能检测"])
+    widget.show()
+    _app().processEvents()
+    combo = widget.combo
+    assert combo.currentText() == "绝缘电阻"
+    index = combo.currentIndex()
+
+    event = _wheel(combo)
+    combo.wheelEvent(event)
+    assert not event.isAccepted()
+    assert combo.currentIndex() == index
+    assert combo.currentText() == "绝缘电阻"
+    assert node.test_name == "绝缘电阻"
+
+    line = combo.lineEdit()
+    line.setFocus()
+    _app().processEvents()
+    delivered = _wheel(line)
+    QApplication.sendEvent(line, delivered)
+    assert combo.currentIndex() == index
+    assert combo.currentText() == "绝缘电阻"
+    assert node.test_name == "绝缘电阻"
+    widget.close()
 
 
 def test_combo_keeps_typed_name_without_custom_option():
@@ -823,14 +870,14 @@ def test_batch_print_blocked_when_any_node_incomplete():
     area.reload_from_state()
     with (
         patch.object(QMessageBox, "warning") as mock_warn,
-        patch.object(QMessageBox, "question") as mock_q,
+        patch("src.ui.leg_graph.ask_batch_print_mode") as mock_mode,
         patch("src.ui.leg_graph.export_node_original_record") as mock_export,
     ):
         area.leg_widgets[0].on_batch_print()
         mock_warn.assert_called_once()
         assert mock_warn.call_args[0][1] == "提示"
         assert mock_warn.call_args[0][2] == "🙋‍♂️尚有试验未维护完整，请全部维护后打印"
-        mock_q.assert_not_called()
+        mock_mode.assert_not_called()
         mock_export.assert_not_called()
 
 
@@ -841,17 +888,35 @@ def test_batch_print_blocked_when_leg_empty():
     area.add_leg()
     with (
         patch.object(QMessageBox, "warning") as mock_warn,
-        patch.object(QMessageBox, "question") as mock_q,
+        patch("src.ui.leg_graph.ask_batch_print_mode") as mock_mode,
         patch("src.ui.leg_graph.export_node_original_record") as mock_export,
     ):
         area.leg_widgets[0].on_batch_print()
         mock_warn.assert_called_once()
         assert "尚有试验未维护完整" in mock_warn.call_args[0][2]
-        mock_q.assert_not_called()
+        mock_mode.assert_not_called()
         mock_export.assert_not_called()
 
 
-def test_batch_print_confirm_cancel_does_not_export():
+def test_ask_batch_print_mode_offers_combined_separate_and_cancel():
+    _app()
+    seen = {}
+
+    def fake_exec(box):
+        seen["texts"] = [button.text() for button in box.buttons()]
+        seen["default"] = box.defaultButton().text()
+        seen["text"] = box.text()
+        return 0
+
+    with patch.object(QMessageBox, "exec", fake_exec):
+        mode = ask_batch_print_mode(None, "Leg 2")
+    assert mode is None
+    assert seen["texts"] == ["整合打印", "分别打印", "取消"]
+    assert seen["default"] == "取消"
+    assert seen["text"] == "打印整条Leg 2的所有原始记录"
+
+
+def test_batch_print_cancel_does_not_export():
     _app()
     state = ProjectState(
         project_id="P1",
@@ -861,15 +926,16 @@ def test_batch_print_confirm_cancel_does_not_export():
     area.reload_from_state()
     with (
         patch.object(QMessageBox, "warning") as mock_warn,
-        patch.object(QMessageBox, "question", return_value=QMessageBox.No) as mock_q,
+        patch("src.ui.leg_graph.ask_batch_print_mode", return_value=None) as mock_mode,
         patch("src.ui.leg_graph.export_node_original_record") as mock_export,
+        patch("src.ui.leg_graph.export_leg_original_record") as mock_combined,
     ):
         area.leg_widgets[0].on_batch_print()
         mock_warn.assert_not_called()
-        mock_q.assert_called_once()
-        assert mock_q.call_args[0][1] == "批量打印TR"
-        assert mock_q.call_args[0][2] == "🙋‍♀️是否打印整条Leg 2的所有原始记录？"
+        mock_mode.assert_called_once()
+        assert mock_mode.call_args[0][1] == "Leg 2"
         mock_export.assert_not_called()
+        mock_combined.assert_not_called()
 
 
 def test_batch_print_confirmed_exports_each_node_in_order(tmp_path):
@@ -892,12 +958,14 @@ def test_batch_print_confirmed_exports_each_node_in_order(tmp_path):
 
     with (
         patch.object(QMessageBox, "warning") as mock_warn,
-        patch.object(QMessageBox, "question", return_value=QMessageBox.Yes),
+        patch("src.ui.leg_graph.ask_batch_print_mode", return_value=PRINT_SEPARATE),
         patch.object(QMessageBox, "information") as mock_info,
         patch("src.ui.leg_graph.export_node_original_record", side_effect=_fake_export) as mock_export,
+        patch("src.ui.leg_graph.export_leg_original_record") as mock_combined,
     ):
         area.leg_widgets[0].on_batch_print()
         mock_warn.assert_not_called()
+        mock_combined.assert_not_called()
         assert mock_export.call_count == 2
         assert written == ["高温试验", "沙尘试验"]
         assert mock_export.call_args_list[0].kwargs["template_path"]
@@ -905,6 +973,91 @@ def test_batch_print_confirmed_exports_each_node_in_order(tmp_path):
         assert "已生成 2 份原始记录" in info_text
         assert "高温试验.docx" in info_text
         assert "沙尘试验.docx" in info_text
+
+
+def test_batch_print_combined_exports_one_file_in_card_order(tmp_path):
+    _app()
+    first = _complete_node("高温试验")
+    second = _complete_node("沙尘试验")
+    state = ProjectState(
+        project_id="P1",
+        project_path=str(tmp_path),
+        legs=[TestLeg(leg_id="L1", leg_name="Leg 1", nodes=[first, second])],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+
+    def _fake_combined(records, *, template_path):
+        assert [item.test_item for item in records] == ["高温试验", "沙尘试验"]
+        assert template_path
+        return tmp_path / "3.测试组" / "A1_Leg_1_原始记录.docx"
+
+    seen = {}
+
+    def fake_exec(box):
+        seen["texts"] = [button.text() for button in box.buttons()]
+        seen["text"] = box.text()
+        return 0
+
+    with (
+        patch.object(QMessageBox, "warning") as mock_warn,
+        patch("src.ui.leg_graph.ask_batch_print_mode", return_value=PRINT_COMBINED),
+        patch.object(QMessageBox, "information") as mock_info,
+        patch.object(QMessageBox, "exec", fake_exec),
+        patch("src.ui.leg_graph.export_node_original_record") as mock_export,
+        patch("src.ui.leg_graph.export_leg_original_record", side_effect=_fake_combined),
+        patch("src.ui.leg_graph._open_exported_record") as mock_open,
+    ):
+        area.leg_widgets[0].on_batch_print()
+        mock_warn.assert_not_called()
+        mock_export.assert_not_called()
+        mock_info.assert_not_called()
+        mock_open.assert_not_called()
+        assert "已生成 1 份原始记录" in seen["text"]
+        assert "A1_Leg_1_原始记录.docx" in seen["text"]
+        assert "打开原始记录" in seen["texts"]
+        assert "打开所在文件夹" in seen["texts"]
+        assert "OK" in seen["texts"]
+
+
+def test_combined_print_open_buttons(tmp_path):
+    _app()
+    state = ProjectState(
+        project_id="P1",
+        project_path=str(tmp_path),
+        legs=[TestLeg(leg_id="L1", leg_name="Leg 1", nodes=[_complete_node("高温试验")])],
+    )
+    area = LegGraphArea(state)
+    area.reload_from_state()
+    out = tmp_path / "3.测试组" / "A1_Leg_1_原始记录.docx"
+
+    def _exec_clicking(label):
+        def fake_exec(box):
+            for button in box.buttons():
+                if button.text() == label:
+                    button.click()
+                    return 0
+            return 0
+
+        return fake_exec
+
+    with (
+        patch("src.ui.leg_graph.ask_batch_print_mode", return_value=PRINT_COMBINED),
+        patch("src.ui.leg_graph.export_leg_original_record", return_value=out),
+        patch("src.ui.leg_graph._open_exported_record") as mock_open,
+        patch.object(QMessageBox, "exec", _exec_clicking("打开原始记录")),
+    ):
+        area.leg_widgets[0].on_batch_print()
+        mock_open.assert_called_once_with(out, reveal=False)
+
+    with (
+        patch("src.ui.leg_graph.ask_batch_print_mode", return_value=PRINT_COMBINED),
+        patch("src.ui.leg_graph.export_leg_original_record", return_value=out),
+        patch("src.ui.leg_graph._open_exported_record") as mock_open,
+        patch.object(QMessageBox, "exec", _exec_clicking("打开所在文件夹")),
+    ):
+        area.leg_widgets[0].on_batch_print()
+        mock_open.assert_called_once_with(out, reveal=True)
 
 
 if __name__ == "__main__":

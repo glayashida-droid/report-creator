@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.io.preload_child import isolated_list_board_rows
 from src.io.project_board import (
     BOARD_COLUMNS,
     BOARD_STATUS_ALL,
@@ -223,10 +224,23 @@ class BoardRowsWorker(QThread):
     def run(self) -> None:
         run_in_background()
         when = date.today()
+        from src.io.cancellable_process import ProcessCancelled
+
         try:
-            rows = list_board_rows(self._data_root, today=when)
+            rows = isolated_list_board_rows(
+                self._data_root, today=when, cancelled=self.isInterruptionRequested
+            )
+        except ProcessCancelled:
+            return
         except Exception:
-            rows = []
+            if self.isInterruptionRequested():
+                return
+            try:
+                rows = list_board_rows(self._data_root, today=when)
+            except Exception:
+                rows = []
+        if self.isInterruptionRequested():
+            return
         self.loaded.emit(rows, when)
 
 
@@ -249,6 +263,7 @@ class ProjectBoardPage(QWidget):
         self._cached_today = None
         self._preload_gen = 0
         self._preload_worker = None
+        self._background_stop = False
         self._build()
 
     def _build(self):
@@ -362,7 +377,7 @@ class ProjectBoardPage(QWidget):
         save_board_intranet_year(year, self._data_root)
 
     def _open_project_folder(self, project_id: str) -> None:
-        if self._lookup_busy:
+        if self._background_stop or self._lookup_busy:
             return
         year = self._year_value()
         save_board_intranet_year(year, self._data_root)
@@ -429,9 +444,19 @@ class ProjectBoardPage(QWidget):
         self._cached_rows = None
         self._cached_today = None
 
+    def request_stop(self) -> None:
+        """Ask board threads to finish. The window waits until they have."""
+        self._background_stop = True
+        self._lookup_timer.stop()
+        worker = self._preload_worker
+        if worker is not None:
+            worker.requestInterruption()
+        for worker in list(self._lookup_workers):
+            worker.requestInterruption()
+
     def preload(self) -> None:
         """Fill the row cache in the background. Safe to call more than once."""
-        if self._cached_rows is not None:
+        if self._background_stop or self._cached_rows is not None:
             return
         worker = self._preload_worker
         if worker is not None and worker.isRunning():

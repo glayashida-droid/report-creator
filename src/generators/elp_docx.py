@@ -140,11 +140,36 @@ def clear_first_line_indent(paragraph) -> None:
 
 
 def fill_result_slot(cell, text: str) -> None:
-    """Write 试验结果 and clear the template's first-line indent."""
+    """Write 试验结果. Drop the template's exact row height so the row follows the text."""
     if not set_blue_portion(cell, text):
         force_black_text(cell, text)
-    for paragraph in cell.paragraphs:
+    for paragraph in list(cell.paragraphs):
         clear_first_line_indent(paragraph)
+    _drop_empty_paragraphs(cell)
+    _unlock_row_height(cell)
+
+
+def _unlock_row_height(cell) -> None:
+    tr = cell._tc.getparent()
+    if tr is None:
+        return
+    trPr = tr.find(qn("w:trPr"))
+    if trPr is None:
+        return
+    for height in list(trPr.findall(qn("w:trHeight"))):
+        trPr.remove(height)
+
+
+def _drop_empty_paragraphs(cell) -> None:
+    """Remove template leftover paragraphs (the 2# / 3# stubs) after the text is written."""
+    for paragraph in list(cell.paragraphs):
+        if len(cell.paragraphs) <= 1:
+            return
+        if (paragraph.text or "").strip():
+            continue
+        parent = paragraph._p.getparent()
+        if parent is not None:
+            parent.remove(paragraph._p)
 
 
 def set_blue_portion(cell, text: str) -> bool:
